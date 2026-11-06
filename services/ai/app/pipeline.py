@@ -122,12 +122,12 @@ def render(
     depth: np.ndarray | None = None,
     hair_prob: np.ndarray | None = None,
 ) -> np.ndarray:
-    """rgb8: HxWx3 uint8 sRGB -> HxWx3 uint8 sRGB.
+    """rgb8: HxWx3 uint8 (or uint16, e.g. a demosaiced camera RAW) sRGB -> HxWx3 uint8 sRGB.
 
     depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
     hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
     """
-    src = rgb8.astype(np.float32) / 255.0
+    src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
     h, w = src.shape[:2]
     L = float(max(h, w))
     low0 = blur(src, S0 * L)

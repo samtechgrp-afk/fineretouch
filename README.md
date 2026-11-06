@@ -4,8 +4,9 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 
 ## What works today
 
-- **Batch import** of JPEG, PNG, WebP and AVIF, with a filmstrip, multi-select (Ctrl/Cmd-click, Shift-click) and keyboard navigation.
+- **Batch import** of JPEG, PNG, WebP, AVIF, TIFF and **camera RAW** (Canon CR2/CR3, Nikon NEF, Sony ARW, Fujifilm RAF, Adobe DNG, Olympus ORF, Panasonic RW2, Pentax PEF), with a filmstrip, multi-select (Ctrl/Cmd-click, Shift-click) and keyboard navigation.
 - **Real-time GPU preview** (WebGL2) on a 2560 px proxy: only one shader pass runs per slider move.
+- **RAW workflow:** the browser pulls each RAW's embedded full-size camera JPEG and EXIF in milliseconds (no demosaic), shows a format badge and camera/ISO/shutter tooltip in the filmstrip, and AI-service or cloud exports develop the original from 16-bit sensor data with LibRaw (camera or Kelvin white balance, highlight recovery, AHD/DHT/PPG demosaic, sRGB/Adobe RGB/ProPhoto).
 - **AI face analysis** (MediaPipe 478-point face mesh) drives face-aware masks for skin, eyes, under-eyes and mouth. Without the AI service, colour-based skin detection still works.
 - **Skin retouch:** frequency-separation smoothing with texture preservation, blemish removal, and even skin tone.
 - **1x / 2x / 3x skin & blemish boost:** recursive guided-filter clean-up of stubborn dark spots, acne and redness that keeps pore texture.

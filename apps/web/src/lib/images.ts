@@ -5,8 +5,18 @@
  * for the viewport, and lazily built face masks. The store only keeps ids.
  */
 
+import { isRawFileName, parseRawFile, type RawExif, type RawFormat } from './rawParser';
+
 export const PROXY_LONG_EDGE = 2560;
 const THUMB_LONG_EDGE = 320;
+
+/** What the editor knows about a camera RAW original. */
+export interface RawInfo {
+  format: RawFormat;
+  /** Badge text, e.g. "CR3". */
+  label: string;
+  exif: RawExif;
+}
 
 export interface LoadedImage {
   file: File;
@@ -14,9 +24,12 @@ export interface LoadedImage {
   height: number;
   proxy: ImageBitmap;
   thumbUrl: string;
+  raw: RawInfo | null;
 }
 
 const files = new Map<string, File>();
+/** For RAW originals: the embedded camera JPEG (a lazy slice of the file) and its orientation. */
+const rawPreviews = new Map<string, { blob: Blob; orientation: number }>();
 const proxies = new Map<string, ImageBitmap>();
 const masks = new Map<string, Uint8Array>();
 const hairRois = new Map<string, Uint8Array>();
@@ -32,6 +45,59 @@ const depths = new Map<string, DepthData>();
 
 export const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/bmp', 'image/tiff'];
 
+/** True for files the importer takes: web formats, TIFF and camera RAW. */
+export function isImportable(f: File): boolean {
+  return ACCEPTED_TYPES.includes(f.type) || /\.(jpe?g|png|webp|avif|bmp|tiff?)$/i.test(f.name) || isRawFileName(f.name);
+}
+
+/** Apply an EXIF orientation (1..8) that the browser did not apply itself. Closes `bmp`. */
+export async function orientBitmap(bmp: ImageBitmap, orientation: number): Promise<ImageBitmap> {
+  if (orientation <= 1 || orientation > 8) return bmp;
+  const { width: w, height: h } = bmp;
+  const swap = orientation >= 5;
+  const c = new OffscreenCanvas(swap ? h : w, swap ? w : h);
+  const ctx = c.getContext('2d')!;
+  const t: Record<number, [number, number, number, number, number, number]> = {
+    2: [-1, 0, 0, 1, w, 0],
+    3: [-1, 0, 0, -1, w, h],
+    4: [1, 0, 0, -1, 0, h],
+    5: [0, 1, 1, 0, 0, 0],
+    6: [0, 1, -1, 0, h, 0],
+    7: [0, -1, -1, 0, h, w],
+    8: [0, -1, 1, 0, 0, w],
+  };
+  ctx.setTransform(...t[orientation]);
+  ctx.drawImage(bmp, 0, 0);
+  bmp.close();
+  return c.transferToImageBitmap();
+}
+
+/**
+ * Decode any importable file to an upright bitmap. Camera RAW files decode their embedded
+ * full-size camera JPEG (see rawParser); full 16-bit development happens on the AI service.
+ */
+export async function decodeUpright(file: File): Promise<{ bitmap: ImageBitmap; raw: RawInfo | null; preview: { blob: Blob; orientation: number } | null }> {
+  if (!isRawFileName(file.name)) return { bitmap: await createImageBitmap(file, { imageOrientation: 'from-image' }), raw: null, preview: null };
+  const r = await parseRawFile(file);
+  const bmp = await createImageBitmap(r.preview, { imageOrientation: 'from-image' });
+  return {
+    bitmap: await orientBitmap(bmp, r.orientation),
+    raw: { format: r.format, label: r.label, exif: r.exif },
+    preview: { blob: r.preview, orientation: r.orientation },
+  };
+}
+
+/** Full-size upright bitmap of an imported photo (for GPU export). */
+export async function decodeOriginal(id: string): Promise<ImageBitmap> {
+  const p = rawPreviews.get(id);
+  if (p) return orientBitmap(await createImageBitmap(p.blob, { imageOrientation: 'from-image' }), p.orientation);
+  const f = files.get(id);
+  if (!f) throw new Error('Photo is no longer loaded');
+  return createImageBitmap(f, { imageOrientation: 'from-image' });
+}
+
+export const isRawPhoto = (id: string) => rawPreviews.has(id);
+
 export function newId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
     ? crypto.randomUUID().replace(/-/g, '').slice(0, 16)
@@ -45,7 +111,7 @@ export function fitSize(w: number, h: number, longEdge: number): [number, number
 
 export async function loadImage(id: string, file: File): Promise<LoadedImage> {
   // createImageBitmap applies EXIF orientation by default in current browsers.
-  const full = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const { bitmap: full, raw, preview } = await decodeUpright(file);
   try {
     const [pw, ph] = fitSize(full.width, full.height, PROXY_LONG_EDGE);
     const proxy = await createImageBitmap(full, { resizeWidth: pw, resizeHeight: ph, resizeQuality: 'high' });
@@ -59,7 +125,8 @@ export async function loadImage(id: string, file: File): Promise<LoadedImage> {
     const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error('thumb'))), 'image/jpeg', 0.8));
     files.set(id, file);
     proxies.set(id, proxy);
-    return { file, width: full.width, height: full.height, proxy, thumbUrl: URL.createObjectURL(blob) };
+    if (preview) rawPreviews.set(id, preview);
+    return { file, width: full.width, height: full.height, proxy, thumbUrl: URL.createObjectURL(blob), raw };
   } finally {
     full.close();
   }
@@ -86,6 +153,7 @@ export function forgetImage(id: string) {
   proxies.get(id)?.close();
   proxies.delete(id);
   files.delete(id);
+  rawPreviews.delete(id);
   masks.delete(id);
   hairRois.delete(id);
   const d = depths.get(id);

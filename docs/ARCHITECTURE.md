@@ -112,6 +112,15 @@ Max blur radius is `blurRadius/100 × 2 % of the long edge × bokehMultiplier/10
 
 **Style sync.** A reference photo is measured once (`StyleProfile`). *Exact palette* stores the reference statistics in `colorMatch`; the renderer derives the 3×3 transfer from each photo's own statistics at render time, so one patch works for a whole shoot (and for batch jobs). Clipped pixels (blown studio white, crushed black) are left out of the statistics and each tone-curve knot moves at most 25 L\*, so a white-backdrop reference re-grades instead of blowing out the photo. *Editable sliders* expresses the same intent through exposure, contrast, temperature, tint and saturation. Both modes also map retouch intensity: smoother reference skin raises smoothing/blemish removal (and switches to 2x when much smoother); a crisper reference raises sharpening. *Sync style to all* applies it to every photo in the shoot.
 
+### 2b. Camera RAW (v0.3)
+
+RAW support is split by cost. Demosaicing a 24-100 MP Bayer mosaic is seconds of work per file, too slow for importing a card into the filmstrip, so the browser never demosaics.
+
+- **Browser** (`apps/web/src/lib/rawParser.ts`): magic-byte detection, then a structural walk that reads only headers through `Blob.slice` — TIFF IFD chains and SubIFDs for CR2/NEF/ARW/DNG/ORF/RW2/PEF (`JPEGInterchangeFormat`, JPEG strips, RW2 `JpgFromRaw`), the ISOBMFF track-1 sample and `PRVW` box for CR3, the header pointer for RAF. Every candidate's JPEG frame header is probed and lossless JPEG (CR2/DNG sensor data, which browsers cannot decode) is rejected; the largest baseline/progressive frame wins, with a whole-file scan as the fallback for damaged or maker-note-only files. The preview is returned as a slice of the original `File` (no copy), so importing hundreds of RAWs costs a few ms of parsing each plus the JPEG decode. EXIF (camera, lens, ISO, shutter, aperture, focal length, colour space, orientation) comes from IFD0 + Exif IFD, Canon's `CMT1`/`CMT2` boxes, or the preview's own APP1. The RAW's orientation is applied with a canvas transform unless the preview carries its own. The viewport, analysis, depth and style sync all work on that preview, and the GPU export uses it too (8-bit, camera rendering; the export dialog says so).
+- **AI service** (`services/ai/app/raw_engine.py`): `decode_camera_raw` runs LibRaw through `rawpy` and returns an oriented HxWx3 `uint16` array. White balance is applied to linear sensor values: as-shot camera multipliers, daylight, or a Kelvin/tint target turned into multipliers through the camera's XYZ→camera matrix (Planckian xy from Kim et al.; for DNG the inverse of LibRaw's camera→sRGB matrix stacked on the daylight multipliers). Options: demosaic (AHD default, DHT, PPG, VNG, DCB, AAHD, linear), highlight mode (clip, ignore, blend, reconstruct), output space (sRGB, Adobe RGB, ProPhoto with their transfer curves), half-size decoding when the requested size is at most half the sensor. `imageio.decode_hq` feeds the 16-bit array straight into `pipeline.render` (which accepts `uint16`), while detectors get an 8-bit copy. A damaged file falls back to the embedded preview (`source="embedded_preview"`, with a warning), and an unreadable one to a structured grey placeholder (`ok=False`); HTTP endpoints turn the latter into 415 instead of rendering grey.
+- **Upload path:** RAW originals upload with a stable `image/x-…` content type (browsers usually report an empty type) and up to 400 MB; the worker is format agnostic because the AI service detects the container from the bytes.
+- **CR4:** Canon has not published a CR4 format. The extension is accepted so nothing on a card is rejected by name, but such a file is opened only if its bytes are one of the supported containers; otherwise the import reports it as unreadable.
+
 **AI assist.**
 - *Auto Retouch* measures the photo (same profile) and sets damped corrections toward a well-exposed portrait target plus skin work scaled to the measured skin texture and eye/teeth work when a face exists.
 - *Smart Sync* copies the active photo's edits to the selection (or all) but compensates exposure, temperature and tint for the difference between each original and the hero original, so a shoot in changing light lands on one look instead of copying the same numbers.
@@ -206,6 +215,8 @@ Keyboard: `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` redo, `Ctrl/Cmd+Shift+C/V` copy/
 | POST | `/v1/style/profile` | multipart `file` | `StyleProfile` |
 | POST | `/v1/style/sync` | multipart `reference`, `targets` (repeated, ≤200), `mode` (`palette`/`sliders`), `amount` | `{reference, targets: [{name, profile, adjustments}]}` (patches validate as `Adjustments`) |
 | POST | `/v1/render` | multipart `file`, `adjustments` (JSON), `format`, `quality`, `maxLongEdge` | encoded image |
+| POST | `/v1/raw/metadata` | multipart `file` (camera RAW) | `{format, make, model, lens, iso, exposure_time, shutter, f_number, focal_length, orientation, width, height, …}` |
+| POST | `/v1/raw/preview` | multipart `file`, `maxLongEdge`, `mode` (`embedded`/`demosaic`), `quality` | JPEG; `X-Raw-Source` header |
 | POST | `/v1/render-object` | JSON `{sourceKey, outputKey, adjustments, output}` | `{outputKey, bytes, ms, cull}`; reads/writes object storage |
 
 Interactive docs at `http://localhost:8000/docs` when running.
@@ -283,7 +294,7 @@ FINERETOUCH_FACE_FIXTURE=/path/to/portrait.jpg pytest   # also checks real landm
 ## 8. Security and limits
 
 - Uploads are namespaced by user (`uploads/{userId}/…`); batch requests and the worker both reject source keys outside that prefix or containing `..`. Batch status is only returned to the user who created it.
-- Presigned URLs expire after 15 minutes (upload) and 1 hour (download). Uploads are limited to 150 MB and image MIME types; batches to 5,000 items.
+- Presigned URLs expire after 15 minutes (upload) and 1 hour (download). Uploads are limited to 400 MB and image or camera RAW content types; batches to 5,000 items.
 - The AI service validates every adjustment against the shared ranges, caps decoded pixels (`Image.MAX_IMAGE_PIXELS`) and upload size (`MAX_UPLOAD_MB`), and restricts CORS to `CORS_ORIGINS`.
 - **Auth:** the gateway currently identifies browsers with an anonymous `httpOnly` cookie (`lib/server/session.ts`). Swap `userId()` for a real provider (Auth.js, Clerk, Supabase Auth) before exposing the cloud endpoints publicly. The AI service should then sit on a private network or require a service token.
 

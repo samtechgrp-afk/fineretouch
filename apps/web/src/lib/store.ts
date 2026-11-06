@@ -20,6 +20,7 @@ import {
   type StyleSyncMode,
 } from '@fineretouch/shared';
 import { create } from 'zustand';
+import type { RawInfo } from './images';
 
 export const HISTORY_LIMIT = 100;
 
@@ -67,6 +68,8 @@ export interface Photo {
   profile: StyleProfile | null;
   depthState: DepthState;
   rejected: boolean;
+  /** Camera RAW original: format, badge label and EXIF (null for JPEG/PNG/...). */
+  raw?: RawInfo | null;
 }
 
 export interface ViewState {
@@ -90,7 +93,7 @@ export interface EditorState {
   aiOnline: boolean | null;
   styleSync: StyleSyncState;
 
-  addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'>>): void;
+  addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'> & Partial<Pick<Photo, 'raw'>>>): void;
   removePhotos(ids: string[]): void;
   /** Reorder a subset of photos (e.g. back to file order after a parallel import). */
   sortPhotos(ids: string[]): void;

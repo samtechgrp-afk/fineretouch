@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { pool, renderOnServer } from '@/lib/ai';
 import { cloudAvailable, runCloudBatch } from '@/lib/cloud';
 import { downloadBlob, exportName, renderFullRes, zipBlobs, type ExportOptions } from '@/lib/export';
-import { getFile } from '@/lib/images';
+import { decodeOriginal, getFile, isRawPhoto } from '@/lib/images';
 import { useEditor } from '@/lib/store';
 import { isFlagged } from './Filmstrip';
 
@@ -71,7 +71,7 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
         const blob =
           engine === 'server'
             ? await renderOnServer(file, p.adjustments, opts)
-            : await renderFullRes(file, p.adjustments, { id, analysis: p.analysis, sourceStats: p.analysis?.colorStats ?? p.localStats }, opts);
+            : await renderFullRes(() => decodeOriginal(id), p.adjustments, { id, analysis: p.analysis, sourceStats: p.analysis?.colorStats ?? p.localStats }, opts);
         out.push({ name: exportName(p.name, opts.format, used), blob });
         setStatus({ label: 'Rendering full resolution', done: ++done, total: ids.length });
       });
@@ -132,6 +132,11 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
             disabled={{ server: !aiOnline, cloud: !cloud }}
           />
         </Field>
+        {engine === 'browser' && ids.some(isRawPhoto) && (
+          <p className="text-xs text-ink-400">
+            RAW files export from the camera&apos;s embedded JPEG on this device. Choose the AI service or Cloud batch to develop them from the full 16-bit sensor data.
+          </p>
+        )}
         {status && (
           <div aria-live="polite">
             <div className="mb-1 flex justify-between text-xs text-ink-300">

@@ -41,12 +41,13 @@ export const EXT = { jpeg: 'jpg', png: 'png', webp: 'webp' } as const;
  * run once at the original size (or the largest texture the GPU allows).
  */
 export async function renderFullRes(
-  file: File,
+  /** Upright full-size bitmap of the original (see decodeOriginal; RAW uses its embedded JPEG). */
+  loadSource: () => Promise<ImageBitmap>,
   adjustments: Adjustments,
   ctx: { id: string; analysis: ImageAnalysis | null; sourceStats: ColorStats | null },
   opts: ExportOptions,
 ): Promise<Blob> {
-  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const bmp = await loadSource();
   const canvas = new OffscreenCanvas(1, 1);
   const renderer = new Renderer(canvas);
   try {

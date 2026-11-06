@@ -2,6 +2,7 @@
 
 import type { Adjustments, BatchProgress } from '@fineretouch/shared';
 import { pool } from './ai';
+import { uploadContentType } from './rawParser';
 
 export async function cloudAvailable(): Promise<boolean> {
   try {
@@ -37,7 +38,7 @@ export async function runCloudBatch(
     await fetch('/api/uploads', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ files: items.map((i) => ({ id: i.id, type: i.file.type, size: i.file.size })) }),
+      body: JSON.stringify({ files: items.map((i) => ({ id: i.id, type: uploadContentType(i.file), size: i.file.size })) }),
       signal,
     }),
   );
@@ -45,7 +46,7 @@ export async function runCloudBatch(
   let uploaded = 0;
   await pool(uploads, 4, async (u) => {
     const item = byId.get(u.id)!;
-    const res = await fetch(u.url, { method: 'PUT', body: item.file, headers: { 'content-type': item.file.type }, signal });
+    const res = await fetch(u.url, { method: 'PUT', body: item.file, headers: { 'content-type': uploadContentType(item.file) }, signal });
     if (!res.ok) throw new Error(`Upload failed for ${item.file.name} (${res.status})`);
     onProgress('upload', ++uploaded, uploads.length);
   });
