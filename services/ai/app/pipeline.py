@@ -2,8 +2,13 @@
 apps/web/src/engine/shaders.ts; any change to one must be mirrored in the other.
 
 Stages (all on float32 sRGB in [0, 1]):
-  1. Three Gaussian bands at radii proportional to the long edge (s0 < s1 < s2).
-  2. Skin probability (YCbCr box) gated by the face-oval mask from landmarks.
+  1. Three Gaussian bands at radii proportional to the long edge (s0 < s1 < s2). The skin
+     stages cap s1/s2 at a share of the face width (TONE_SIGMA_FACE / BASE_SIGMA_FACE), which
+     only binds when the face is small in the frame (full-length and group shots), and run on
+     the skin's bounding box only. The preview keeps long-edge radii.
+  2. Skin probability (YCbCr box) gated by the face-oval mask from landmarks, extended up to
+     the hairline and gated by the person's own skin colour (face_skin_likelihood), which also
+     keeps braids and hair lying across the face out.
   3-4. Natural retouch (retouch_engine.natural_skin_retouch):
      spot healing first (acne, pimples and dark spots found by multi-scale LoG are
      inpainted in the tone layer and re-textured from healthy skin, one at a time; the
@@ -36,6 +41,7 @@ from .color_engine import apply_color_engine
 from .retouch_engine import (
     apply_boosted_skin_retouch,
     apply_depth_bokeh,
+    faces_in_crop,
     natural_skin_retouch,
     remove_stray_hairs,
     skin_tone_guard,
@@ -43,6 +49,13 @@ from .retouch_engine import (
 from .schemas import Adjustments, ColorStats, FaceAnalysis
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
+# Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
+# 30-45% of the long edge and S1/S2 already sit below the caps; in a full-length or group shot
+# the long-edge radii would be several times the size of a cheek and flatten facial shading.
+TONE_SIGMA_FACE, BASE_SIGMA_FACE = 0.012, 0.036
+# The landmark oval stops at mid-forehead: raise its top by this share of its half-height to
+# reach the hairline, keeping only pixels that match the face's own skin colour.
+FOREHEAD_LIFT = 0.4
 LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
 
@@ -89,6 +102,8 @@ class FaceMasks:
     under_eye: np.ndarray
     mouth: np.ndarray
     has_face: bool
+    forehead: np.ndarray | None = None  # upper forehead above the landmark oval (gate by colour)
+    face_width: float = 0.0  # widest face, px
 
 
 def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
@@ -97,6 +112,7 @@ def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
     eyes = np.zeros((h, w), np.float32)
     under = np.zeros((h, w), np.float32)
     mouth = np.zeros((h, w), np.float32)
+    forehead = np.zeros((h, w), np.float32)
     if not faces:
         return FaceMasks(skin, eyes, under, mouth, False)
 
@@ -107,7 +123,14 @@ def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
     for f in faces:
         face_w = max(face_w, f.box[2] * w)
         r = f.regions
-        cv2.fillPoly(skin, [poly(r.faceOval)], 1.0)
+        oval = poly(r.faceOval)
+        cv2.fillPoly(skin, [oval], 1.0)
+        if len(oval) >= 3:
+            cy = float(oval[:, 1].mean())
+            lifted = oval.astype(np.float32).copy()
+            up = lifted[:, 1] < cy
+            lifted[up, 1] = cy - (cy - lifted[up, 1]) * (1.0 + FOREHEAD_LIFT)
+            cv2.fillPoly(forehead, [np.round(lifted).astype(np.int32)], 1.0)
         cutouts = [p for p in (r.leftEye, r.rightEye, r.lips, r.leftBrow, r.rightBrow) if len(p) >= 3]
         if cutouts:
             pts = [poly(p) for p in cutouts]
@@ -118,13 +141,98 @@ def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
             if len(region) >= 3:
                 cv2.fillPoly(canvas, [poly(region)], 1.0)
 
+    # Overlap the oval by a few blur radii so the two feathered masks meet without a seam.
+    inside = np.zeros((h, w), np.uint8)
+    features = np.zeros((h, w), np.uint8)
+    for f in faces:
+        r = f.regions
+        cv2.fillPoly(inside, [poly(r.faceOval)], 1)
+        for region in (r.leftEye, r.rightEye, r.leftBrow, r.rightBrow, r.lips):
+            if len(region) >= 3:
+                cv2.fillPoly(features, [poly(region)], 1)
+    inside = cv2.erode(inside, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.1) | 1,) * 2))
+    features = cv2.dilate(features, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.03) | 1,) * 2))
+    forehead[(inside > 0) | (features > 0)] = 0.0
     return FaceMasks(
+        forehead=blur(forehead, face_w * 0.025),
+        face_width=face_w,
         skin=blur(skin, face_w * 0.025),
         eyes=blur(eyes, face_w * 0.006),
         under_eye=blur(under, face_w * 0.02),
         mouth=blur(mouth, face_w * 0.004),
         has_face=True,
     )
+
+
+def face_skin_likelihood(low: np.ndarray, core: np.ndarray, region: np.ndarray) -> np.ndarray:
+    """How well each pixel of `region` matches the face's own skin colour (CIELAB, 0..1).
+
+    The fixed YCbCr skin box accepts braids, warm backgrounds and most hair on darker
+    complexions, so the forehead extension is gated by the person's own skin instead:
+    robust median and spread of L*a*b* inside the landmark oval, then a soft distance.
+    """
+    out = np.zeros(region.shape, np.float32)
+    sel = core > 0.8
+    ys, xs = np.nonzero(region > 1e-3)
+    if sel.sum() < 64 or ys.size == 0:
+        return out
+    lab_core = cv2.cvtColor(np.ascontiguousarray(low[sel][None], np.float32), cv2.COLOR_RGB2Lab)[0]
+    med = np.median(lab_core, axis=0)
+    spread = 1.4826 * np.median(np.abs(lab_core - med), axis=0)
+    spread = np.maximum(spread, np.array([4.0, 2.0, 2.0], np.float32))
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    lab = cv2.cvtColor(np.ascontiguousarray(low[y0:y1, x0:x1], np.float32), cv2.COLOR_RGB2Lab)
+    d = (lab - med) / (2.5 * spread)
+    # Darker than the face is the main hair cue; lighter (shine on the forehead) is allowed more.
+    d[..., 0] = np.where(d[..., 0] > 0, d[..., 0] * 0.5, d[..., 0] * 1.6)
+    dist = np.sqrt((d * d).sum(axis=-1))
+    out[y0:y1, x0:x1] = 1.0 - smoothstep(1.0, 1.8, dist)
+    return out
+
+
+def _work_box(weight: np.ndarray, pad: float) -> tuple[int, int, int, int] | None:
+    ys, xs = np.nonzero(weight > 1e-3)
+    if ys.size == 0:
+        return None
+    h, w = weight.shape
+    p = int(np.ceil(pad))
+    return max(0, ys.min() - p), min(h, ys.max() + p + 1), max(0, xs.min() - p), min(w, xs.max() + p + 1)
+
+
+def _skin_stages(
+    c: np.ndarray, src: np.ndarray, skin_w: np.ndarray, faces: list[FaceAnalysis], adj: Adjustments,
+    sigma_tone: float, sigma_base: float, bands: tuple[np.ndarray, np.ndarray] | None,
+) -> np.ndarray:
+    """Stages 3-5c on one crop (all arrays share its shape; faces normalised to it)."""
+    c = c.copy()
+    # 3 + 4. Natural frequency-separation retouch: spots healed one by one (tone inpainted,
+    #    healthy pores cloned in), then blotches smoothed and median-evened on the tone layer
+    #    only, and the detail layer re-injected by the Texture retention factor.
+    if adj.skinSmoothing > 0 or adj.blemishRemoval > 0:
+        c = natural_skin_retouch(
+            c, skin_w, faces,
+            smoothing=adj.skinSmoothing, texture_retention=adj.skinTexture,
+            spot_amount=adj.blemishRemoval, multiplier=int(adj.skinMultiplier),
+            protect_beauty_marks=adj.protectBeautyMarks,
+            sigma_tone=sigma_tone, sigma_base=sigma_base, bands=bands,
+        )
+    base = bands[1] if bands is not None else blur(src, sigma_base)
+
+    # 5. Skin tone unification.
+    if adj.skinToneUnify > 0:
+        y = luma(c)
+        cb, cr = cbcr(c)
+        cb2, cr2 = cbcr(base)
+        t = (adj.skinToneUnify / 100.0) * 0.8 * skin_w
+        c = from_ycbcr(y, cb + (cb2 - cb) * t, cr + (cr2 - cr) * t)
+
+    # 5b. Boosted retouch.
+    if adj.skinMultiplier > 1:
+        c = apply_boosted_skin_retouch(np.clip(c, 0.0, 1.0).astype(np.float32), skin_w, float(adj.skinMultiplier))
+    # 5c. Skin-tone guard: CIELAB a*/b* lock against ashen or off-hue skin.
+    if adj.skinToneGuard:
+        c = skin_tone_guard(np.clip(c, 0.0, 1.0).astype(np.float32), src, base, skin_w)
+    return c
 
 
 def render(
@@ -150,7 +258,12 @@ def render(
 
     p = skin_probability(low0)
     if masks.has_face:
-        skin = masks.skin * (0.35 + 0.65 * p)
+        # The person's own skin colour also keeps hair and braids that cross the face out.
+        region = masks.skin if masks.forehead is None else np.maximum(masks.skin, masks.forehead)
+        own = face_skin_likelihood(low0, masks.skin, region)
+        skin = masks.skin * (0.35 + 0.65 * p) * (0.15 + 0.85 * own)
+        if masks.forehead is not None:
+            skin = np.maximum(skin, masks.forehead * own)
     else:
         skin = p * 0.8
     skin = skin[..., None]
@@ -159,33 +272,24 @@ def render(
     skin_w = skin[..., 0]
     smooth = adj.skinSmoothing / 100.0
 
-    # 3 + 4. Natural frequency-separation retouch: spots healed one by one (tone inpainted,
-    #    healthy pores cloned in), then blotches smoothed and median-evened on the tone layer
-    #    only, and the detail layer re-injected by the Texture retention factor.
-    if adj.skinSmoothing > 0 or adj.blemishRemoval > 0:
-        c = natural_skin_retouch(
-            c, skin_w, faces,
-            smoothing=adj.skinSmoothing, texture_retention=adj.skinTexture,
-            spot_amount=adj.blemishRemoval, multiplier=int(adj.skinMultiplier),
-            protect_beauty_marks=adj.protectBeautyMarks,
-            sigma_tone=S1 * L, sigma_base=S2 * L, bands=(low1, low2),
-        )
-
-    # 5. Skin tone unification.
-    if adj.skinToneUnify > 0:
-        y = luma(c)
-        cb, cr = cbcr(c)
-        cb2, cr2 = cbcr(low2)
-        t = (adj.skinToneUnify / 100.0) * 0.8 * skin[..., 0]
-        c = from_ycbcr(y, cb + (cb2 - cb) * t, cr + (cr2 - cr) * t)
-
-    # 5b. Boosted retouch and flyaway hair.
-    if adj.skinMultiplier > 1:
-        c = apply_boosted_skin_retouch(np.clip(c, 0.0, 1.0).astype(np.float32), skin[..., 0], float(adj.skinMultiplier))
-    # 5c. Skin-tone guard: CIELAB a*/b* lock against ashen or off-hue skin.
+    # 3-5c run on the skin's bounding box only: in a full-length shot that is a few percent of
+    # the frame, and every pixel outside it would come back unchanged anyway.
     skin_work = adj.skinSmoothing > 0 or adj.blemishRemoval > 0 or adj.skinToneUnify > 0 or adj.skinMultiplier > 1
-    if adj.skinToneGuard and skin_work:
-        c = skin_tone_guard(np.clip(c, 0.0, 1.0).astype(np.float32), src, low2, skin_w)
+    if skin_work:
+        sigma_tone, sigma_base = S1 * L, S2 * L
+        if masks.has_face:
+            sigma_tone = min(sigma_tone, TONE_SIGMA_FACE * masks.face_width)
+            sigma_base = min(sigma_base, BASE_SIGMA_FACE * masks.face_width)
+        box = _work_box(skin_w, 3.0 * sigma_base + 0.15 * max(masks.face_width, 32.0))
+        if box is not None:
+            y0, y1, x0, x1 = box
+            local = faces_in_crop(faces, x0, y0, x1 - x0, y1 - y0, w, h)
+            same_bands = sigma_tone == S1 * L and sigma_base == S2 * L
+            c[y0:y1, x0:x1] = _skin_stages(
+                c[y0:y1, x0:x1], src[y0:y1, x0:x1], skin_w[y0:y1, x0:x1], local, adj,
+                sigma_tone, sigma_base,
+                (low1[y0:y1, x0:x1], low2[y0:y1, x0:x1]) if same_bands else None,
+            )
     if adj.strayHairRemoval.enabled and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
 

@@ -4,6 +4,10 @@ MediaPipe returns the 468-point canonical face mesh plus 10 iris points. We turn
 those into the closed polygons the renderers need (skin oval, eyes, under-eye
 bands, mouth) so neither the browser nor the worker has to know mesh indices.
 
+Small faces (full-length and group shots) are found on overlapping full-resolution windows
+when the downscaled frame yields none, and every small face's mesh is re-run on a crop
+around it so landmarks sit on the real features.
+
 If the MediaPipe model file is missing we fall back to OpenCV's Haar cascade,
 which yields a face box and an approximate oval but no feature regions.
 """
@@ -42,6 +46,40 @@ RIGHT_EAR = ((159, 145), (158, 153), (33, 133))
 LEFT_EAR = ((386, 374), (385, 380), (263, 362))
 
 MODEL_PATH = Path(os.environ.get("FACE_LANDMARKER_MODEL", Path(__file__).resolve().parent.parent / "models" / "face_landmarker.task"))
+
+
+# Tiled second pass for small faces: window side as a share of the short image edge.
+TILE_FRACTIONS = (0.5, 0.3)
+# Faces narrower than this in the 1280px proxy get their mesh re-run on a full-resolution crop
+# REFINE_CONTEXT face widths wide.
+REFINE_BELOW_PX = 220.0
+REFINE_CONTEXT = 3.0
+
+
+def _remap_face(f: FaceAnalysis, x0: int, y0: int, cw: int, ch: int, w: int, h: int) -> FaceAnalysis:
+    """Map a FaceAnalysis normalised to a crop at (x0, y0, cw, ch) into an image w x h."""
+
+    def pt(p: Point) -> Point:
+        return ((x0 + p[0] * cw) / w, (y0 + p[1] * ch) / h)
+
+    regions = FaceRegions(**{k: [pt(p) for p in v] for k, v in f.regions.model_dump().items()})
+    bx, by, bw, bh = f.box
+    return FaceAnalysis(
+        box=((x0 + bx * cw) / w, (y0 + by * ch) / h, bw * cw / w, bh * ch / h),
+        landmarkCount=f.landmarkCount,
+        regions=regions,
+        eyeOpenness=f.eyeOpenness,
+    )
+
+
+def _same_face(a: FaceAnalysis, b: FaceAnalysis) -> bool:
+    """True when a's centre falls inside b's box (or the other way round)."""
+
+    def inside(p: FaceAnalysis, q: FaceAnalysis) -> bool:
+        cx, cy = p.box[0] + p.box[2] / 2, p.box[1] + p.box[3] / 2
+        return q.box[0] <= cx <= q.box[0] + q.box[2] and q.box[1] <= cy <= q.box[1] + q.box[3]
+
+    return inside(a, b) or inside(b, a)
 
 
 def _ring(pts: np.ndarray, idx: list[int]) -> list[Point]:
@@ -118,11 +156,64 @@ class FaceLandmarkService:
         small = cv2.resize(rgb, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA) if scale < 1 else rgb
         if self.backend == "mediapipe":
             try:
-                return self._detect_mediapipe(np.ascontiguousarray(small), w / h)
+                faces = self._detect_mediapipe(np.ascontiguousarray(small), w / h)
+                if not faces:
+                    # Full-length and group shots: the face is too small in the proxy for the
+                    # detector, so look again on overlapping windows at full resolution.
+                    faces = self._detect_tiled(rgb)
+                return [self._refine(rgb, f) for f in faces]
             except (OSError, RuntimeError) as exc:  # e.g. missing libEGL/GLES in a slim image
                 log.error("MediaPipe unavailable, falling back to Haar cascade: %s", exc)
                 self._mediapipe_failed = True
         return self._detect_haar(small)
+
+    def _detect_crop(self, rgb: np.ndarray, x0: int, y0: int, side_w: int, side_h: int) -> list[FaceAnalysis]:
+        """Detect inside rgb[y0:y0+side_h, x0:x0+side_w] and map the result to full-frame coordinates."""
+        h, w = rgb.shape[:2]
+        crop = rgb[y0:y0 + side_h, x0:x0 + side_w]
+        ch, cw = crop.shape[:2]
+        scale = min(1.0, 1280.0 / max(ch, cw))
+        if scale < 1:
+            crop = cv2.resize(crop, (round(cw * scale), round(ch * scale)), interpolation=cv2.INTER_AREA)
+        found = self._detect_mediapipe(np.ascontiguousarray(crop), cw / ch)
+        return [_remap_face(f, x0, y0, cw, ch, w, h) for f in found]
+
+    def _detect_tiled(self, rgb: np.ndarray) -> list[FaceAnalysis]:
+        h, w = rgb.shape[:2]
+        faces: list[FaceAnalysis] = []
+        for frac in TILE_FRACTIONS:
+            side = max(256, round(min(h, w) * frac))
+            if side >= max(h, w):
+                continue
+            step = side // 2
+            ys = sorted(set(list(range(0, max(1, h - side + 1), step)) + [max(0, h - side)]))
+            xs = sorted(set(list(range(0, max(1, w - side + 1), step)) + [max(0, w - side)]))
+            for y0 in ys:
+                for x0 in xs:
+                    for f in self._detect_crop(rgb, x0, y0, side, side):
+                        if not any(_same_face(f, g) for g in faces):
+                            faces.append(f)
+                        if len(faces) >= self.max_faces:
+                            return faces
+            if faces:
+                break
+        return faces
+
+    def _refine(self, rgb: np.ndarray, face: FaceAnalysis) -> FaceAnalysis:
+        """Re-run the mesh on a crop around a small face so its landmarks are placed at full resolution."""
+        h, w = rgb.shape[:2]
+        fw, fh = face.box[2] * w, face.box[3] * h
+        proxy_scale = min(1.0, 1280.0 / max(h, w))
+        if max(fw, fh) * proxy_scale >= REFINE_BELOW_PX:
+            return face
+        side = int(min(max(h, w), max(256.0, REFINE_CONTEXT * max(fw, fh))))
+        cx, cy = (face.box[0] + face.box[2] / 2) * w, (face.box[1] + face.box[3] / 2) * h
+        x0 = int(np.clip(cx - side / 2, 0, max(0, w - side)))
+        y0 = int(np.clip(cy - side / 2, 0, max(0, h - side)))
+        for f in self._detect_crop(rgb, x0, y0, min(side, w), min(side, h)):
+            if _same_face(f, face):
+                return f
+        return face
 
     def _detect_mediapipe(self, rgb: np.ndarray, aspect: float) -> list[FaceAnalysis]:
         import mediapipe as mp
