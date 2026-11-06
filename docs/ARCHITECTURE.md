@@ -85,13 +85,15 @@ flowchart LR
 | :--- | :--- |
 | Skin probability | YCbCr chroma box, gated by the face-oval mask when a face exists |
 | Frequency separation | Removes the mid band (blotches) and part of the fine band (pores, scaled by *Keep texture*), skipping strong edges |
-| Blemish removal | Spots darker or redder than their surroundings at the fine/coarse scale are replaced with the coarse band plus preserved texture |
+| Spot healing | Spots darker or redder than their surroundings at the fine/coarse scale get the coarse band plus their own texture (face mask only, so red pimples are not skipped); 2x/3x widen detection; very dark neutral spots are kept as beauty marks. Export runs the full local healer (§2b) |
 | Even skin tone | Pulls skin chroma toward the local average |
 | Eyes / dark circles / teeth | Region-masked exposure + local contrast; under-eye luminance lift and chroma neutralisation; yellow removal and lift on bright mouth pixels |
 | Skin boost 2x/3x | Extra pass for stubborn spots, pigment and redness (see §2a); approximated live, full algorithm on server export |
 | Stray hair cleanup | Thin-strand removal inside a band around the face outline and forehead (see §2a); approximated live |
 | Colour match | Covariance-aligning (Monge-Kantorovich) transfer in CIE L\*a\*b\* plus a histogram-matched L\* tone curve; Reinhard per-channel fallback for old presets |
-| Global tone | Exposure and white balance in linear light; highlights, shadows, contrast, saturation, vibrance; sharpening (reduced on smoothed skin); vignette |
+| Global tone | Exposure and white balance in linear light; highlights, shadows, contrast, saturation, vibrance |
+| Colour mixer and grading | 8-channel HSL mixer, then shadows / midtones / highlights wheels (§2b); identical maths in the shader, `engine/colorMixer.ts` and `color_engine.py` |
+| Detail | Sharpening (reduced on smoothed skin); vignette |
 
 After the retouch pass, an optional **depth-of-field chain** runs: downsample → two gather-bokeh passes (full radius, then 45 %: the "double blur") → composite by circle of confusion.
 
@@ -107,6 +109,20 @@ These live in `services/ai/app/retouch_engine.py` (full quality, used by server 
 | Stray hair cleanup | `strayHairRemoval: {enabled, strength}` | ROI band around the landmark face oval (forehead weighted; eyes, brows, lips and everything below the mouth excluded) → black-hat/top-hat thin-structure response → 8-orientation Gabor line-ness → adaptive threshold → elongated components only → Telea inpainting. The selfie segmenter's hair class protects the hairstyle itself. | Thin-strand detector (fine vs s1 band) inside the same ROI, filled from the s1 band |
 | Depth bokeh | `depthBokeh: {enabled, blurRadius 0–100, bokehMultiplier 100–300 %, apertureShape circle \| hex, highlightBoost}` | Depth (0 = subject, 1 = far) from MiDaS v2.1 small via OpenCV DNN, normalised to the faces, with the person mask pinned to the focal plane and edges refined by a guided filter. Layered disk/hex convolution in linear light (8 CoC layers, normalised so the subject never halos), highlight gain before blurring, large radii run downscaled. | Same depth map (`POST /v1/depth`) or a face-box portrait prior offline; gather bokeh with a 48-tap Vogel-spiral kernel (hexagon-stretched for `hex`), sample CoC test to stop subject bleed, two passes |
 | Style sync | `colorMatch` (palette mode) or ordinary sliders | `style_profile` (L\*a\*b\* mean/covariance/quantiles, contrast, warmth, chroma, Laplacian sharpness, skin texture energy) → `map_style_to_adjustments` | Same profile computed in the browser; `mapStyleToAdjustments` in `packages/shared/src/style.ts` |
+
+### 2b. Spot healing, colour mixer and grading, exports and watermarks (v0.5)
+
+**Spot healing** (`heal_spots` in `retouch_engine.py`, the *Spot healing* slider plus the 1x/2x/3x multiplier). Replaces the old global low-band blend on export with local repairs:
+
+1. *Signal*: darkness + 1.5 × redness relative to a skin-only local base (normalised blur), so red pimples and brown spots both read as bright blobs. The colour-based skin mask is morphologically closed first, because a red pimple fails the skin-tone test.
+2. *Detection*: a pore-wide median filter removes pores and pore clusters, then a scale-normalised Laplacian of Gaussian at four scales (0.65–2.2 % of face width) finds blobs. The threshold is `median + k × MAD` of the response on this photo's skin (k = 3.0 / 2.4 / 1.9 for 1x / 2x / 3x), with an absolute floor, so grainy and clean photos get the same false-positive rate.
+3. *Filtering*: compact, round components only (wrinkles and lash lines are long); size limits grow with the multiplier (5 / 7 / 9 % of face width). Eyes (wide horizontally, to cover crow's feet), brows, lips and the lower nose (`FaceRegions.nose`, a hull of mesh points 2, 19, 97, 98, 64, 48 and their mirrors) are excluded.
+4. *Beauty marks*: a spot at least 0.2 luma darker than the skin, not red and at least 1.2 % of face width is a mole and is kept (unless *Keep beauty marks* is off).
+5. *Repair*, per spot: the tone layer (Gaussian at ~0.8 % of face width) is Telea-inpainted from the healthy rim; the texture layer is cloned from the best-matching healthy patch nearby (12 directions × 2 distances, chosen by tone match), so healed skin keeps pores. Everything outside the spots is bit-identical.
+
+**Colour mixer and grading** (`color_engine.py`, `ColorMixerPanel.tsx`). Eight channels centred at 0/30/60/120/180/240/270/300°; each pixel's HSV hue is split between its two neighbouring channels with a smoothstep, so weights sum to 1. Hue ±100 = ±30°, saturation ×0–×2, luminance ±60 %, all faded out below saturation 0.2 so greys never pick up a cast; hue and saturation moves keep the pixel's luma. Grading splits luma into shadows (< 25 %), midtones and highlights (> 75 %) with smoothstep crossovers (*Blending* sets their width 0.05–0.45, *Balance* shifts both pivots ±0.2); each wheel adds a zero-luma chroma offset of its hue (× saturation) plus an optional luminance offset. The export path uses OpenCV HSV and 0.1° lookup tables (about 3.5 s for a 21 MP frame on a CI-class CPU), the GPU does it per pixel in the retouch pass.
+
+**Exports and watermarks** (`lib/exportManager.ts`, `lib/watermark.ts`, `ExportModal.tsx`). See DESKTOP.md for destinations and permissions. The watermark (text and/or PNG logo, font, weight, colour, opacity, 9-point anchor, margin, soft shadow) is drawn onto the full-resolution pixels right before encoding. Sizes are percentages of the short edge, so a 1080 px proof and a 45 MP print carry the same-looking mark; the modal's preview runs the same drawing code. AI-engine renders are requested as PNG when a watermark is on, so the file is encoded once more, not twice lossy. Cloud batch exports are not watermarked.
 
 Max blur radius is `blurRadius/100 × 2 % of the long edge × bokehMultiplier/100`, so 300 % on a 6000 px export is a 360 px circle of confusion.
 
@@ -145,7 +161,7 @@ RAW support is split by cost. Demosaicing a 24-100 MP Bayer mosaic is seconds of
 | Blur culling | Variance of the Laplacian on a 1024 px grey proxy | grey → scalar | < 5 ms | ✅ |
 | Skin mask | Face-oval polygon × YCbCr skin probability | RGB + polygons → soft mask | < 2 ms GPU | 🧪 → BiSeNet face parsing (19 classes) |
 | Frequency separation | Three-band Gaussian pyramid, edge-aware band suppression | RGBA → low/mid/fine bands → retouched RGB | < 5 ms GPU on a 2560 px proxy | ✅ |
-| Blemish removal | Local dark/red spot detector + band replacement | bands + skin mask → clean texture | < 5 ms GPU | 🧪 → LaMa inpainting on detected spot masks for export |
+| Spot healing | Multi-scale LoG spot detector + Telea tone inpainting + healthy-patch texture cloning (export); band replacement (preview) | skin mask + landmarks → per-spot repairs | < 5 ms GPU preview; ~0.5 s per 1 MP face on CPU | ✅ (LaMa could replace Telea for very large spots) |
 | Skin tone unification | Local chroma averaging | RGB → RGB | < 2 ms GPU | ✅ (neck/hand matching to face 🗺️) |
 | Eye brighten, dark circles, teeth whitening | Landmark region masks + tone operators | RGB + masks → RGB | < 2 ms GPU | ✅ |
 | Colour match / style sync | Monge-Kantorovich covariance transfer + 17-knot L\* histogram matching; style profile → slider mapping | source + reference stats → RGB | < 2 ms GPU, < 60 ms CPU | ✅ (sliced optimal transport / neural transfer 🗺️) |
@@ -305,5 +321,5 @@ FINERETOUCH_FACE_FIXTURE=/path/to/portrait.jpg pytest   # also checks real landm
 1. Persist projects: save images, edits and analysis to Postgres; resume sessions across devices.
 2. Desktop shell (Tauri) with a local AI sidecar for offline editing and RAW decoding (LibRaw).
 3. GPU models from the table above, starting with face parsing (better skin masks), LaMa blemish inpainting on export, and MODNet background replacement.
-4. HSL and tone-curve panels, lens profiles, local adjustment brushes.
+4. Tone-curve panel, lens profiles, local adjustment brushes (HSL mixer and colour grading shipped in v0.5).
 5. Embedding-based duplicate grouping and best-of-burst picking for culling.

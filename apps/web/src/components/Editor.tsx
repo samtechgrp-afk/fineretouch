@@ -8,7 +8,7 @@ import { bitmapPixels, clearCachedMask, fitSize, forgetImage, isImportable, load
 import { IMPORT_ACCEPT } from '@/lib/rawParser';
 import { selectActivePhoto, useEditor, type CompareMode } from '@/lib/store';
 import { AdjustmentPanel } from './AdjustmentPanel';
-import { ExportDialog } from './ExportDialog';
+import { ExportModal } from './ExportModal';
 import { Filmstrip, isFlagged, type CullFilter } from './Filmstrip';
 import { PhotoEditorViewport, requestZoom } from './PhotoEditorViewport';
 import { PresetPanel } from './PresetPanel';
@@ -261,7 +261,7 @@ export function Editor() {
         </div>
       </div>
 
-      {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
+      {exportOpen && <ExportModal onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

@@ -8,7 +8,8 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 - **Real-time GPU preview** (WebGL2) on a 2560 px proxy: only one shader pass runs per slider move.
 - **RAW workflow:** the browser pulls each RAW's embedded full-size camera JPEG and EXIF in milliseconds (no demosaic), shows a format badge and camera/ISO/shutter tooltip in the filmstrip, and AI-service or cloud exports develop the original from 16-bit sensor data with LibRaw (camera or Kelvin white balance, highlight recovery, AHD/DHT/PPG demosaic, sRGB/Adobe RGB/ProPhoto).
 - **AI face analysis** (MediaPipe 478-point face mesh) drives face-aware masks for skin, eyes, under-eyes and mouth. Without the AI service, colour-based skin detection still works.
-- **Skin retouch:** frequency-separation smoothing with texture preservation, blemish removal, and even skin tone.
+- **Skin retouch:** frequency-separation smoothing with texture preservation, spot healing, and even skin tone.
+- **Spot healing:** acne, pimples and dark spots are found one by one (multi-scale LoG) and repaired locally (tone inpainting + texture cloned from healthy skin), with eyes, lips, nostrils and beauty marks protected; 1x / 2x / 3x set how far it reaches.
 - **1x / 2x / 3x skin & blemish boost:** recursive guided-filter clean-up of stubborn dark spots, acne and redness that keeps pore texture.
 - **Stray hair cleanup** around the face outline and forehead (landmark band + Gabor strand detector + inpainting).
 - **Depth-aware background bokeh:** MiDaS depth + person segmentation, 100-300 % blur multiplier, circular or hexagonal aperture, highlight bloom.
@@ -16,10 +17,12 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 - **AI assist:** one-click Auto Retouch, and Smart Sync that evens out exposure and white balance across a shoot while copying your edits.
 - **Face features:** eye brightening, dark-circle reduction, teeth whitening.
 - **Colour and tone:** exposure, contrast, highlights, shadows, white balance, saturation, vibrance, sharpening and vignette.
+- **Colour mixer and grading:** 8-channel HSL mixer (red to magenta) and shadows / midtones / highlights colour wheels with blending and balance, live on the GPU and identical on export.
 - **Compare:** before/after split slider, side by side, original toggle, a difference heat map that shows exactly what the retouch changed, AI mask overlay, and zoom to 800 %.
-- **Undo/redo** per photo, **copy/paste settings**, **sync to all or selected**, six built-in presets plus your own.
+- **Undo/redo** per photo, **copy/paste settings**, **sync to all or selected**, seven built-in presets plus your own.
 - **AI culling:** blurry and eyes-closed flags, a manual reject key, and Keepers/Flagged filters.
-- **Export** at full resolution as JPEG, PNG or WebP, with three engines: in-browser GPU, the AI service, or a **cloud batch queue** (BullMQ workers → S3) for large jobs.
+- **Export** at full resolution as JPEG, PNG or WebP, with three engines: in-browser GPU, the AI service, or a **cloud batch queue** (BullMQ workers → S3) for large jobs. The desktop app saves through native Save As / folder dialogs or straight into a default export folder.
+- **Watermarks:** text and/or logo, font, colour, opacity and 9-point position, sized relative to each photo so proofs and prints match.
 
 ## Repository layout
 

@@ -6,15 +6,17 @@ Stages (all on float32 sRGB in [0, 1]):
   2. Skin probability (YCbCr box) gated by the face-oval mask from landmarks.
   3. Frequency separation: suppress the mid band (blotches) and part of the fine
      band (texture) on skin, keeping strong edges.
-  4. Blemish removal: small dark/red spots relative to the surrounding tone are
-     replaced with the low band plus preserved texture.
+  4. Spot healing (retouch_engine.heal_spots): acne, pimples and dark spots found by
+     multi-scale LoG are inpainted and re-textured from healthy skin, one at a time;
+     the 1x/2x/3x multiplier widens detection. The preview approximates this stage.
   5. Skin tone unification: chroma pulled toward the local average.
   5b. Boosted skin (2x/3x) and stray-hair cleanup (retouch_engine; the preview
       approximates these, so they are excluded from the parity guarantee).
   6. Landmark-driven features: eyes, dark circles, teeth.
   7. L*a*b* colour match (covariance transform + tone curve when available).
   8. Global tone: exposure / white balance (linear light), highlights, shadows,
-     contrast, saturation, vibrance, sharpening, vignette.
+     contrast, saturation, vibrance; 8b. HSL mixer and colour grading (color_engine);
+     then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
 """
 
@@ -26,7 +28,8 @@ import cv2
 import numpy as np
 
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
-from .retouch_engine import apply_boosted_skin_retouch, apply_depth_bokeh, remove_stray_hairs
+from .color_engine import apply_color_engine
+from .retouch_engine import apply_boosted_skin_retouch, apply_depth_bokeh, heal_spots, remove_stray_hairs
 from .schemas import Adjustments, ColorStats, FaceAnalysis
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
@@ -154,15 +157,13 @@ def render(
         k = skin * smooth * (1.0 - edge)
         c = c - k * ((1.0 - texture) * fine + 0.85 * mid)
 
-    # 4. Blemishes: darker or redder than the surrounding tone at the s1..s2 scale.
+    # 4. Spot healing: acne, pimples and dark spots are detected one by one (LoG on a
+    #    darkness + redness signal) and repaired locally; moles and features are kept.
     if adj.blemishRemoval > 0:
-        dark = smoothstep(0.015, 0.05, luma(low2) - luma(low1))
-        _, cr1 = cbcr(low1)
-        _, cr2 = cbcr(low2)
-        red = smoothstep(0.012, 0.035, cr1 - cr2)
-        spot = (np.maximum(dark, red) * skin[..., 0])[..., None]
-        clean = low2 + fine * texture
-        c = c + (clean - c) * spot * (adj.blemishRemoval / 100.0)
+        c = heal_spots(
+            np.clip(c, 0.0, 1.0).astype(np.float32), skin[..., 0], faces, adj.blemishRemoval,
+            int(adj.skinMultiplier), adj.protectBeautyMarks,
+        )
 
     # 5. Skin tone unification.
     if adj.skinToneUnify > 0:
@@ -220,6 +221,9 @@ def render(
     sat = (c.max(axis=-1) - c.min(axis=-1))[..., None]
     c = y + (c - y) * (1.0 + adj.saturation / 100.0)
     c = y + (c - y) * (1.0 + (adj.vibrance / 100.0) * (1.0 - np.clip(sat, 0.0, 1.0)))
+
+    # 8b. HSL colour mixer and 3-way colour grading (app/color_engine.py).
+    c = apply_color_engine(np.clip(c, 0.0, 1.0).astype(np.float32), adj.hsl, adj.colorGrading)
 
     if adj.sharpen > 0:
         c = c + (adj.sharpen / 100.0) * 1.2 * (src - low0) * (1.0 - 0.8 * skin * smooth)

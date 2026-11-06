@@ -42,6 +42,49 @@ class DepthBokehSettings(BaseModel):
     highlightBoost: float = Field(40, ge=0, le=100)
 
 
+class HslValue(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    hue: float = Field(0, ge=-100, le=100)
+    saturation: float = Field(0, ge=-100, le=100)
+    luminance: float = Field(0, ge=-100, le=100)
+
+
+class HslMixer(BaseModel):
+    """8-channel colour mixer; see app/color_engine.py."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    red: HslValue = HslValue()
+    orange: HslValue = HslValue()
+    yellow: HslValue = HslValue()
+    green: HslValue = HslValue()
+    aqua: HslValue = HslValue()
+    blue: HslValue = HslValue()
+    purple: HslValue = HslValue()
+    magenta: HslValue = HslValue()
+
+
+class GradeWheel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    hue: float = Field(0, ge=0, le=360)
+    saturation: float = Field(0, ge=0, le=100)
+    luminance: float = Field(0, ge=-100, le=100)
+
+
+class ColorGrading(BaseModel):
+    """3-way shadows / midtones / highlights wheels; see app/color_engine.py."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    shadows: GradeWheel = GradeWheel()
+    midtones: GradeWheel = GradeWheel()
+    highlights: GradeWheel = GradeWheel()
+    blending: float = Field(50, ge=0, le=100)
+    balance: float = Field(0, ge=-100, le=100)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -66,6 +109,10 @@ class Adjustments(BaseModel):
     skinMultiplier: int = Field(1, ge=1, le=3)
     strayHairRemoval: StrayHairSettings = StrayHairSettings()
     depthBokeh: DepthBokehSettings = DepthBokehSettings()
+    # v0.5: spot healing keeps moles / beauty marks; colour mixer and grading wheels.
+    protectBeautyMarks: bool = True
+    hsl: HslMixer = HslMixer()
+    colorGrading: ColorGrading = ColorGrading()
 
 
 class StyleProfile(BaseModel):
@@ -103,6 +150,8 @@ class FaceRegions(BaseModel):
     lips: list[Point]
     leftBrow: list[Point]
     rightBrow: list[Point]
+    # Lower nose (nostrils and alae), protected from spot healing. Optional: older clients omit it.
+    nose: list[Point] = []
 
 
 class FaceAnalysis(BaseModel):

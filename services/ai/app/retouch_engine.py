@@ -1,5 +1,10 @@
 """Advanced retouch stages for the full-resolution renderer (FineRetouch v0.2).
 
+  heal_spots                  local acne / pimple / dark-spot healing (v0.5): scale-normalised
+                              Laplacian-of-Gaussian detection on a darkness + redness signal
+                              inside the skin mask, beauty-mark and feature protection, then
+                              per-spot inpainting of the tone layer and healthy-skin patch
+                              cloning of the texture layer. 1x / 2x / 3x set how far it reaches.
   apply_boosted_skin_retouch  2x/3x multi-stage frequency separation: recursive guided
                               filtering of the low-frequency colour layer plus adaptive
                               blemish detection and patch-based repair of the detail layer.
@@ -19,6 +24,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -194,6 +200,282 @@ def apply_boosted_skin_retouch(image: np.ndarray, mask: np.ndarray, multiplier: 
     out = low_fixed + high_fixed
     m = mask[..., None]
     return np.clip(image * (1.0 - m) + out * m, 0.0, 1.0).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# 1b. Local spot healing (acne, pimples, dark spots)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpotProfile:
+    """How hard one multiplier step pushes spot healing (all sizes are shares of face width F)."""
+
+    k: float  # detection threshold in robust standard deviations of the LoG response
+    max_diameter: float  # largest spot treated
+    grow: float  # dilation of each spot before healing (covers its halo)
+    strength: float  # blend of the healed patch at amount 100
+
+
+SPOT_PROFILES: dict[int, SpotProfile] = {
+    1: SpotProfile(k=3.0, max_diameter=0.05, grow=0.004, strength=0.9),
+    2: SpotProfile(k=2.4, max_diameter=0.07, grow=0.006, strength=1.0),
+    3: SpotProfile(k=1.9, max_diameter=0.09, grow=0.008, strength=1.0),
+}
+# Spots are looked for at these LoG scales (sigma as a share of F; blob radius ~ sigma * sqrt(2)).
+SPOT_SIGMAS = (0.0065, 0.01, 0.015, 0.022)
+# Beauty marks: much darker than the skin around them, not red, and big enough to be deliberate.
+MOLE_MIN_DARKNESS = 0.2
+MOLE_MAX_REDNESS = 0.015
+MOLE_MIN_DIAMETER = 0.012
+# Detection runs with the face about this many pixels wide; pores vanish below the finest scale.
+SPOT_WORK_FACE = 420.0
+
+
+@dataclass
+class SpotDetection:
+    """Result of detect_spots, in the coordinates of the image passed in."""
+
+    heal: np.ndarray  # uint8 HxW: 1 where a spot (plus its halo) will be healed
+    protected: np.ndarray  # uint8 HxW: beauty marks that were found and kept
+    count: int
+    protected_count: int
+    face_width: float
+
+
+def face_width_px(faces: list[FaceAnalysis], mask: np.ndarray, w: int) -> float:
+    if faces:
+        return float(max(f.box[2] for f in faces) * w)
+    return float(np.clip(np.sqrt(float((mask > 0.5).sum())) * 1.1, 32.0, max(mask.shape)))
+
+
+def feature_protection_mask(faces: list[FaceAnalysis], h: int, w: int) -> np.ndarray:
+    """uint8 mask of eyes, brows, lips and nostrils, dilated so their rims are safe too."""
+    out = np.zeros((h, w), np.uint8)
+    for f in faces:
+        fw = max(8.0, f.box[2] * w)
+        r = f.regions
+        for region, grow in ((r.leftEye, 0.09), (r.rightEye, 0.09), (r.leftBrow, 0.035), (r.rightBrow, 0.035),
+                             (r.lips, 0.03), (r.nose, 0.025)):
+            if len(region) < 3:
+                continue
+            m = np.zeros((h, w), np.uint8)
+            cv2.fillPoly(m, [np.round(np.array(region, np.float32) * [w, h]).astype(np.int32)], 1)
+            k = _ellipse(max(3, int(fw * grow) | 1))
+            if region is r.leftEye or region is r.rightEye:
+                # Wider than tall: covers the lash line and the crow's-feet creases at the corners.
+                kw, kh = max(3, int(fw * grow * 2.2) | 1), max(3, int(fw * grow) | 1)
+                k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kw, kh))
+            out |= cv2.dilate(m, k)
+    return out
+
+
+def _log_response(signal: np.ndarray, sigmas_px: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+    """Max over scales of the scale-normalised LoG (-sigma^2 * laplacian) and the winning sigma."""
+    best = np.full(signal.shape, -np.inf, np.float32)
+    best_sigma = np.zeros(signal.shape, np.float32)
+    for sg in sigmas_px:
+        g = cv2.GaussianBlur(signal, (0, 0), sigmaX=max(sg, 0.5), borderType=cv2.BORDER_REFLECT)
+        r = -(sg * sg) * cv2.Laplacian(g, cv2.CV_32F, ksize=3)
+        better = r > best
+        best = np.where(better, r, best)
+        best_sigma = np.where(better, sg, best_sigma)
+    return best, best_sigma
+
+
+def detect_spots(
+    image: np.ndarray,
+    mask: np.ndarray,
+    faces: list[FaceAnalysis],
+    multiplier: int = 1,
+    amount: float = 100.0,
+    protect_beauty_marks: bool = True,
+) -> SpotDetection:
+    """Find acne, pimples and dark spots inside the skin mask.
+
+    Signal: darkness and redness relative to the surrounding skin, so a red pimple and a
+    brown spot both read as bright blobs. Blobs are found with a multi-scale normalised
+    LoG; the threshold adapts to each photo through the response's robust spread on skin
+    (a clear complexion and a grainy high-ISO frame get the same false-positive rate).
+    Pores sit below the finest scale. Lines (wrinkles, lash lines, hair), large shading
+    and anything on or next to the eyes, brows, lips and nostrils are rejected.
+    """
+    prof = SPOT_PROFILES.get(int(multiplier), SPOT_PROFILES[1])
+    h, w = image.shape[:2]
+    F = face_width_px(faces, mask, w)
+    s = min(1.0, SPOT_WORK_FACE / F)
+    size = (max(1, round(w * s)), max(1, round(h * s)))
+    work = cv2.resize(image, size, interpolation=cv2.INTER_AREA) if s < 1 else image
+    m = cv2.resize(mask, size, interpolation=cv2.INTER_AREA) if s < 1 else mask
+    Fw = F * s
+    protect = feature_protection_mask(faces, size[1], size[0])
+
+    # The colour-based skin weight drops on the spots themselves (a red pimple fails the
+    # skin-tone test), so close the mask over spot-sized holes before looking inside it.
+    m = cv2.morphologyEx(m.astype(np.float32), cv2.MORPH_CLOSE, _ellipse(max(3, int(0.08 * Fw) | 1)))
+    core = (m > 0.6) & (protect == 0)
+    empty = np.zeros((h, w), np.uint8)
+    if core.sum() < 64:
+        return SpotDetection(empty, empty.copy(), 0, 0, F)
+
+    y = _luma(work)
+    _, cr = _cbcr(work)
+    ctx = 0.06 * Fw
+    base_y = _masked_blur(y, core.astype(np.float32), ctx)
+    base_cr = _masked_blur(cr, core.astype(np.float32), ctx)
+    darkness = base_y - y
+    redness = cr - base_cr
+    signal = (darkness + 1.5 * np.maximum(redness, 0.0)).astype(np.float32)
+    # A median filter about a pore wide removes pores and pore clusters (sparse, high
+    # frequency) but keeps the solid core of real spots, so LoG sees spots, not texture.
+    signal = cv2.medianBlur(signal, 5 if Fw >= 300 else 3)
+
+    sigmas = [max(0.7, f * Fw) for f in SPOT_SIGMAS]
+    resp, _ = _log_response(signal, sigmas)
+    vals = resp[core]
+    med = float(np.median(vals))
+    spread = 1.4826 * float(np.median(np.abs(vals - med))) + 1e-5
+    a = float(np.clip(amount / 100.0, 0.0, 1.0))
+    k = prof.k * (1.25 - 0.25 * a)
+    # Absolute floor: below ~2.5% contrast a "spot" is invisible and only texture would be lost.
+    floor = 0.025 * (1.3 - 0.15 * (int(multiplier) - 1))
+    cand = ((resp > med + k * spread) & (resp > floor) & core & (signal > 0.6 * floor)).astype(np.uint8)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(cand, connectivity=8)
+    if n <= 1:
+        return SpotDetection(empty, empty.copy(), 0, 0, F)
+    bw = stats[1:, cv2.CC_STAT_WIDTH].astype(np.float32)
+    bh = stats[1:, cv2.CC_STAT_HEIGHT].astype(np.float32)
+    area = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+    side = np.maximum(bw, bh)
+    diameter = np.sqrt(4.0 * area / math.pi)
+    min_d = max(2.0, 0.008 * Fw)  # pores and single-pixel noise stay
+    blob = (
+        (diameter <= prof.max_diameter * Fw) & (diameter >= min_d)
+        & (area / (bw * bh) >= 0.4) & (np.minimum(bw, bh) / side >= 0.45)
+    )
+
+    flat = labels.ravel()
+    counts = np.maximum(np.bincount(flat, minlength=n)[1:], 1)
+    mean_dark = np.bincount(flat, weights=darkness.ravel(), minlength=n)[1:] / counts
+    mean_red = np.bincount(flat, weights=redness.ravel(), minlength=n)[1:] / counts
+    peak_dark = np.zeros(n - 1, np.float32)
+    np.maximum.at(peak_dark, flat[flat > 0] - 1, darkness.ravel()[flat > 0])
+    mole = (
+        blob & (peak_dark >= MOLE_MIN_DARKNESS) & (mean_dark >= 0.6 * MOLE_MIN_DARKNESS)
+        & (mean_red <= MOLE_MAX_REDNESS) & (diameter >= MOLE_MIN_DIAMETER * Fw)
+    )
+    if not protect_beauty_marks:
+        mole[:] = False
+    heal_ids = blob & ~mole
+
+    lut_heal = np.concatenate([[0], heal_ids]).astype(np.uint8)
+    lut_mole = np.concatenate([[0], mole]).astype(np.uint8)
+    heal = lut_heal[labels]
+    moles = lut_mole[labels]
+    grow = max(3, round(prof.grow * Fw * 2) | 1)
+    heal = cv2.dilate(heal, _ellipse(grow))
+    heal[cv2.dilate(moles, _ellipse(grow + 2)) > 0] = 0
+    heal[protect > 0] = 0
+    if s < 1:
+        heal = (cv2.resize(heal.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR) > 0.35).astype(np.uint8)
+        moles = (cv2.resize(moles.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR) > 0.35).astype(np.uint8)
+    return SpotDetection(heal, moles, int(heal_ids.sum()), int(mole.sum()), F)
+
+
+def _best_donor(
+    box: tuple[int, int, int, int], low_y: np.ndarray, ok: np.ndarray, distance: int
+) -> tuple[int, int] | None:
+    """Offset (dy, dx) of the nearby healthy-skin patch whose tone best matches the spot's rim."""
+    x, y, bw, bh = box
+    h, w = ok.shape
+    pad = max(2, max(bw, bh) // 3)
+    y0, y1, x0, x1 = max(0, y - pad), min(h, y + bh + pad), max(0, x - pad), min(w, x + bw + pad)
+    ring = low_y[y0:y1, x0:x1]
+    target = float(np.median(ring))
+    best, best_cost = None, np.inf
+    for i in range(12):
+        t = 2 * math.pi * i / 12
+        for dist in (distance, int(distance * 1.6)):
+            dy, dx = round(math.sin(t) * dist), round(math.cos(t) * dist)
+            yy0, yy1, xx0, xx1 = y0 + dy, y1 + dy, x0 + dx, x1 + dx
+            if yy0 < 0 or xx0 < 0 or yy1 > h or xx1 > w:
+                continue
+            if not ok[yy0:yy1, xx0:xx1].all():
+                continue
+            cost = abs(float(np.median(low_y[yy0:yy1, xx0:xx1])) - target) + 0.002 * dist / max(1, distance)
+            if cost < best_cost:
+                best, best_cost = (dy, dx), cost
+        if best is not None and best_cost < 0.01:
+            break
+    return best
+
+
+def heal_spots(
+    image: np.ndarray,
+    mask: np.ndarray,
+    faces: list[FaceAnalysis],
+    amount: float = 100.0,
+    multiplier: int = 1,
+    protect_beauty_marks: bool = True,
+    detection: SpotDetection | None = None,
+) -> np.ndarray:
+    """Heal acne, pimples and dark spots one by one. image: HxWx3 float32 sRGB; mask: HxW skin weight.
+
+    For every detected spot the image is split into a tone layer and a texture layer at
+    roughly the spot's size. The tone layer is inpainted (Telea) from the healthy skin
+    around the spot, so colour and shading continue across it. The texture layer is
+    cloned from the best-matching healthy patch nearby (same lighting, real pores), so
+    a healed spot never turns into a smooth hole. Skin outside the spots is untouched:
+    this replaces the old global low-band blend with purely local repairs.
+    """
+    if amount <= 0:
+        return image
+    det = detection or detect_spots(image, mask, faces, multiplier, amount, protect_beauty_marks)
+    if det.count == 0 or not det.heal.any():
+        return image
+    prof = SPOT_PROFILES.get(int(multiplier), SPOT_PROFILES[1])
+    h, w = image.shape[:2]
+    F = det.face_width
+    ys, xs = np.nonzero(det.heal)
+    pad = max(8, int(0.12 * F))
+    y0, y1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1)
+    x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
+    crop = image[y0:y1, x0:x1].astype(np.float32)
+    heal = det.heal[y0:y1, x0:x1]
+    skin = mask[y0:y1, x0:x1]
+
+    sigma = max(1.0, 0.008 * F)
+    low = _gauss(crop, sigma)
+    high = crop - low
+    radius = max(2, round(0.012 * F))
+    low_fixed = np.stack([_inpaint_unit(low[..., c], heal, radius) for c in range(3)], axis=-1)
+
+    # Texture: clone from a nearby healthy patch per spot; fall back to inpainted (flat) grain.
+    high_fixed = np.stack([_inpaint_unit(high[..., c] + 0.5, heal, radius) - 0.5 for c in range(3)], axis=-1)
+    low_y = _luma(low)
+    ok = (skin > 0.7) & (cv2.dilate(heal, _ellipse(5)) == 0)  # donors: plain skin, no spot nearby
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(heal, connectivity=8)
+    for i in range(1, n):
+        x, y, bw, bh, _ = stats[i]
+        dist = max(4, int(max(bw, bh) * 1.4))
+        off = _best_donor((x, y, bw, bh), low_y, ok, dist)
+        if off is None:
+            continue
+        dy, dx = off
+        sel = labels[y:y + bh, x:x + bw] == i
+        donor = high[y + dy:y + dy + bh, x + dx:x + dx + bw]
+        patch = high_fixed[y:y + bh, x:x + bw]
+        patch[sel] = donor[sel]
+
+    soft = _gauss(heal.astype(np.float32), max(0.8, 0.003 * F))
+    soft = np.clip(np.maximum(soft, heal * 0.85) * prof.strength * min(1.0, amount / 100.0) * 1.0, 0.0, 1.0)
+    skin_closed = cv2.morphologyEx(skin.astype(np.float32), cv2.MORPH_CLOSE, _ellipse(max(3, int(0.08 * F) | 1)))
+    soft = (soft * np.clip(skin_closed * 1.4, 0.0, 1.0))[..., None]
+    healed = np.clip(low_fixed + high_fixed, 0.0, 1.0)
+    out = image.copy()
+    out[y0:y1, x0:x1] = crop * (1.0 - soft) + healed * soft
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

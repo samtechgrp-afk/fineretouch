@@ -145,12 +145,14 @@ function AiAssist({ photo }: { photo: Photo }) {
 
 function SkinBoost({ photo }: { photo: Photo }) {
   const setSkinMultiplier = useEditor((s) => s.setSkinMultiplier);
+  const updateAdjustments = useEditor((s) => s.updateAdjustments);
   const value = photo.adjustments.skinMultiplier;
+  const keepMarks = photo.adjustments.protectBeautyMarks;
   return (
     <section>
       <Heading
         title="Skin & blemish boost"
-        hint="2x and 3x add recursive clean-up of stubborn dark spots, acne and redness while keeping pore texture. Applies to selected photos."
+        hint="Sets how far Spot healing reaches: 2x and 3x catch fainter and larger acne and dark spots, and add recursive clean-up of stubborn redness while keeping pore texture. Applies to selected photos."
       />
       <Segmented<`${SkinMultiplier}`>
         label="Skin retouch multiplier"
@@ -158,6 +160,12 @@ function SkinBoost({ photo }: { photo: Photo }) {
         options={SKIN_MULTIPLIERS.map((m) => [`${m}`, `${m}x`])}
         onChange={(v) => setSkinMultiplier(Number(v) as SkinMultiplier)}
       />
+      <div className="mt-2.5 flex items-center justify-between gap-2">
+        <span className="text-xs text-ink-300" title="Spot healing leaves moles and beauty marks in place. Eyes, brows, lips and nostrils are always protected.">
+          Keep beauty marks
+        </span>
+        <Toggle checked={keepMarks} onChange={(v) => updateAdjustments({ protectBeautyMarks: v })} label="Keep beauty marks" />
+      </div>
     </section>
   );
 }

@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { BUILT_IN_PRESETS, DEFAULT_ADJUSTMENTS, SLIDERS, applyPreset, isDefault, sanitizeAdjustments } from './index';
+import {
+  BUILT_IN_PRESETS,
+  DEFAULT_ADJUSTMENTS,
+  HSL_CHANNELS,
+  SLIDERS,
+  applyPreset,
+  isDefault,
+  sanitizeAdjustments,
+  type Adjustments,
+} from './index';
 
 describe('sanitizeAdjustments', () => {
   it('fills defaults, clamps, and drops unknown keys and bad types', () => {
@@ -28,6 +37,11 @@ describe('presets', () => {
     const keys = new Set(SLIDERS.map((s) => s.key));
     for (const p of BUILT_IN_PRESETS) {
       for (const [k, v] of Object.entries(p.adjustments)) {
+        if (k === 'hsl' || k === 'colorGrading') {
+          // Structured settings must survive sanitising unchanged (i.e. be complete and in range).
+          expect(sanitizeAdjustments({ [k]: v })[k as 'hsl' | 'colorGrading']).toEqual(v);
+          continue;
+        }
         expect(keys.has(k as never)).toBe(true);
         const spec = SLIDERS.find((s) => s.key === k)!;
         expect(v).toBeGreaterThanOrEqual(spec.min);
@@ -41,5 +55,40 @@ describe('presets', () => {
     const p = BUILT_IN_PRESETS[0];
     expect(applyPreset(cur, p, 'merge').exposure).toBe(30);
     expect(applyPreset(cur, p, 'replace').exposure).toBe(0);
+  });
+});
+
+describe('v0.5 colour mixer, grading and spot healing settings', () => {
+  it('defaults are neutral and keep beauty marks', () => {
+    const d = sanitizeAdjustments({});
+    expect(d.protectBeautyMarks).toBe(true);
+    expect(Object.keys(d.hsl)).toEqual([...HSL_CHANNELS]);
+    expect(d.colorGrading.blending).toBe(50);
+    expect(isDefault(d)).toBe(true);
+  });
+
+  it('clamps and fills the 8-channel mixer', () => {
+    const a = sanitizeAdjustments({ hsl: { red: { hue: 400, saturation: -20 }, blue: 'x', neon: { hue: 1 } } });
+    expect(a.hsl.red).toEqual({ hue: 100, saturation: -20, luminance: 0 });
+    expect(a.hsl.blue).toEqual({ hue: 0, saturation: 0, luminance: 0 });
+    expect('neon' in a.hsl).toBe(false);
+    expect(isDefault(a)).toBe(false);
+  });
+
+  it('clamps grading wheels, blending and balance', () => {
+    const g = sanitizeAdjustments({ colorGrading: { shadows: { hue: 720, saturation: 150, luminance: -300 }, blending: -5, balance: 9e9 } }).colorGrading;
+    expect(g.shadows).toEqual({ hue: 360, saturation: 100, luminance: -100 });
+    expect(g.blending).toBe(0);
+    expect(g.balance).toBe(100);
+    expect(g.midtones).toEqual({ hue: 0, saturation: 0, luminance: 0 });
+  });
+
+  it('a grading wheel with hue but no saturation is still neutral', () => {
+    expect(isDefault(sanitizeAdjustments({ colorGrading: { highlights: { hue: 40 } } }))).toBe(true);
+  });
+
+  it('beauty-mark protection is a plain boolean', () => {
+    expect(sanitizeAdjustments({ protectBeautyMarks: false }).protectBeautyMarks).toBe(false);
+    expect(sanitizeAdjustments({ protectBeautyMarks: 0 } as unknown as Partial<Adjustments>).protectBeautyMarks).toBe(true);
   });
 });

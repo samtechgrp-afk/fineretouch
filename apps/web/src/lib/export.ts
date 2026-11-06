@@ -6,6 +6,7 @@ import { Renderer } from '@/engine/renderer';
 import { buildFaceMask } from '@/engine/masks';
 import { ensureDepth, hairRoiFor } from './depth';
 import { fitSize, getCachedMask, setCachedMask } from './images';
+import { drawWatermark, watermarkActive, type WatermarkSettings } from './watermark';
 
 export const MASK_LONG_EDGE = 1536;
 
@@ -31,9 +32,11 @@ export interface ExportOptions {
   format: 'jpeg' | 'png' | 'webp';
   quality: number; // 1..100
   maxLongEdge?: number;
+  /** Burned into the pixels right before encoding (sized relative to the image). */
+  watermark?: WatermarkSettings;
 }
 
-const MIME = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' } as const;
+export const MIME = { jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' } as const;
 export const EXT = { jpeg: 'jpg', png: 'png', webp: 'webp' } as const;
 
 /**
@@ -69,7 +72,9 @@ export async function renderFullRes(
     renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats });
     const pixels = renderer.readPixels();
     const out = new OffscreenCanvas(w, h);
-    out.getContext('2d')!.putImageData(new ImageData(pixels, w, h), 0, 0);
+    const ctx2d = out.getContext('2d')!;
+    ctx2d.putImageData(new ImageData(pixels, w, h), 0, 0);
+    if (opts.watermark && watermarkActive(opts.watermark)) await drawWatermark(ctx2d, opts.watermark, w, h);
     return await out.convertToBlob({ type: MIME[opts.format], quality: opts.quality / 100 });
   } finally {
     bmp.close();

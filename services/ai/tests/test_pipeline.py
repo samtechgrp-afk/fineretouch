@@ -93,7 +93,10 @@ def test_blemish_removal_lightens_dark_spot():
     yy, xx = np.mgrid[0:256, 0:256]
     spot = (yy - 128) ** 2 + (xx - 128) ** 2 < 3**2
     img[spot] = [150, 95, 80]
-    out = render(img, Adjustments(blemishRemoval=100), [oval_face()])
+    # A spot this dark and neutral reads as a beauty mark, so it is kept unless protection is off.
+    kept = render(img, Adjustments(blemishRemoval=100), [oval_face()])
+    assert abs(kept[128, 128].astype(int).sum() - img[128, 128].astype(int).sum()) < 25
+    out = render(img, Adjustments(blemishRemoval=100, protectBeautyMarks=False), [oval_face()])
     assert out[128, 128].astype(int).sum() > img[128, 128].astype(int).sum() + 60
 
 

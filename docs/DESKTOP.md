@@ -9,7 +9,7 @@ nothing needs the network: no account, no cloud, no model downloads.
 │  Tauri shell (src-tauri, Rust)                                                    │
 │   ├─ webview: static Next.js export (apps/web/out)  ──fetch + token──┐            │
 │   │    WebGL2 preview, rawParser.ts embedded-JPEG/EXIF import        │            │
-│   ├─ native Save As / folder dialogs (src/files.rs)                  ▼            │
+│   ├─ dialog + fs plugins: Save As, folder picker                   ▼            │
 │   └─ engine lifecycle (src/engine.rs) ──spawns──►  fineretouch-engine sidecar     │
 │                                                    127.0.0.1:<random port>        │
 │                                                    FastAPI app (services/ai/app)  │
@@ -81,14 +81,26 @@ create an empty placeholder named like the one above).
 * **Imports** keep using `<input type="file">` and drag and drop, which already open the
   native picker and give the editor zero-copy `File` objects (large RAWs never cross IPC).
   `dragDropEnabled: false` on the window lets HTML5 drops reach the editor on Windows.
-* **Exports** use native dialogs: Save As for one photo, a folder picker for several (files
-  are written individually, no ZIP). "Show in folder" opens Explorer / Finder.
+* **Exports** go through `tauri-plugin-dialog` and `tauri-plugin-fs`
+  (`apps/web/src/lib/exportManager.ts`). *Ask every time*: Save As for one photo, a folder
+  picker for several. *Default folder*: no dialog, files land in the chosen folder or the
+  app's `exports/` folder (see Local data). The destination is settled before rendering and
+  each photo is written as soon as it is done (no ZIP, nothing held in memory), never
+  overwriting an existing file (`name_2.jpg`, ...). "Show in folder" opens Explorer / Finder.
+  Export settings, including the default folder and the watermark, persist in the webview's
+  local storage.
+* **File permissions** (`src-tauri/capabilities/default.json`): `dialog:default`, `fs:default`
+  (read-only app dirs), and `fs:allow-write-file` / `mkdir` / `exists` scoped to
+  `$DATA/FineRetouch/exports/**`. Anything else is writable only after the user picks it in a
+  native dialog: the dialog plugin adds the pick to the fs scope, and
+  `tauri-plugin-persisted-scope` keeps a picked default folder writable after a restart. If
+  that grant is lost, the folder picker opens again. Nothing can read, list or delete user files.
 
 ## Local data
 
 | OS | Folder |
 | :--- | :--- |
-| Windows | `%APPDATA%\FineRetouch` |
+| Windows | `%APPDATA%\FineRetouch` (default exports in `exports\`) |
 | macOS | `~/Library/Application Support/FineRetouch` |
 | Linux | `~/.local/share/FineRetouch` |
 

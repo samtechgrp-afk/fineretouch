@@ -13,9 +13,21 @@
  *              COMPOSITE out + b by depth -> final
  *   DISPLAY final (or out) with compare modes.
  *
- * The boost (2x/3x), stray-hair and bokeh passes are real-time approximations of
- * services/ai/app/retouch_engine.py; everything else mirrors pipeline.py exactly.
+ * The spot healing, boost (2x/3x), stray-hair and bokeh passes are real-time
+ * approximations of services/ai/app/retouch_engine.py. The HSL mixer and colour grading
+ * mirror services/ai/app/color_engine.py exactly (constants from @fineretouch/shared);
+ * everything else mirrors pipeline.py exactly.
  */
+import {
+  HSL_CENTERS,
+  HSL_CHANNELS,
+  HSL_HUE_RANGE,
+  HSL_LUM_RANGE,
+  HSL_NEUTRAL_EDGE,
+} from '@fineretouch/shared';
+
+const glslFloat = (v: number) => (Number.isInteger(v) ? `${v}.0` : `${v}`);
+const HUE_CENTERS_GLSL = `float[9](${[...HSL_CHANNELS.map((c) => HSL_CENTERS[c]), 360].map(glslFloat).join(', ')})`;
 
 /** s3 is the broad base used by the 2x/3x skin boost for tone evening. */
 export const BLUR_SIGMAS = { s0: 0.0012, s1: 0.004, s2: 0.012, s3: 0.03 } as const;
@@ -91,6 +103,18 @@ vec3 rgbToLab(vec3 c) {
   vec3 f = mix((LAB_KAPPA * xyz + 16.0) / 116.0, pow(max(xyz, 0.0), vec3(1.0 / 3.0)), step(vec3(LAB_EPS), xyz));
   return vec3(116.0 * f.y - 16.0, 500.0 * (f.x - f.y), 200.0 * (f.y - f.z));
 }
+vec3 rgb2hsv(vec3 c) {
+  float v = max(c.r, max(c.g, c.b));
+  float d = v - min(c.r, min(c.g, c.b));
+  float s = v > 1e-6 ? d / v : 0.0;
+  float dd = max(d, 1e-6);
+  float h = v == c.r ? mod((c.g - c.b) / dd, 6.0) : (v == c.g ? (c.b - c.r) / dd + 2.0 : (c.r - c.g) / dd + 4.0);
+  return vec3(d > 1e-6 ? h * 60.0 : 0.0, s, v);
+}
+vec3 hsv2rgb(float h, float s, float v) {
+  vec3 k = mod(vec3(5.0, 3.0, 1.0) + mod(h, 360.0) / 60.0, 6.0);
+  return v * (1.0 - s * clamp(min(k, 4.0 - k), 0.0, 1.0));
+}
 vec3 labToRgb(vec3 lab) {
   float fy = (lab.x + 16.0) / 116.0;
   vec3 f = vec3(fy + lab.y / 500.0, fy, fy - lab.z / 200.0);
@@ -121,7 +145,35 @@ uniform float uEye, uDark, uTeeth, uSharpen, uVignette;
 uniform bool uMatch;
 uniform float uMatchAmount;
 uniform vec3 uSrcMean, uRefMean;
+uniform bool uProtectMoles;     // spot healing keeps beauty marks
+uniform bool uHsl;              // 8-channel mixer active
+uniform vec3 uHslK[8];          // per channel (hue, saturation, luminance) in -1..1
+uniform bool uGrade;            // colour grading active
+uniform vec3 uGradeOff[3];      // shadows / midtones / highlights RGB offsets (see gradeUniforms)
+uniform vec3 uGradeBounds;      // shadow pivot, highlight pivot, crossover width
 ${COMMON}
+const float HUE_C[9] = ${HUE_CENTERS_GLSL};
+vec3 hslMixer(vec3 c) {
+  vec3 hsv = rgb2hsv(c);
+  int lo = 0;
+  for (int i = 1; i < 8; i++) if (hsv.x >= HUE_C[i]) lo = i;
+  float t = (hsv.x - HUE_C[lo]) / (HUE_C[lo + 1] - HUE_C[lo]);
+  t = t * t * (3.0 - 2.0 * t);
+  vec3 k = mix(uHslK[lo], uHslK[(lo + 1) % 8], t);
+  float g = smoothstep(0.0, ${glslFloat(HSL_NEUTRAL_EDGE)}, hsv.y);
+  vec3 o = hsv2rgb(hsv.x + k.x * ${glslFloat(HSL_HUE_RANGE)} * g, clamp(hsv.y * (1.0 + k.y), 0.0, 1.0), hsv.z);
+  float y1 = luma(o);
+  float keep = y1 > 1e-4 ? luma(c) / max(y1, 1e-4) : 1.0;  // hue / saturation keep luma
+  return clamp(o * keep * (1.0 + ${glslFloat(HSL_LUM_RANGE)} * k.z * g * hsv.y), 0.0, 1.0);
+}
+vec3 colorGrade(vec3 c) {
+  float y = clamp(luma(c), 0.0, 1.0);
+  float hw = uGradeBounds.z * 0.5;
+  float ws = 1.0 - smoothstep(uGradeBounds.x - hw, uGradeBounds.x + hw, y);
+  float wh = smoothstep(uGradeBounds.y - hw, uGradeBounds.y + hw, y);
+  float wm = clamp(1.0 - ws - wh, 0.0, 1.0);
+  return clamp(c + ws * uGradeOff[0] + wm * uGradeOff[1] + wh * uGradeOff[2], 0.0, 1.0);
+}
 float toneCurve(float L) {
   if (L <= uSrcQ[0]) return uRefQ[0];
   for (int i = 1; i < 17; i++) {
@@ -150,13 +202,19 @@ void main() {
     float k = skin * uSmooth * (1.0 - edge);
     c -= k * ((1.0 - uTexture) * fine + 0.85 * mid);
   }
-  // Blemishes: small spots darker or redder than the surrounding tone.
+  // Spot healing (preview of retouch_engine.heal_spots): small spots darker or redder than
+  // the surrounding tone get the surrounding tone plus their own grain. The face mask alone
+  // gates it, because a red pimple fails the colour-based skin test. 2x/3x widen detection;
+  // very dark, neutral spots (beauty marks) are kept unless protection is off.
   if (uBlemish > 0.0) {
-    float dark = smoothstep(0.015, 0.05, luma(low2) - luma(low1));
-    float red = smoothstep(0.012, 0.035, crOf(low1) - crOf(low2));
-    float spot = max(dark, red) * skin;
+    float sens = 1.0 + 0.45 * (uMultiplier - 1.0);
+    float d = luma(low2) - luma(low1);
+    float r = crOf(low1) - crOf(low2);
+    float spot = max(smoothstep(0.015 / sens, 0.05 / sens, d), smoothstep(0.012 / sens, 0.035 / sens, r));
+    if (uProtectMoles) spot *= 1.0 - smoothstep(0.1, 0.16, luma(low2) - luma(low0)) * (1.0 - smoothstep(0.01, 0.025, r));
+    float area = uHasFace ? m.r : skin;
     vec3 clean = low2 + fine * uTexture;
-    c += (clean - c) * spot * uBlemish;
+    c += (clean - c) * spot * area * min(1.0, uBlemish * (0.9 + 0.1 * sens));
   }
   if (uUnify > 0.0) {
     float t = uUnify * 0.8 * skin;
@@ -233,6 +291,11 @@ void main() {
   float sat = clamp(max(c.r, max(c.g, c.b)) - min(c.r, min(c.g, c.b)), 0.0, 1.0);
   c = y + (c - y) * (1.0 + uSat);
   c = y + (c - y) * (1.0 + uVib * (1.0 - sat));
+
+  // Colour mixer and grading (color_engine.py, stage 8b).
+  c = clamp(c, 0.0, 1.0);
+  if (uHsl) c = hslMixer(c);
+  if (uGrade) c = colorGrade(c);
 
   if (uSharpen > 0.0) c += uSharpen * 1.2 * (src - low0) * (1.0 - 0.8 * skin * uSmooth);
 
