@@ -230,7 +230,7 @@ def engine_filename(triple: str) -> str:
     return f"{ENGINE_NAME}-{triple}{'.exe' if 'windows' in triple else ''}"
 
 
-def build_engine(triple: str, debug: bool) -> Path:
+def build_engine(triple: str) -> Path:
     check_python_deps()
     work = ROOT / "build" / "pyinstaller"
     dist = work / "dist"
@@ -261,9 +261,8 @@ def build_engine(triple: str, debug: bool) -> Path:
     ]
     # Console subsystem on purpose: Tauri spawns sidecars with CREATE_NO_WINDOW, so no window
     # appears, and a windowed (--noconsole) build would leave sys.stderr = None for logging.
-    if not debug and sys.platform.startswith("linux"):
-        # Stripping macOS libraries invalidates their code signatures, so Linux only.
-        args.append("--strip")
+    # No --strip: binutils on older distros (Ubuntu 22.04) breaks the page alignment of
+    # NumPy's bundled OpenBLAS, and on macOS stripping invalidates library signatures.
     for mod in HIDDEN_IMPORTS:
         args += ["--hidden-import", mod]
     for pkg in COLLECT_ALL:
@@ -321,7 +320,6 @@ def main() -> int:
     p.add_argument("--skip-optional-models", action="store_true", help="bundle only the face model (no bokeh depth)")
     p.add_argument("--offline", action="store_true", help="never download; fail if a required model is missing")
     p.add_argument("--no-self-test", action="store_true")
-    p.add_argument("--debug", action="store_true", help="keep symbols in the engine binary")
     p.add_argument("--bundle", action="store_true", help="run `npm run desktop:build` afterwards")
     args = p.parse_args()
 
@@ -331,7 +329,7 @@ def main() -> int:
         stage_models(args.skip_optional_models, args.offline)
     if args.models_only:
         return 0
-    binary = build_engine(triple, args.debug)
+    binary = build_engine(triple)
     if not args.no_self_test:
         self_test(binary)
     if args.bundle:
