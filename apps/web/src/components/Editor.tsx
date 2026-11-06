@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { colorStatsFromRgba } from '@/engine/color';
+import { profileFromRgba } from '@/engine/style';
 import { aiHealth, analyze, pool } from '@/lib/ai';
-import { ACCEPTED_TYPES, bitmapPixels, clearCachedMask, fitSize, forgetImage, getProxy, loadImage, newId } from '@/lib/images';
+import { proxyJpeg } from '@/lib/depth';
+import { ACCEPTED_TYPES, bitmapPixels, clearCachedMask, fitSize, forgetImage, loadImage, newId } from '@/lib/images';
 import { selectActivePhoto, useEditor, type CompareMode } from '@/lib/store';
 import { AdjustmentPanel } from './AdjustmentPanel';
 import { ExportDialog } from './ExportDialog';
@@ -11,16 +12,7 @@ import { Filmstrip, isFlagged, type CullFilter } from './Filmstrip';
 import { PhotoEditorViewport, requestZoom } from './PhotoEditorViewport';
 import { PresetPanel } from './PresetPanel';
 
-const ANALYZE_LONG_EDGE = 1280;
-
-/** Encode a downscaled JPEG of the proxy for the AI service (landmarks don't need full res). */
-async function analysisJpeg(id: string): Promise<Blob> {
-  const proxy = getProxy(id)!;
-  const [w, h] = fitSize(proxy.width, proxy.height, ANALYZE_LONG_EDGE);
-  const c = new OffscreenCanvas(w, h);
-  c.getContext('2d')!.drawImage(proxy, 0, 0, w, h);
-  return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
-}
+const PROFILE_LONG_EDGE = 512;
 
 async function runAnalysis(ids: string[]) {
   const st = useEditor.getState();
@@ -32,7 +24,7 @@ async function runAnalysis(ids: string[]) {
     }
     st.setAnalysis(id, 'pending');
     try {
-      const analysis = await analyze(await analysisJpeg(id));
+      const analysis = await analyze(await proxyJpeg(id));
       clearCachedMask(id);
       st.setAnalysis(id, 'done', analysis);
     } catch (e) {
@@ -88,7 +80,10 @@ export function Editor() {
       try {
         const img = await loadImage(id, file);
         useEditor.getState().addPhotos([{ id, name: file.name, width: img.width, height: img.height, thumbUrl: img.thumbUrl }]);
-        useEditor.getState().setLocalStats(id, colorStatsFromRgba(bitmapPixels(img.proxy, 512)));
+        const [pw, ph] = fitSize(img.proxy.width, img.proxy.height, PROFILE_LONG_EDGE);
+        const profile = profileFromRgba(bitmapPixels(img.proxy, PROFILE_LONG_EDGE), pw, ph);
+        useEditor.getState().setLocalStats(id, profile.stats);
+        useEditor.getState().setProfile(id, profile);
         loaded.add(id);
       } catch (e) {
         console.warn(`Could not open ${file.name}`, e);
@@ -130,6 +125,7 @@ export function Editor() {
       else if (e.key === '\\') s.setView({ mode: s.view.mode === 'original' ? 'edited' : 'original' });
       else if (e.key.toLowerCase() === 'y') s.setView({ mode: s.view.mode === 'split' ? 'edited' : 'split' });
       else if (e.key.toLowerCase() === 'm') s.setView({ showMask: !s.view.showMask });
+      else if (e.key.toLowerCase() === 'd') s.setView({ mode: s.view.mode === 'diff' ? 'edited' : 'diff' });
       else if (e.key.toLowerCase() === 'x' && s.activeId) s.toggleRejected(s.activeId);
       else if (e.key === '0') requestZoom('fit');
       else if (e.key === '1') requestZoom('actual');
@@ -188,6 +184,7 @@ export function Editor() {
                   ['original', 'Original'],
                   ['split', 'Split'],
                   ['side', 'Side by side'],
+                  ['diff', 'Difference'],
                 ] as Array<[CompareMode, string]>
               ).map(([m, label]) => (
                 <button key={m} className="seg" aria-pressed={view.mode === m} onClick={() => setView({ mode: m })}>

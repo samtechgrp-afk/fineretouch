@@ -5,7 +5,7 @@ import type { Adjustments, ColorStats, ImageAnalysis } from '@fineretouch/shared
 /** Base URL of services/ai. Configure with NEXT_PUBLIC_AI_URL. */
 export const AI_URL = (process.env.NEXT_PUBLIC_AI_URL ?? 'http://localhost:8000').replace(/\/$/, '');
 
-export async function aiHealth(signal?: AbortSignal): Promise<{ status: string; faceBackend: string } | null> {
+export async function aiHealth(signal?: AbortSignal): Promise<{ status: string; faceBackend: string; depthBackend?: string } | null> {
   try {
     const res = await fetch(`${AI_URL}/health`, { signal, cache: 'no-store' });
     return res.ok ? await res.json() : null;
@@ -29,6 +29,11 @@ async function postFile<T>(path: string, file: Blob, extra?: Record<string, stri
  */
 export async function analyze(proxyJpeg: Blob, signal?: AbortSignal): Promise<ImageAnalysis> {
   return (await postFile('/v1/analyze', proxyJpeg, undefined, signal)).json();
+}
+
+/** Relative depth (8-bit PNG, 0 = subject, 255 = far) computed by the AI service's depth model. */
+export async function depthMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<Blob> {
+  return (await postFile('/v1/depth', proxyJpeg, undefined, signal)).blob();
 }
 
 export async function referenceStats(file: Blob): Promise<ColorStats> {

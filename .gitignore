@@ -8,4 +8,6 @@ __pycache__/
 .pytest_cache/
 .venv/
 services/ai/models/*.task
+services/ai/models/*.tflite
+services/ai/models/*.onnx
 next-env.d.ts

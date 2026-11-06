@@ -3,20 +3,50 @@
 import {
   DEFAULT_ADJUSTMENTS,
   applyPreset,
+  autoRetouch,
+  mapStyleToAdjustments,
   sanitizeAdjustments,
+  smartSyncAdjustments,
   type AdjustmentKey,
   type Adjustments,
   type ColorMatch,
   type ColorStats,
+  type DepthBokehSettings,
   type ImageAnalysis,
   type Preset,
+  type SkinMultiplier,
+  type StrayHairSettings,
+  type StyleProfile,
+  type StyleSyncMode,
 } from '@fineretouch/shared';
 import { create } from 'zustand';
 
 export const HISTORY_LIMIT = 100;
 
 export type AnalysisState = 'idle' | 'pending' | 'done' | 'error' | 'offline';
-export type CompareMode = 'edited' | 'original' | 'split' | 'side';
+export type CompareMode = 'edited' | 'original' | 'split' | 'side' | 'diff';
+/** Where a photo's depth map came from: the AI service's model, or the client-side portrait prior. */
+export type DepthState = 'none' | 'pending' | 'model' | 'prior' | 'error';
+
+export interface PaletteSwatch {
+  rgb: [number, number, number];
+  share: number;
+}
+
+/** "Sync style from reference": the reference look and how to apply it. */
+export interface StyleSyncState {
+  referenceImageId: string | null;
+  referenceName: string | null;
+  /** Object URL of a small preview of the reference. */
+  referenceUrl: string | null;
+  profile: StyleProfile | null;
+  matchedPalette: PaletteSwatch[];
+  mode: StyleSyncMode;
+  /** 0..100 strength of the transfer. */
+  amount: number;
+  /** true: apply to every photo in the shoot ("Sync to All"); false: selection or active photo. */
+  syncTargetBatch: boolean;
+}
 
 export interface Photo {
   id: string;
@@ -33,6 +63,9 @@ export interface Photo {
   analysisState: AnalysisState;
   /** Client-side L*a*b* stats of the proxy, used when the AI service is offline. */
   localStats: ColorStats | null;
+  /** Style metrics of the original (for style sync, smart sync and auto retouch). */
+  profile: StyleProfile | null;
+  depthState: DepthState;
   rejected: boolean;
 }
 
@@ -55,6 +88,7 @@ export interface EditorState {
   clipboard: Adjustments | null;
   customPresets: Preset[];
   aiOnline: boolean | null;
+  styleSync: StyleSyncState;
 
   addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'>>): void;
   removePhotos(ids: string[]): void;
@@ -70,6 +104,22 @@ export interface EditorState {
   /** Discrete change that records its own undo step. */
   updateAdjustments(patch: Partial<Adjustments>, ids?: string[]): void;
   setColorMatch(match: ColorMatch | null, ids?: string[]): void;
+  /** Live change (e.g. during a drag) without an undo step. */
+  patchAdjustments(patch: Partial<Adjustments>, id?: string): void;
+  setSkinMultiplier(multiplier: SkinMultiplier, ids?: string[]): void;
+  /** `live` skips history (slider drags); call beginEdit() at drag start. */
+  setStrayHairRemoval(patch: Partial<StrayHairSettings>, opts?: { live?: boolean; ids?: string[] }): void;
+  setDepthBokeh(patch: Partial<DepthBokehSettings>, opts?: { live?: boolean; ids?: string[] }): void;
+  setStyleReference(ref: Pick<StyleSyncState, 'referenceImageId' | 'referenceName' | 'referenceUrl' | 'profile' | 'matchedPalette'> | null): void;
+  setStyleSyncOptions(patch: Partial<Pick<StyleSyncState, 'mode' | 'amount' | 'syncTargetBatch'>>): void;
+  /** Apply the reference look; returns how many photos changed. */
+  applyStyleSync(): number;
+  /** Copy the active photo's edits to the selection (or all), compensating exposure/WB per photo. */
+  smartSync(): number;
+  /** One-click AI starting point from each photo's own measurements. */
+  autoRetouch(ids?: string[]): number;
+  setProfile(id: string, profile: StyleProfile): void;
+  setDepthState(id: string, state: DepthState): void;
   undo(id?: string): void;
   redo(id?: string): void;
   resetPhotos(ids?: string[]): void;
@@ -139,6 +189,16 @@ export const useEditor = create<EditorState>()((set, get) => ({
   clipboard: null,
   customPresets: loadCustomPresets(),
   aiOnline: null,
+  styleSync: {
+    referenceImageId: null,
+    referenceName: null,
+    referenceUrl: null,
+    profile: null,
+    matchedPalette: [],
+    mode: 'palette',
+    amount: 100,
+    syncTargetBatch: false,
+  },
 
   addPhotos(list) {
     set((s) => {
@@ -154,6 +214,8 @@ export const useEditor = create<EditorState>()((set, get) => ({
           analysis: null,
           analysisState: 'idle',
           localStats: null,
+          profile: null,
+          depthState: 'none',
           rejected: false,
         };
         order.push(p.id);
@@ -239,6 +301,113 @@ export const useEditor = create<EditorState>()((set, get) => ({
   setColorMatch(match, ids) {
     const s = get();
     set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, { ...p.adjustments, colorMatch: match })) });
+  },
+
+  patchAdjustments(patch, id) {
+    const s = get();
+    const pid = id ?? s.activeId;
+    if (!pid || !s.photos[pid]) return;
+    set({ photos: mapPhotos(s, [pid], (p) => ({ ...p, adjustments: sanitizeAdjustments({ ...p.adjustments, ...patch }) })) });
+  },
+
+  setSkinMultiplier(multiplier, ids) {
+    get().updateAdjustments({ skinMultiplier: multiplier }, ids);
+  },
+
+  setStrayHairRemoval(patch, opts) {
+    const s = get();
+    if (opts?.live) {
+      const p = selectActivePhoto(s);
+      if (p) s.patchAdjustments({ strayHairRemoval: { ...p.adjustments.strayHairRemoval, ...patch } });
+      return;
+    }
+    set({
+      photos: mapPhotos(s, targets(s, opts?.ids), (p) =>
+        withHistory(p, sanitizeAdjustments({ ...p.adjustments, strayHairRemoval: { ...p.adjustments.strayHairRemoval, ...patch } })),
+      ),
+    });
+  },
+
+  setDepthBokeh(patch, opts) {
+    const s = get();
+    if (opts?.live) {
+      const p = selectActivePhoto(s);
+      if (p) s.patchAdjustments({ depthBokeh: { ...p.adjustments.depthBokeh, ...patch } });
+      return;
+    }
+    set({
+      photos: mapPhotos(s, targets(s, opts?.ids), (p) =>
+        withHistory(p, sanitizeAdjustments({ ...p.adjustments, depthBokeh: { ...p.adjustments.depthBokeh, ...patch } })),
+      ),
+    });
+  },
+
+  setStyleReference(ref) {
+    set((s) => {
+      if (s.styleSync.referenceUrl && s.styleSync.referenceUrl !== ref?.referenceUrl) URL.revokeObjectURL(s.styleSync.referenceUrl);
+      return {
+        styleSync: ref
+          ? { ...s.styleSync, ...ref }
+          : { ...s.styleSync, referenceImageId: null, referenceName: null, referenceUrl: null, profile: null, matchedPalette: [] },
+      };
+    });
+  },
+
+  setStyleSyncOptions(patch) {
+    set((s) => ({ styleSync: { ...s.styleSync, ...patch } }));
+  },
+
+  applyStyleSync() {
+    const s = get();
+    const { profile: ref, mode, amount, syncTargetBatch } = s.styleSync;
+    if (!ref) return 0;
+    const ids = (syncTargetBatch ? s.order : targets(s)).filter((id) => s.photos[id]?.profile);
+    set({
+      photos: mapPhotos(s, ids, (p) =>
+        withHistory(p, sanitizeAdjustments({ ...p.adjustments, ...mapStyleToAdjustments(ref, p.profile!, mode, amount) })),
+      ),
+    });
+    return ids.length;
+  },
+
+  smartSync() {
+    const s = get();
+    if (!s.activeId) return 0;
+    const hero = s.photos[s.activeId];
+    const heroStats = hero.analysis?.colorStats ?? hero.localStats;
+    if (!heroStats) return 0;
+    const ids = (s.selected.length > 1 ? s.selected : s.order).filter((id) => id !== s.activeId);
+    let n = 0;
+    set({
+      photos: mapPhotos(s, ids, (p) => {
+        const st = p.analysis?.colorStats ?? p.localStats;
+        if (!st) return p;
+        n++;
+        return withHistory(p, smartSyncAdjustments(hero.adjustments, heroStats, st));
+      }),
+    });
+    return n;
+  },
+
+  autoRetouch(ids) {
+    const s = get();
+    const list = targets(s, ids).filter((id) => s.photos[id].profile);
+    set({
+      photos: mapPhotos(s, list, (p) =>
+        withHistory(p, sanitizeAdjustments({ ...p.adjustments, ...autoRetouch(p.profile!, Boolean(p.analysis?.faces.length)) })),
+      ),
+    });
+    return list.length;
+  },
+
+  setProfile(id, profile) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], profile } } });
+  },
+
+  setDepthState(id, state) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], depthState: state } } });
   },
 
   undo(id) {

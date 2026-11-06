@@ -6,9 +6,28 @@
  *
  * Coordinate convention: texture row 0 is the image's top row, and every
  * offscreen pass keeps that orientation. Only the display pass flips to the canvas.
+ *
+ * Pass graph per slider change:
+ *   RETOUCH (skin, boost, stray hair, face, colour, tone) -> out
+ *   [bokeh on] DOWNSAMPLE out -> small, BOKEH x2 ("double blur") small -> a -> b,
+ *              COMPOSITE out + b by depth -> final
+ *   DISPLAY final (or out) with compare modes.
+ *
+ * The boost (2x/3x), stray-hair and bokeh passes are real-time approximations of
+ * services/ai/app/retouch_engine.py; everything else mirrors pipeline.py exactly.
  */
 
-export const BLUR_SIGMAS = { s0: 0.0012, s1: 0.004, s2: 0.012 } as const;
+/** s3 is the broad base used by the 2x/3x skin boost for tone evening. */
+export const BLUR_SIGMAS = { s0: 0.0012, s1: 0.004, s2: 0.012, s3: 0.03 } as const;
+
+/** Depth band (0 = subject) over which the circle of confusion ramps up; same as FOCUS_START/END in retouch_engine.py. */
+export const FOCUS_START = 0.04;
+export const FOCUS_END = 0.45;
+/** blurRadius 100 => 2% of the long edge before the multiplier (BOKEH_RADIUS_SHARE). */
+export const BOKEH_RADIUS_SHARE = 0.02;
+export const BOKEH_TAPS = 48;
+/** Kernels are kept at or below this many working pixels; bigger blurs run on a downsampled copy. */
+export const BOKEH_MAX_WORKING_COC = 24;
 
 export const VERT = /* glsl */ `#version 300 es
 in vec2 aPos;
@@ -86,8 +105,14 @@ export const RETOUCH_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 in vec2 vUv;
 out vec4 outColor;
-uniform sampler2D uSrc, uLow0, uLow1, uLow2, uMask;
+uniform sampler2D uSrc, uLow0, uLow1, uLow2, uLow3, uMask, uHairRoi;
 uniform bool uHasFace;
+uniform float uMultiplier;      // 1..3 skin boost
+uniform bool uHair;             // stray hair cleanup enabled and a face ROI exists
+uniform float uHairStrength;    // 0..1
+uniform mat3 uMatchM;           // colour transfer matrix (L*a*b*), see matchMatrix() in color.ts
+uniform bool uCurve;            // histogram-matched L* tone curve available
+uniform float uSrcQ[17], uRefQ[17];
 // Adjustments normalised to -1..1 or 0..1 on the CPU.
 uniform float uExposure, uContrast, uHighlights, uShadows;
 uniform float uTemp, uTint, uSat, uVib;
@@ -95,13 +120,21 @@ uniform float uSmooth, uTexture, uBlemish, uUnify;
 uniform float uEye, uDark, uTeeth, uSharpen, uVignette;
 uniform bool uMatch;
 uniform float uMatchAmount;
-uniform vec3 uSrcMean, uSrcStd, uRefMean, uRefStd;
+uniform vec3 uSrcMean, uRefMean;
 ${COMMON}
+float toneCurve(float L) {
+  if (L <= uSrcQ[0]) return uRefQ[0];
+  for (int i = 1; i < 17; i++) {
+    if (L <= uSrcQ[i]) return mix(uRefQ[i - 1], uRefQ[i], (L - uSrcQ[i - 1]) / max(uSrcQ[i] - uSrcQ[i - 1], 1e-4));
+  }
+  return uRefQ[16];
+}
 void main() {
   vec3 src = texture(uSrc, vUv).rgb;
   vec3 low0 = texture(uLow0, vUv).rgb;
   vec3 low1 = texture(uLow1, vUv).rgb;
   vec3 low2 = texture(uLow2, vUv).rgb;
+  vec3 low3 = texture(uLow3, vUv).rgb;
   vec4 m = texture(uMask, vUv); // r = face skin, g = eyes, b = under-eye, a = mouth
 
   float p = skinProb(low0);
@@ -131,6 +164,33 @@ void main() {
     float cb = cbOf(c), cr = crOf(c);
     c = fromYCbCr(y, cb + (cbOf(low2) - cb) * t, cr + (crOf(low2) - cr) * t);
   }
+  // 2x / 3x boost: stubborn spots in the detail layer, pigment and redness in the colour layer.
+  float extra = uMultiplier - 1.0;
+  if (extra > 0.0) {
+    float edge = smoothstep(0.05, 0.14, abs(luma(low1) - luma(low2)));
+    float sens = 1.0 + 0.6 * extra;
+    float spot = smoothstep(0.03 / sens, 0.08 / sens, luma(low1) - luma(src)) * (1.0 - edge) * skin;
+    vec3 patchc = low1 + (src - low0) * 0.85; // local tone + its own fine grain
+    c = mix(c, patchc, spot * min(1.0, 0.5 + 0.25 * extra));
+    float pig = smoothstep(0.01, 0.05, luma(low3) - luma(low2)) * (1.0 - edge);
+    float redl = smoothstep(0.008, 0.03, crOf(low2) - crOf(low3));
+    float lift = min(max(luma(low3) - luma(low2), 0.0), 0.08) * pig * (0.35 + 0.2 * extra);
+    float t = clamp(max(pig, redl) * (0.55 + 0.25 * extra) + 0.12 * extra, 0.0, 1.0) * skin;
+    float yb = luma(c) + lift * skin;
+    c = fromYCbCr(yb, cbOf(c) + (cbOf(low3) - cbOf(low2)) * t, crOf(c) + (crOf(low3) - crOf(low2)) * t);
+  }
+  // Stray hair: thin strands that differ from their surroundings inside the face-outline band.
+  if (uHair) {
+    float roi = texture(uHairRoi, vUv).r;
+    if (roi > 0.0) {
+      float d = luma(low1) - luma(src);
+      float thin = max(d, -0.8 * d);
+      float coarse = abs(luma(low1) - luma(low2));
+      float line = smoothstep(0.05 - 0.025 * uHairStrength, 0.12 - 0.04 * uHairStrength, thin)
+                 * (1.0 - smoothstep(0.05, 0.12, coarse));
+      c = mix(c, low1, line * roi * (0.6 + 0.4 * uHairStrength));
+    }
+  }
   if (uHasFace) {
     if (uEye > 0.0) {
       float e = uEye * m.g;
@@ -152,10 +212,11 @@ void main() {
   }
   c = clamp(c, 0.0, 1.0);
 
-  // Reinhard colour transfer in L*a*b*.
+  // Statistical colour transfer in L*a*b*: covariance-aligning matrix + L* tone curve.
   if (uMatch && uMatchAmount > 0.0) {
     vec3 lab = rgbToLab(c);
-    vec3 matched = (lab - uSrcMean) / max(uSrcStd, vec3(1e-3)) * uRefStd + uRefMean;
+    vec3 matched = uMatchM * (lab - uSrcMean) + uRefMean;
+    if (uCurve) matched.x = toneCurve(lab.x);
     c = mix(c, labToRgb(matched), uMatchAmount);
   }
 
@@ -191,11 +252,13 @@ uniform vec2 uCanvas;   // canvas size in device pixels
 uniform vec2 uImage;    // proxy size in pixels
 uniform float uScale;   // device pixels per image pixel
 uniform vec2 uOffset;   // device-pixel position of the image's top-left corner
-uniform int uMode;      // 0 edited, 1 original, 2 split, 3 side by side
+uniform int uMode;      // 0 edited, 1 original, 2 split, 3 side by side, 4 difference
 uniform float uSplit;   // split position in device pixels (mode 2)
 uniform bool uShowMask;
 uniform vec3 uBg;
 uniform float uDpr;
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+float luma(vec3 c) { return dot(c, LUMA); }
 
 vec3 sampleTex(sampler2D t, vec2 ip) {
   // Crisp pixels when zoomed in past 2x, smooth filtering otherwise.
@@ -223,6 +286,13 @@ void main() {
     return;
   }
   vec3 c = original ? sampleTex(uOriginal, ip) : sampleTex(uProcessed, ip);
+  if (uMode == 4) {
+    // Retouch heat map: where and how strongly the edit changed the photo (QA for over-retouching).
+    vec3 o = sampleTex(uOriginal, ip);
+    float d = clamp(length(c - o) * 4.0, 0.0, 1.0);
+    vec3 heat = d < 0.5 ? mix(vec3(0.05, 0.06, 0.1), vec3(0.93, 0.6, 0.2), d * 2.0) : mix(vec3(0.93, 0.6, 0.2), vec3(1.0), (d - 0.5) * 2.0);
+    c = mix(luma(o) * vec3(0.35), heat, smoothstep(0.02, 0.1, d));
+  }
   if (uShowMask) {
     vec4 m = texture(uMask, ip / uImage);
     c = mix(c, vec3(1.0, 0.25, 0.35), m.r * 0.45);
@@ -232,3 +302,93 @@ void main() {
   }
   outColor = vec4(c, 1.0);
 }`;
+
+
+/** Box-filtered downsample (4x4 taps across the source footprint). */
+export const DOWNSAMPLE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uTex;
+uniform vec2 uFootprint; // destination texel size in source UV
+void main() {
+  vec3 acc = vec3(0.0);
+  for (int y = 0; y < 4; y++)
+    for (int x = 0; x < 4; x++)
+      acc += texture(uTex, vUv + (vec2(float(x), float(y)) / 3.0 - 0.5) * uFootprint).rgb;
+  outColor = vec4(acc / 16.0, 1.0);
+}`;
+
+/**
+ * Depth-aware gather bokeh. Each output pixel averages aperture-shaped samples within
+ * its own circle of confusion; a sample only counts if its own CoC reaches back to this
+ * pixel, so the sharp subject never smears into the background. Highlights are boosted
+ * in linear light so bright points bloom into disc or hexagon shapes. Run twice
+ * (full radius, then 45%): the "double blur" hides the sparse-tap pattern.
+ */
+export const BOKEH_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uImg, uDepth;
+uniform vec2 uTexel;          // 1 / working size
+uniform float uMaxCoc;        // working pixels
+uniform float uRadiusScale;   // 1.0 then 0.45
+uniform float uGain;          // highlight boost 0..1
+uniform vec2 uKernel[${BOKEH_TAPS}];  // unit disk or hexagon
+${COMMON}
+float coc(vec2 uv) { return uMaxCoc * uRadiusScale * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, uv).r); }
+vec3 boosted(vec3 srgb) {
+  vec3 lin = toLinear(srgb);
+  return lin * (1.0 + uGain * 6.0 * smoothstep(0.55, 0.95, luma(lin)));
+}
+void main() {
+  vec3 centre = texture(uImg, vUv).rgb;
+  float cc = coc(vUv);
+  if (cc < 0.5) { outColor = vec4(centre, 1.0); return; }
+  vec3 acc = boosted(centre);
+  float wsum = 1.0;
+  for (int i = 0; i < ${BOKEH_TAPS}; i++) {
+    vec2 o = uKernel[i] * cc;
+    vec2 uv = vUv + o * uTexel;
+    float w = clamp(coc(uv) - length(o) + 1.0, 0.0, 1.0);
+    acc += boosted(texture(uImg, uv).rgb) * w;
+    wsum += w;
+  }
+  outColor = vec4(toSrgb(clamp(acc / wsum, 0.0, 1.0)), 1.0);
+}`;
+
+/** Blend the sharp retouch with the (upsampled) bokeh by each pixel's circle of confusion. */
+export const COMPOSITE_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uSharp, uBlur, uDepth;
+uniform float uMaxCocFull; // pixels at the output resolution
+void main() {
+  float coc = uMaxCocFull * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, vUv).r);
+  float a = smoothstep(0.35, 1.5, coc);
+  outColor = vec4(mix(texture(uSharp, vUv).rgb, texture(uBlur, vUv).rgb, a), 1.0);
+}`;
+
+/**
+ * Sample positions for the bokeh gather: a Vogel (golden-angle) spiral filling the unit
+ * disk, or the same spiral stretched to a hexagon (flat aperture blades) for `hex`.
+ */
+export function apertureKernel(n: number, shape: 'circle' | 'hex'): Float32Array {
+  const out = new Float32Array(n * 2);
+  const golden = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < n; i++) {
+    const r = Math.sqrt((i + 0.5) / n);
+    const t = i * golden;
+    let k = 1;
+    if (shape === 'hex') {
+      const seg = Math.PI / 3;
+      const a = ((t % seg) + seg) % seg;
+      k = Math.cos(Math.PI / 6) / Math.cos(a - Math.PI / 6);
+    }
+    out[i * 2] = Math.cos(t) * r * k;
+    out[i * 2 + 1] = Math.sin(t) * r * k;
+  }
+  return out;
+}

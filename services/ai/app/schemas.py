@@ -9,14 +9,37 @@ from pydantic import BaseModel, ConfigDict, Field
 Point = tuple[float, float]
 
 
+TONE_QUANTILE_COUNT = 17
+
+
 class ColorStats(BaseModel):
     mean: tuple[float, float, float]
     std: tuple[float, float, float]
+    # Optional row-major 3x3 L*a*b* covariance and L* quantiles (see packages/shared).
+    cov: list[float] | None = Field(None, min_length=9, max_length=9)
+    lQuantiles: list[float] | None = Field(None, min_length=TONE_QUANTILE_COUNT, max_length=TONE_QUANTILE_COUNT)
 
 
 class ColorMatch(BaseModel):
     reference: ColorStats
     amount: float = Field(100, ge=0, le=100)
+
+
+class StrayHairSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    strength: float = Field(60, ge=0, le=100)
+
+
+class DepthBokehSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    blurRadius: float = Field(50, ge=0, le=100)
+    bokehMultiplier: float = Field(100, ge=100, le=300)
+    apertureShape: Literal["circle", "hex"] = "circle"
+    highlightBoost: float = Field(40, ge=0, le=100)
 
 
 class Adjustments(BaseModel):
@@ -40,6 +63,34 @@ class Adjustments(BaseModel):
     sharpen: float = Field(0, ge=0, le=100)
     vignette: float = Field(0, ge=-100, le=100)
     colorMatch: ColorMatch | None = None
+    skinMultiplier: int = Field(1, ge=1, le=3)
+    strayHairRemoval: StrayHairSettings = StrayHairSettings()
+    depthBokeh: DepthBokehSettings = DepthBokehSettings()
+
+
+class StyleProfile(BaseModel):
+    """Mirror of StyleProfile in packages/shared/src/style.ts."""
+
+    stats: ColorStats
+    meanL: float
+    contrast: float
+    warmth: float
+    tintAxis: float
+    chroma: float
+    sharpness: float
+    skinLuma: float | None
+    skinTexture: float | None
+
+
+class StyleSyncTarget(BaseModel):
+    name: str
+    profile: StyleProfile
+    adjustments: dict
+
+
+class StyleSyncResponse(BaseModel):
+    reference: StyleProfile
+    targets: list[StyleSyncTarget]
 
 
 class FaceRegions(BaseModel):

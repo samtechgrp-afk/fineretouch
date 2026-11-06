@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Renderer, type DisplayView } from '@/engine/renderer';
+import { ensureDepth, hairRoiFor } from '@/lib/depth';
 import { faceMaskFor } from '@/lib/export';
-import { getProxy } from '@/lib/images';
+import { getDepth, getProxy } from '@/lib/images';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 
 const BG: [number, number, number] = [0.051, 0.055, 0.063];
@@ -27,6 +28,8 @@ export function PhotoEditorViewport() {
   const rendererRef = useRef<Renderer | null>(null);
   const loadedIdRef = useRef<string | null>(null);
   const maskKeyRef = useRef<string>('');
+  const hairKeyRef = useRef<string>('');
+  const depthKeyRef = useRef<string>('');
   const frameRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -74,13 +77,26 @@ export function PhotoEditorViewport() {
       if (loadedIdRef.current !== p.id) {
         r.setSource(proxy, proxy.width, proxy.height);
         loadedIdRef.current = p.id;
-        maskKeyRef.current = '';
+        maskKeyRef.current = hairKeyRef.current = depthKeyRef.current = '';
       }
       const maskKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
       const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height);
       if (maskKeyRef.current !== maskKey) {
         r.setMask(mask?.data ?? null, mask?.width, mask?.height);
         maskKeyRef.current = maskKey;
+      }
+      const hairOn = p.adjustments.strayHairRemoval.enabled;
+      const hairKey = `${maskKey}:${hairOn}`;
+      if (hairKeyRef.current !== hairKey) {
+        const roi = hairOn ? hairRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
+        r.setHairRoi(roi?.data ?? null, roi?.width, roi?.height);
+        hairKeyRef.current = hairKey;
+      }
+      const depthKey = `${p.id}:${p.depthState}`;
+      if (depthKeyRef.current !== depthKey) {
+        const d = getDepth(p.id);
+        r.setDepth(d?.source ?? null, d?.width, d?.height);
+        depthKeyRef.current = depthKey;
       }
       r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats });
       const g = geometry();
@@ -105,7 +121,14 @@ export function PhotoEditorViewport() {
   // Redraw whenever the photo, its edits/analysis or the view change.
   useEffect(() => {
     draw();
-  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, view, draw]);
+  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, view, draw]);
+
+  // Fetch (or upgrade) the depth map once bokeh is switched on for this photo.
+  const bokehOn = Boolean(photo?.adjustments.depthBokeh.enabled);
+  const aiOnline = useEditor((s) => s.aiOnline);
+  useEffect(() => {
+    if (photo && bokehOn && photo.depthState !== 'pending' && photo.depthState !== 'model') void ensureDepth(photo.id);
+  }, [photo?.id, bokehOn, photo?.depthState, photo?.analysisState, aiOnline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep the drawing buffer at device resolution.
   useEffect(() => {

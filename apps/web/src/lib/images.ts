@@ -19,6 +19,16 @@ export interface LoadedImage {
 const files = new Map<string, File>();
 const proxies = new Map<string, ImageBitmap>();
 const masks = new Map<string, Uint8Array>();
+const hairRois = new Map<string, Uint8Array>();
+
+/** A depth map ready for Renderer.setDepth: a decoded image or single-channel bytes. */
+export interface DepthData {
+  source: ImageBitmap | Uint8Array;
+  width: number;
+  height: number;
+  kind: 'model' | 'prior';
+}
+const depths = new Map<string, DepthData>();
 
 export const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/bmp', 'image/tiff'];
 
@@ -59,13 +69,28 @@ export const getFile = (id: string) => files.get(id);
 export const getProxy = (id: string) => proxies.get(id);
 export const getCachedMask = (id: string) => masks.get(id);
 export const setCachedMask = (id: string, m: Uint8Array) => masks.set(id, m);
-export const clearCachedMask = (id: string) => masks.delete(id);
+export const clearCachedMask = (id: string) => {
+  masks.delete(id);
+  hairRois.delete(id);
+};
+export const getCachedHairRoi = (id: string) => hairRois.get(id);
+export const setCachedHairRoi = (id: string, m: Uint8Array) => hairRois.set(id, m);
+export const getDepth = (id: string) => depths.get(id);
+export const setDepth = (id: string, d: DepthData) => {
+  const old = depths.get(id);
+  if (old && old.source !== d.source && 'close' in old.source) old.source.close();
+  depths.set(id, d);
+};
 
 export function forgetImage(id: string) {
   proxies.get(id)?.close();
   proxies.delete(id);
   files.delete(id);
   masks.delete(id);
+  hairRois.delete(id);
+  const d = depths.get(id);
+  if (d && 'close' in d.source) d.source.close();
+  depths.delete(id);
 }
 
 /** Read RGBA pixels of a bitmap (used for client-side colour statistics). */

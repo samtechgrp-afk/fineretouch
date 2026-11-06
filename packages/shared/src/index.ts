@@ -27,13 +27,49 @@ export interface ColorStats {
   mean: [number, number, number];
   /** Standard deviation of L, a, b. */
   std: [number, number, number];
+  /**
+   * Optional full 3x3 L*a*b* covariance (row-major). When both the photo and the
+   * reference carry it, colour match uses a covariance-aligning (Monge-Kantorovich)
+   * linear transform instead of per-channel scaling, so cross-channel casts transfer too.
+   */
+  cov?: number[];
+  /**
+   * Optional L* values at TONE_QUANTILES. When both sides carry them, colour match
+   * replaces L* with a histogram-matched tone curve (the reference's exact contrast shape).
+   */
+  lQuantiles?: number[];
 }
+
+/** 17 evenly spaced quantiles (0, 1/16, ..., 1) used for tone-curve matching. */
+export const TONE_QUANTILE_COUNT = 17;
 
 export interface ColorMatch {
   /** Statistics of the reference image the look is copied from. */
   reference: ColorStats;
   /** 0-100 blend between the original and the fully transferred look. */
   amount: number;
+}
+
+/** Strength curve for the boosted blemish / dark-spot / tone-evening pass. */
+export type SkinMultiplier = 1 | 2 | 3;
+export const SKIN_MULTIPLIERS: readonly SkinMultiplier[] = [1, 2, 3];
+
+export interface StrayHairSettings {
+  enabled: boolean;
+  strength: number; // 0..100
+}
+
+export type ApertureShape = 'circle' | 'hex';
+
+export interface DepthBokehSettings {
+  enabled: boolean;
+  /** 0..100: base background blur, as a share of 2% of the long edge. */
+  blurRadius: number;
+  /** 100..300 (%): multiplies the base radius; 200 = "double blur", 300 = triple. */
+  bokehMultiplier: number;
+  apertureShape: ApertureShape;
+  /** 0..100: how much bright background points bloom into aperture-shaped discs. */
+  highlightBoost: number;
 }
 
 export interface Adjustments {
@@ -60,9 +96,24 @@ export interface Adjustments {
   sharpen: number; // 0..100
   vignette: number; // -100..100 (negative darkens corners)
   colorMatch: ColorMatch | null;
+  // Boosted retouching (v0.2)
+  /** 1x = classic retouch; 2x / 3x add a recursive low-frequency clean-up pass on skin. */
+  skinMultiplier: SkinMultiplier;
+  strayHairRemoval: StrayHairSettings;
+  depthBokeh: DepthBokehSettings;
 }
 
-export type AdjustmentKey = Exclude<keyof Adjustments, 'colorMatch'>;
+/** Keys of the plain numeric sliders (structured settings have their own controls). */
+export type AdjustmentKey = Exclude<keyof Adjustments, 'colorMatch' | 'skinMultiplier' | 'strayHairRemoval' | 'depthBokeh'>;
+
+export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
+export const DEFAULT_DEPTH_BOKEH: Readonly<DepthBokehSettings> = Object.freeze({
+  enabled: false,
+  blurRadius: 50,
+  bokehMultiplier: 100,
+  apertureShape: 'circle',
+  highlightBoost: 40,
+});
 
 export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   exposure: 0,
@@ -83,6 +134,9 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   sharpen: 0,
   vignette: 0,
   colorMatch: null,
+  skinMultiplier: 1,
+  strayHairRemoval: DEFAULT_STRAY_HAIR,
+  depthBokeh: DEFAULT_DEPTH_BOKEH,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -113,7 +167,7 @@ export const GROUP_LABELS: Record<AdjustmentGroup, string> = {
   detail: 'Detail',
 };
 
-const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
  * Coerce untrusted JSON (a preset file, an API body) into a valid Adjustments object.
@@ -133,16 +187,56 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
       Array.isArray(t) && t.length === 3 && t.every((n) => typeof n === 'number' && Number.isFinite(n))
         ? (t as [number, number, number])
         : null;
-    const mean = triple(ref?.mean);
-    const std = triple(ref?.std);
+    const reference = sanitizeColorStats(ref);
     const amount = typeof cm.amount === 'number' && Number.isFinite(cm.amount) ? clamp(cm.amount, 0, 100) : 100;
-    if (mean && std) out.colorMatch = { reference: { mean, std }, amount };
+    if (reference) out.colorMatch = { reference, amount };
   }
+  const m = src.skinMultiplier;
+  if (m === 1 || m === 2 || m === 3) out.skinMultiplier = m;
+  const sh = asRecord(src.strayHairRemoval);
+  out.strayHairRemoval = {
+    enabled: typeof sh.enabled === 'boolean' ? sh.enabled : DEFAULT_STRAY_HAIR.enabled,
+    strength: num(sh.strength, 0, 100, DEFAULT_STRAY_HAIR.strength),
+  };
+  const db = asRecord(src.depthBokeh);
+  out.depthBokeh = {
+    enabled: typeof db.enabled === 'boolean' ? db.enabled : DEFAULT_DEPTH_BOKEH.enabled,
+    blurRadius: num(db.blurRadius, 0, 100, DEFAULT_DEPTH_BOKEH.blurRadius),
+    bokehMultiplier: num(db.bokehMultiplier, 100, 300, DEFAULT_DEPTH_BOKEH.bokehMultiplier),
+    apertureShape: db.apertureShape === 'hex' ? 'hex' : 'circle',
+    highlightBoost: num(db.highlightBoost, 0, 100, DEFAULT_DEPTH_BOKEH.highlightBoost),
+  };
+  return out;
+}
+
+const asRecord = (v: unknown): Record<string, unknown> => (v && typeof v === 'object' ? (v as Record<string, unknown>) : {});
+const num = (v: unknown, lo: number, hi: number, fallback: number) =>
+  typeof v === 'number' && Number.isFinite(v) ? clamp(v, lo, hi) : fallback;
+const finiteArray = (v: unknown, len: number): number[] | null =>
+  Array.isArray(v) && v.length === len && v.every((n) => typeof n === 'number' && Number.isFinite(n)) ? (v as number[]) : null;
+
+/** Validate untrusted colour statistics (mean/std required; cov and quantiles optional). */
+export function sanitizeColorStats(input: unknown): ColorStats | null {
+  const r = asRecord(input);
+  const mean = finiteArray(r.mean, 3) as [number, number, number] | null;
+  const std = finiteArray(r.std, 3) as [number, number, number] | null;
+  if (!mean || !std) return null;
+  const out: ColorStats = { mean: [...mean], std: [...std] };
+  const cov = finiteArray(r.cov, 9);
+  if (cov) out.cov = [...cov];
+  const q = finiteArray(r.lQuantiles, TONE_QUANTILE_COUNT);
+  if (q) out.lQuantiles = q.map((v) => clamp(v, 0, 100));
   return out;
 }
 
 export function isDefault(adj: Adjustments): boolean {
-  return SLIDERS.every((s) => adj[s.key] === DEFAULT_ADJUSTMENTS[s.key]) && adj.colorMatch === null;
+  return (
+    SLIDERS.every((s) => adj[s.key] === DEFAULT_ADJUSTMENTS[s.key]) &&
+    adj.colorMatch === null &&
+    adj.skinMultiplier === 1 &&
+    !adj.strayHairRemoval.enabled &&
+    !adj.depthBokeh.enabled
+  );
 }
 
 export interface Preset {
@@ -300,3 +394,5 @@ export interface BatchProgress {
 }
 
 export const MAX_BATCH_ITEMS = 5000;
+
+export * from './style.js';

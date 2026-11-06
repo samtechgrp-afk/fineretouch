@@ -8,9 +8,14 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 - **Real-time GPU preview** (WebGL2) on a 2560 px proxy: only one shader pass runs per slider move.
 - **AI face analysis** (MediaPipe 478-point face mesh) drives face-aware masks for skin, eyes, under-eyes and mouth. Without the AI service, colour-based skin detection still works.
 - **Skin retouch:** frequency-separation smoothing with texture preservation, blemish removal, and even skin tone.
+- **1x / 2x / 3x skin & blemish boost:** recursive guided-filter clean-up of stubborn dark spots, acne and redness that keeps pore texture.
+- **Stray hair cleanup** around the face outline and forehead (landmark band + Gabor strand detector + inpainting).
+- **Depth-aware background bokeh:** MiDaS depth + person segmentation, 100-300 % blur multiplier, circular or hexagonal aperture, highlight bloom.
+- **Sync style from reference:** drop any photo; its palette, tone curve and retouch strength are mapped onto one photo or the whole shoot (exact palette or editable sliders).
+- **AI assist:** one-click Auto Retouch, and Smart Sync that evens out exposure and white balance across a shoot while copying your edits.
 - **Face features:** eye brightening, dark-circle reduction, teeth whitening.
-- **Colour and tone:** exposure, contrast, highlights, shadows, white balance, saturation, vibrance, sharpening, vignette, and **colour match** from a reference photo (L\*a\*b\* statistics transfer).
-- **Compare:** before/after split slider, side by side, original toggle, AI mask overlay, and zoom to 800 %.
+- **Colour and tone:** exposure, contrast, highlights, shadows, white balance, saturation, vibrance, sharpening and vignette.
+- **Compare:** before/after split slider, side by side, original toggle, a difference heat map that shows exactly what the retouch changed, AI mask overlay, and zoom to 800 %.
 - **Undo/redo** per photo, **copy/paste settings**, **sync to all or selected**, six built-in presets plus your own.
 - **AI culling:** blurry and eyes-closed flags, a manual reject key, and Keepers/Flagged filters.
 - **Export** at full resolution as JPEG, PNG or WebP, with three engines: in-browser GPU, the AI service, or a **cloud batch queue** (BullMQ workers → S3) for large jobs.

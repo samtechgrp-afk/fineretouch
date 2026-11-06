@@ -88,10 +88,33 @@ flowchart LR
 | Blemish removal | Spots darker or redder than their surroundings at the fine/coarse scale are replaced with the coarse band plus preserved texture |
 | Even skin tone | Pulls skin chroma toward the local average |
 | Eyes / dark circles / teeth | Region-masked exposure + local contrast; under-eye luminance lift and chroma neutralisation; yellow removal and lift on bright mouth pixels |
-| Colour match | Reinhard statistics transfer in CIE L\*a\*b\* toward a reference image |
+| Skin boost 2x/3x | Extra pass for stubborn spots, pigment and redness (see §2a); approximated live, full algorithm on server export |
+| Stray hair cleanup | Thin-strand removal inside a band around the face outline and forehead (see §2a); approximated live |
+| Colour match | Covariance-aligning (Monge-Kantorovich) transfer in CIE L\*a\*b\* plus a histogram-matched L\* tone curve; Reinhard per-channel fallback for old presets |
 | Global tone | Exposure and white balance in linear light; highlights, shadows, contrast, saturation, vibrance; sharpening (reduced on smoothed skin); vignette |
 
-The display pass handles zoom up to 800 % (nearest-neighbour above 2×), pan, before/after split, side-by-side and an AI-mask overlay.
+After the retouch pass, an optional **depth-of-field chain** runs: downsample → two gather-bokeh passes (full radius, then 45 %: the "double blur") → composite by circle of confusion.
+
+The display pass handles zoom up to 800 % (nearest-neighbour above 2×), pan, before/after split, side-by-side, a **difference heat map** (where and how strongly the edit changed the photo, for catching over-retouching) and an AI-mask overlay.
+
+### 2a. Boosted retouch, stray hair, depth bokeh and style sync (v0.2)
+
+These live in `services/ai/app/retouch_engine.py` (full quality, used by server and batch exports) with real-time approximations in `apps/web/src/engine/shaders.ts`. With all of them off, the browser and server renderers still agree to within 1/255 on average; with them on, the preview is a faithful approximation and the export runs the full algorithm.
+
+| Feature | Settings (`Adjustments`) | Server algorithm | Live preview |
+| :--- | :--- | :--- | :--- |
+| Skin & blemish boost | `skinMultiplier: 1 \| 2 \| 3` | Gaussian split → recursive guided filtering (1 + ⌈m−1⌉ passes, guide = original luma) of the colour layer; dark-spot / redness z-scores against a skin-only base, kept only for compact blobs so contouring survives; detail-layer blemishes (adaptive threshold vs local texture energy, morphological opening to skip pores) are Telea-inpainted and re-grained from nearby skin. All radii scale with face size. | Extra detail-spot patching from the s1 band plus pigment/redness evening against a fourth band (s3 = 3 % of the long edge) |
+| Stray hair cleanup | `strayHairRemoval: {enabled, strength}` | ROI band around the landmark face oval (forehead weighted; eyes, brows, lips and everything below the mouth excluded) → black-hat/top-hat thin-structure response → 8-orientation Gabor line-ness → adaptive threshold → elongated components only → Telea inpainting. The selfie segmenter's hair class protects the hairstyle itself. | Thin-strand detector (fine vs s1 band) inside the same ROI, filled from the s1 band |
+| Depth bokeh | `depthBokeh: {enabled, blurRadius 0–100, bokehMultiplier 100–300 %, apertureShape circle \| hex, highlightBoost}` | Depth (0 = subject, 1 = far) from MiDaS v2.1 small via OpenCV DNN, normalised to the faces, with the person mask pinned to the focal plane and edges refined by a guided filter. Layered disk/hex convolution in linear light (8 CoC layers, normalised so the subject never halos), highlight gain before blurring, large radii run downscaled. | Same depth map (`POST /v1/depth`) or a face-box portrait prior offline; gather bokeh with a 48-tap Vogel-spiral kernel (hexagon-stretched for `hex`), sample CoC test to stop subject bleed, two passes |
+| Style sync | `colorMatch` (palette mode) or ordinary sliders | `style_profile` (L\*a\*b\* mean/covariance/quantiles, contrast, warmth, chroma, Laplacian sharpness, skin texture energy) → `map_style_to_adjustments` | Same profile computed in the browser; `mapStyleToAdjustments` in `packages/shared/src/style.ts` |
+
+Max blur radius is `blurRadius/100 × 2 % of the long edge × bokehMultiplier/100`, so 300 % on a 6000 px export is a 360 px circle of confusion.
+
+**Style sync.** A reference photo is measured once (`StyleProfile`). *Exact palette* stores the reference statistics in `colorMatch`; the renderer derives the 3×3 transfer from each photo's own statistics at render time, so one patch works for a whole shoot (and for batch jobs). Clipped pixels (blown studio white, crushed black) are left out of the statistics and each tone-curve knot moves at most 25 L\*, so a white-backdrop reference re-grades instead of blowing out the photo. *Editable sliders* expresses the same intent through exposure, contrast, temperature, tint and saturation. Both modes also map retouch intensity: smoother reference skin raises smoothing/blemish removal (and switches to 2x when much smoother); a crisper reference raises sharpening. *Sync style to all* applies it to every photo in the shoot.
+
+**AI assist.**
+- *Auto Retouch* measures the photo (same profile) and sets damped corrections toward a well-exposed portrait target plus skin work scaled to the measured skin texture and eye/teeth work when a face exists.
+- *Smart Sync* copies the active photo's edits to the selection (or all) but compensates exposure, temperature and tint for the difference between each original and the hero original, so a shoot in changing light lands on one look instead of copying the same numbers.
 
 **5. Sync and presets.** Edits are per photo with an undo/redo stack (100 steps; one step per slider drag). *Copy / Paste*, *Sync to all / selected* and presets write the same `Adjustments` to many photos, each as its own undo step.
 
@@ -116,10 +139,14 @@ The display pass handles zoom up to 800 % (nearest-neighbour above 2×), pan, be
 | Blemish removal | Local dark/red spot detector + band replacement | bands + skin mask → clean texture | < 5 ms GPU | 🧪 → LaMa inpainting on detected spot masks for export |
 | Skin tone unification | Local chroma averaging | RGB → RGB | < 2 ms GPU | ✅ (neck/hand matching to face 🗺️) |
 | Eye brighten, dark circles, teeth whitening | Landmark region masks + tone operators | RGB + masks → RGB | < 2 ms GPU | ✅ |
-| Colour match | Reinhard mean/std transfer in CIE L\*a\*b\* | source + reference stats → RGB | < 2 ms GPU, < 40 ms CPU | ✅ (optimal-transport / neural transfer 🗺️) |
+| Colour match / style sync | Monge-Kantorovich covariance transfer + 17-knot L\* histogram matching; style profile → slider mapping | source + reference stats → RGB | < 2 ms GPU, < 60 ms CPU | ✅ (sliced optimal transport / neural transfer 🗺️) |
+| Skin boost 2x/3x | Recursive guided filter + adaptive spot detection + Telea inpainting with re-grain | RGB + skin mask → RGB | ~1.3 s CPU at 1 MP face crop (3x) | ✅ (LaMa for large patches 🗺️) |
+| Stray hair cleanup | Morphological thin-structure + Gabor line detector in a landmark ROI, Telea inpainting | RGB + landmarks (+ hair mask) → RGB | ~0.3 s CPU | ✅ (SAM 2 strand masks + LaMa 🗺️) |
+| Depth estimation | MiDaS v2.1 small (ONNX, OpenCV DNN) + MediaPipe selfie multiclass segmenter, guided-filter refinement; portrait prior fallback | RGB ≤512 px → relative depth | ~0.35 s CPU | ✅ (Depth Anything v2 🗺️) |
+| Depth bokeh | Layered aperture convolution (server), double gather pass (GPU) | RGB + depth → RGB | < 10 ms GPU proxy, ~1 s CPU at 1 MP | ✅ |
 | Face restoration | CodeFormer / GFPGAN (ONNX, TensorRT) | face crop 512² → restored crop | < 80 ms GPU | 🗺️ |
 | Background matting / replacement | MODNet or ViTMatte | RGB → alpha | < 80 ms GPU | 🗺️ |
-| Stray hair, wires, backdrop seams | SAM 2 prompts + LaMa / SD inpainting | RGB + prompts → mask → inpainted RGB | < 150 ms GPU | 🗺️ |
+| Wires, backdrop seams, large stray-hair clumps | SAM 2 prompts + LaMa / SD inpainting | RGB + prompts → mask → inpainted RGB | < 150 ms GPU | 🗺️ |
 | Clothes de-wrinkling | ControlNet-tile + inpainting on garment mask | RGB + mask → RGB | < 300 ms GPU | 🗺️ |
 | Face/body shaping | Landmark-driven mesh warp with background protection mask | RGB + landmarks → warped RGB | < 20 ms GPU | 🗺️ |
 | Relighting | Monocular depth (Depth Anything v2) + normal-based light shader | RGB → depth → relit RGB | < 60 ms GPU | 🗺️ |
@@ -141,25 +168,30 @@ apps/web/src
 ├── components
 │   ├── Editor.tsx                     Shell, import pipeline, AI health, keyboard shortcuts
 │   ├── PhotoEditorViewport.tsx        WebGL2 canvas, zoom/pan, split drag
-│   ├── AdjustmentPanel.tsx            Radix sliders grouped by Skin / Face / Light / Color / Detail, colour match
+│   ├── AdjustmentPanel.tsx            Radix sliders grouped by Skin / Face / Light / Color / Detail
+│   ├── RetouchControlPanel.tsx        AI pro tools: auto retouch, smart sync, 1x/2x/3x boost, stray hair, bokeh, style sync
 │   ├── PresetPanel.tsx                Copy/paste/sync, built-in and saved presets
 │   ├── Filmstrip.tsx                  Thumbnails, multi-select, culling badges and filters
 │   └── ExportDialog.tsx               GPU / AI service / cloud batch export
 ├── engine
 │   ├── shaders.ts                     GLSL: blur, retouch, display (mirrors services/ai/app/pipeline.py)
 │   ├── renderer.ts                    WebGL2 pipeline (cached bands, retouch pass, display pass, readback)
-│   ├── masks.ts                       Landmark polygons → feathered RGBA mask
-│   └── color.ts                       sRGB → L*a*b* and statistics
+│   ├── masks.ts                       Landmark polygons → feathered RGBA mask, stray-hair ROI, depth prior
+│   ├── color.ts                       sRGB → L*a*b*, statistics, Monge-Kantorovich matrix, tone-curve knots, palette
+│   └── style.ts                       Style profile of an image (port of retouch_engine.style_profile)
 └── lib
     ├── store.ts                       Zustand editor store (photos, history, selection, view, presets)
-    ├── images.ts                      Off-store pixel cache: originals, proxies, masks
+    ├── images.ts                      Off-store pixel cache: originals, proxies, masks, hair ROIs, depth maps
+    ├── depth.ts                       Depth fetch (AI service) with portrait-prior fallback; hair ROI cache
     ├── ai.ts, cloud.ts, export.ts     Service clients and export paths
     └── server/                        Server-only: Redis/BullMQ, S3 presigning, Postgres, session id
 ```
 
 The Zustand store (`lib/store.ts`) holds only serialisable state: per-photo `Adjustments`, undo/redo stacks, AI analysis, cull flags, the selection, the view (compare mode, split, zoom, pan, mask overlay), the settings clipboard and custom presets. Pixel data (bitmaps, masks) lives in `lib/images.ts` keyed by photo id so React re-renders stay cheap.
 
-Keyboard: `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` redo, `Ctrl/Cmd+Shift+C/V` copy/paste settings, `Ctrl/Cmd+A` select all, `←/→` navigate, `\` before/after, `Y` split, `M` mask overlay, `X` reject, `0` fit, `1` 100 %, `+/-` zoom.
+The store also holds `styleSync` (`referenceImageId`, `matchedPalette`, `mode`, `amount`, `syncTargetBatch`) and, per photo, a `profile` (style metrics of the original) and `depthState`. The v0.2 settings (`skinMultiplier`, `strayHairRemoval`, `depthBokeh`) are part of each photo's `Adjustments`, so undo, copy/paste, presets, sync and batch jobs carry them automatically.
+
+Keyboard: `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` redo, `Ctrl/Cmd+Shift+C/V` copy/paste settings, `Ctrl/Cmd+A` select all, `←/→` navigate, `\` before/after, `Y` split, `D` difference heat map, `M` mask overlay, `X` reject, `0` fit, `1` 100 %, `+/-` zoom.
 
 ---
 
@@ -167,9 +199,12 @@ Keyboard: `Ctrl/Cmd+Z` undo, `Ctrl/Cmd+Shift+Z` redo, `Ctrl/Cmd+Shift+C/V` copy/
 
 | Method | Path | Body | Returns |
 | :--- | :--- | :--- | :--- |
-| GET | `/health` | — | `{status, faceBackend}` |
+| GET | `/health` | — | `{status, faceBackend, depthBackend}` |
 | POST | `/v1/analyze` | multipart `file` | `ImageAnalysis` (faces with regions, sharpness, colour stats, cull flags) |
-| POST | `/v1/color-stats` | multipart `file` | `ColorStats` (L\*a\*b\* mean/std) |
+| POST | `/v1/color-stats` | multipart `file` | `ColorStats` (L\*a\*b\* mean/std/covariance, L\* quantiles) |
+| POST | `/v1/depth` | multipart `file` | 8-bit PNG depth (0 = subject, 255 = far, ≤512 px); `X-Depth-Backend` header |
+| POST | `/v1/style/profile` | multipart `file` | `StyleProfile` |
+| POST | `/v1/style/sync` | multipart `reference`, `targets` (repeated, ≤200), `mode` (`palette`/`sliders`), `amount` | `{reference, targets: [{name, profile, adjustments}]}` (patches validate as `Adjustments`) |
 | POST | `/v1/render` | multipart `file`, `adjustments` (JSON), `format`, `quality`, `maxLongEdge` | encoded image |
 | POST | `/v1/render-object` | JSON `{sourceKey, outputKey, adjustments, output}` | `{outputKey, bytes, ms, cull}`; reads/writes object storage |
 
@@ -219,7 +254,7 @@ docker compose up -d postgres redis s3
 cd services/ai
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
-./scripts/download-model.sh            # MediaPipe Face Landmarker (~3.7 MB)
+./scripts/download-model.sh            # Face Landmarker (3.7 MB) + selfie segmenter (16 MB) + MiDaS small (67 MB); SKIP_OPTIONAL_MODELS=1 for faces only
 uvicorn app.main:app --reload --port 8000
 # Linux needs libegl1 and libgles2 for MediaPipe (apt install libegl1 libgles2)
 
@@ -239,7 +274,7 @@ The editor works with only `npm run dev:web`: face-aware tools and server export
 
 ```bash
 npm test                               # shared, web (store, masks, colour) and worker (job planning, retries)
-cd services/ai && pytest               # pipeline, colour science and HTTP API
+cd services/ai && pytest               # pipeline, colour science, boost/hair/bokeh/depth/style engine and HTTP API
 FINERETOUCH_FACE_FIXTURE=/path/to/portrait.jpg pytest   # also checks real landmark detection
 ```
 

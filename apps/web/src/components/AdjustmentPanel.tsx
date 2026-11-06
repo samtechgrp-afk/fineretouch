@@ -2,16 +2,15 @@
 
 import * as Slider from '@radix-ui/react-slider';
 import { DEFAULT_ADJUSTMENTS, GROUP_LABELS, SLIDERS, type AdjustmentGroup, type SliderSpec } from '@fineretouch/shared';
-import { useRef, useState } from 'react';
-import { colorStatsFromRgba } from '@/engine/color';
-import { bitmapPixels } from '@/lib/images';
+import { useState } from 'react';
 import { selectActivePhoto, useEditor } from '@/lib/store';
+import { RetouchControlPanel } from './RetouchControlPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
 
 export function AdjustmentPanel() {
   const photo = useEditor(selectActivePhoto);
-  const [open, setOpen] = useState<Record<string, boolean>>({ skin: true, face: true, light: true, color: true, detail: false, match: false });
+  const [open, setOpen] = useState<Record<string, boolean>>({ pro: true, skin: true, face: true, light: true, color: true, detail: false });
   if (!photo) return <aside className="p-4 text-sm text-ink-400">Select a photo to edit.</aside>;
 
   const faceState =
@@ -30,6 +29,9 @@ export function AdjustmentPanel() {
 
   return (
     <aside className="flex h-full min-w-0 flex-col overflow-y-auto overflow-x-hidden" aria-label="Adjustments">
+      <Section title="AI pro tools" open={open.pro} onToggle={() => setOpen((o) => ({ ...o, pro: !o.pro }))}>
+        <RetouchControlPanel photo={photo} />
+      </Section>
       {GROUP_ORDER.map((g) => (
         <Section key={g} title={GROUP_LABELS[g]} open={open[g]} onToggle={() => setOpen((o) => ({ ...o, [g]: !o[g] }))}
           note={g === 'face' ? faceState : g === 'skin' && !hasFace ? 'Using colour-based skin detection' : undefined}>
@@ -38,9 +40,6 @@ export function AdjustmentPanel() {
           ))}
         </Section>
       ))}
-      <Section title="Colour match" open={open.match} onToggle={() => setOpen((o) => ({ ...o, match: !o.match }))}>
-        <ColorMatchControl />
-      </Section>
     </aside>
   );
 }
@@ -129,81 +128,5 @@ function CentreFill({ value, min, max }: { value: number; min: number; max: numb
       className="absolute h-full rounded-full bg-apricot-400"
       style={{ left: `${Math.min(zero, pos)}%`, width: `${Math.abs(pos - zero)}%` }}
     />
-  );
-}
-
-function ColorMatchControl() {
-  const photo = useEditor(selectActivePhoto)!;
-  const setColorMatch = useEditor((s) => s.setColorMatch);
-  const beginEdit = useEditor((s) => s.beginEdit);
-  const selected = useEditor((s) => s.selected);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [refUrl, setRefUrl] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const match = photo.adjustments.colorMatch;
-
-  const onPick = async (file: File) => {
-    setBusy(true);
-    try {
-      const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
-      const reference = colorStatsFromRgba(bitmapPixels(bmp, 512));
-      bmp.close();
-      setRefUrl((old) => {
-        if (old) URL.revokeObjectURL(old);
-        return URL.createObjectURL(file);
-      });
-      setColorMatch({ reference, amount: match?.amount ?? 100 });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="space-y-3 text-xs">
-      <p className="text-ink-400">
-        Copy the colour mood of a reference shot. Applies to {selected.length > 1 ? `${selected.length} selected photos` : 'this photo'}.
-      </p>
-      <input ref={inputRef} type="file" accept="image/*" hidden onChange={(e) => e.target.files?.[0] && onPick(e.target.files[0])} />
-      <div className="flex items-center gap-2">
-        {refUrl && match && <img src={refUrl} alt="Reference" className="h-10 w-10 rounded object-cover" />}
-        <button className="btn" onClick={() => inputRef.current?.click()} disabled={busy}>
-          {busy ? 'Reading…' : match ? 'Change reference' : 'Choose reference'}
-        </button>
-        {match && (
-          <button className="btn-ghost" onClick={() => setColorMatch(null)}>
-            Remove
-          </button>
-        )}
-      </div>
-      {match && (
-        <div>
-          <div className="mb-1 flex justify-between text-ink-300">
-            <span>Strength</span>
-            <span className="font-mono">{Math.round(match.amount)}</span>
-          </div>
-          <Slider.Root
-            className="relative flex h-4 w-full touch-none select-none items-center"
-            min={0}
-            max={100}
-            step={1}
-            value={[match.amount]}
-            onPointerDown={() => beginEdit()}
-            onValueChange={([v]) => {
-              const s = useEditor.getState();
-              const id = s.activeId!;
-              useEditor.setState({
-                photos: { ...s.photos, [id]: { ...s.photos[id], adjustments: { ...s.photos[id].adjustments, colorMatch: { ...match, amount: v } } } },
-              });
-            }}
-            aria-label="Colour match strength"
-          >
-            <Slider.Track className="relative h-[3px] grow rounded-full bg-ink-700">
-              <Slider.Range className="absolute h-full rounded-full bg-apricot-400" />
-            </Slider.Track>
-            <Slider.Thumb className="block h-3.5 w-3.5 rounded-full border-2 border-ink-900 bg-ink-100" />
-          </Slider.Root>
-        </div>
-      )}
-    </div>
   );
 }

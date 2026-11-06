@@ -9,10 +9,13 @@ Stages (all on float32 sRGB in [0, 1]):
   4. Blemish removal: small dark/red spots relative to the surrounding tone are
      replaced with the low band plus preserved texture.
   5. Skin tone unification: chroma pulled toward the local average.
+  5b. Boosted skin (2x/3x) and stray-hair cleanup (retouch_engine; the preview
+      approximates these, so they are excluded from the parity guarantee).
   6. Landmark-driven features: eyes, dark circles, teeth.
-  7. Reinhard L*a*b* colour match (optional reference look).
+  7. L*a*b* colour match (covariance transform + tone curve when available).
   8. Global tone: exposure / white balance (linear light), highlights, shadows,
      contrast, saturation, vibrance, sharpening, vignette.
+  9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import cv2
 import numpy as np
 
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
+from .retouch_engine import apply_boosted_skin_retouch, apply_depth_bokeh, remove_stray_hairs
 from .schemas import Adjustments, ColorStats, FaceAnalysis
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
@@ -115,8 +119,14 @@ def render(
     adj: Adjustments,
     faces: list[FaceAnalysis],
     source_stats: ColorStats | None = None,
+    depth: np.ndarray | None = None,
+    hair_prob: np.ndarray | None = None,
 ) -> np.ndarray:
-    """rgb8: HxWx3 uint8 sRGB -> HxWx3 uint8 sRGB."""
+    """rgb8: HxWx3 uint8 sRGB -> HxWx3 uint8 sRGB.
+
+    depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
+    hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
+    """
     src = rgb8.astype(np.float32) / 255.0
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -161,6 +171,12 @@ def render(
         cb2, cr2 = cbcr(low2)
         t = (adj.skinToneUnify / 100.0) * 0.8 * skin[..., 0]
         c = from_ycbcr(y, cb + (cb2 - cb) * t, cr + (cr2 - cr) * t)
+
+    # 5b. Boosted retouch and flyaway hair.
+    if adj.skinMultiplier > 1:
+        c = apply_boosted_skin_retouch(np.clip(c, 0.0, 1.0).astype(np.float32), skin[..., 0], float(adj.skinMultiplier))
+    if adj.strayHairRemoval.enabled and faces:
+        c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
 
     # 6. Face features.
     if masks.has_face:
@@ -214,6 +230,14 @@ def render(
         dy = (yy + 0.5) / h - 0.5
         d = np.sqrt(dx * dx + dy * dy) / np.sqrt(0.5)
         c = c * (1.0 + (adj.vignette / 100.0) * 0.6 * smoothstep(0.35, 1.0, d))[..., None]
+
+    # 9. Depth-of-field.
+    b = adj.depthBokeh
+    if b.enabled and depth is not None and b.blurRadius > 0:
+        c = apply_depth_bokeh(
+            np.clip(c, 0.0, 1.0).astype(np.float32), depth, b.bokehMultiplier / 100.0, b.blurRadius,
+            b.apertureShape, b.highlightBoost,
+        )
 
     return (np.clip(c, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
 
