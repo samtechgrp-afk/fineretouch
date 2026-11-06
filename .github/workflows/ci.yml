@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build -w @fineretouch/shared
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build -w @fineretouch/web
+      - run: npm run build -w @fineretouch/worker
+
+  ai:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/ai/requirements*.txt
+      - run: sudo apt-get update && sudo apt-get install -y libegl1 libgles2
+      - run: pip install -r requirements-dev.txt
+      - run: ./scripts/download-model.sh
+      - run: pytest -q

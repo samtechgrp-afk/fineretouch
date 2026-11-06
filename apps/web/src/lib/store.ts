@@ -1,0 +1,350 @@
+'use client';
+
+import {
+  DEFAULT_ADJUSTMENTS,
+  applyPreset,
+  sanitizeAdjustments,
+  type AdjustmentKey,
+  type Adjustments,
+  type ColorMatch,
+  type ColorStats,
+  type ImageAnalysis,
+  type Preset,
+} from '@fineretouch/shared';
+import { create } from 'zustand';
+
+export const HISTORY_LIMIT = 100;
+
+export type AnalysisState = 'idle' | 'pending' | 'done' | 'error' | 'offline';
+export type CompareMode = 'edited' | 'original' | 'split' | 'side';
+
+export interface Photo {
+  id: string;
+  name: string;
+  /** Original pixel size (after EXIF rotation). */
+  width: number;
+  height: number;
+  /** Object URL of a small JPEG thumbnail of the original. */
+  thumbUrl: string;
+  adjustments: Adjustments;
+  past: Adjustments[];
+  future: Adjustments[];
+  analysis: ImageAnalysis | null;
+  analysisState: AnalysisState;
+  /** Client-side L*a*b* stats of the proxy, used when the AI service is offline. */
+  localStats: ColorStats | null;
+  rejected: boolean;
+}
+
+export interface ViewState {
+  mode: CompareMode;
+  split: number; // 0..1
+  /** 1 = fit to viewport. Absolute zoom is fitScale * zoom. */
+  zoom: number;
+  panX: number; // CSS px
+  panY: number;
+  showMask: boolean;
+}
+
+export interface EditorState {
+  photos: Record<string, Photo>;
+  order: string[];
+  activeId: string | null;
+  selected: string[];
+  view: ViewState;
+  clipboard: Adjustments | null;
+  customPresets: Preset[];
+  aiOnline: boolean | null;
+
+  addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'>>): void;
+  removePhotos(ids: string[]): void;
+  /** Reorder a subset of photos (e.g. back to file order after a parallel import). */
+  sortPhotos(ids: string[]): void;
+  setActive(id: string): void;
+  toggleSelected(id: string, additive: boolean, range: boolean): void;
+  selectAll(): void;
+  /** Start of a slider drag or any discrete edit: snapshot for undo. */
+  beginEdit(id?: string): void;
+  /** Live change during a drag; does not create history entries. */
+  setAdjustment(key: AdjustmentKey, value: number, id?: string): void;
+  /** Discrete change that records its own undo step. */
+  updateAdjustments(patch: Partial<Adjustments>, ids?: string[]): void;
+  setColorMatch(match: ColorMatch | null, ids?: string[]): void;
+  undo(id?: string): void;
+  redo(id?: string): void;
+  resetPhotos(ids?: string[]): void;
+  copySettings(): void;
+  pasteSettings(ids?: string[]): void;
+  syncToSelected(): void;
+  applyPresetTo(preset: Preset, ids?: string[]): void;
+  saveCustomPreset(name: string): Preset | null;
+  deleteCustomPreset(id: string): void;
+  setAnalysis(id: string, state: AnalysisState, analysis?: ImageAnalysis | null): void;
+  setLocalStats(id: string, stats: ColorStats): void;
+  toggleRejected(id: string): void;
+  setView(patch: Partial<ViewState>): void;
+  setAiOnline(online: boolean): void;
+  navigate(delta: number): void;
+}
+
+const PRESET_STORAGE_KEY = 'fineretouch.customPresets.v1';
+
+function loadCustomPresets(): Preset[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(PRESET_STORAGE_KEY);
+    const list = raw ? (JSON.parse(raw) as Preset[]) : [];
+    return Array.isArray(list)
+      ? list.map((p) => ({ ...p, builtIn: false, adjustments: sanitizeAdjustments(p.adjustments) }))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistCustomPresets(presets: Preset[]) {
+  try {
+    window.localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(presets));
+  } catch {
+    /* storage may be unavailable (private mode); presets stay in memory */
+  }
+}
+
+const withHistory = (p: Photo, next: Adjustments): Photo => ({
+  ...p,
+  past: [...p.past, p.adjustments].slice(-HISTORY_LIMIT),
+  future: [],
+  adjustments: next,
+});
+
+/** Ids an action should target: explicit ids, else the selection, else the active photo. */
+function targets(s: EditorState, ids?: string[]): string[] {
+  if (ids?.length) return ids.filter((id) => s.photos[id]);
+  if (s.selected.length) return s.selected;
+  return s.activeId ? [s.activeId] : [];
+}
+
+function mapPhotos(s: EditorState, ids: string[], fn: (p: Photo) => Photo): Record<string, Photo> {
+  const photos = { ...s.photos };
+  for (const id of ids) if (photos[id]) photos[id] = fn(photos[id]);
+  return photos;
+}
+
+export const useEditor = create<EditorState>()((set, get) => ({
+  photos: {},
+  order: [],
+  activeId: null,
+  selected: [],
+  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false },
+  clipboard: null,
+  customPresets: loadCustomPresets(),
+  aiOnline: null,
+
+  addPhotos(list) {
+    set((s) => {
+      const photos = { ...s.photos };
+      const order = [...s.order];
+      for (const p of list) {
+        if (photos[p.id]) continue;
+        photos[p.id] = {
+          ...p,
+          adjustments: { ...DEFAULT_ADJUSTMENTS },
+          past: [],
+          future: [],
+          analysis: null,
+          analysisState: 'idle',
+          localStats: null,
+          rejected: false,
+        };
+        order.push(p.id);
+      }
+      return { photos, order, activeId: s.activeId ?? list[0]?.id ?? null };
+    });
+  },
+
+  removePhotos(ids) {
+    set((s) => {
+      const photos = { ...s.photos };
+      for (const id of ids) {
+        if (photos[id]) URL.revokeObjectURL(photos[id].thumbUrl);
+        delete photos[id];
+      }
+      const order = s.order.filter((id) => photos[id]);
+      const activeId = s.activeId && photos[s.activeId] ? s.activeId : (order[0] ?? null);
+      return { photos, order, activeId, selected: s.selected.filter((id) => photos[id]) };
+    });
+  },
+
+  sortPhotos(ids) {
+    set((s) => {
+      const wanted = ids.filter((id) => s.photos[id]);
+      const slots = s.order.map((id, i) => (wanted.includes(id) ? i : -1)).filter((i) => i >= 0);
+      const order = [...s.order];
+      slots.forEach((slot, k) => (order[slot] = wanted[k]));
+      return { order };
+    });
+  },
+
+  setActive(id) {
+    if (get().photos[id]) set({ activeId: id, view: { ...get().view, zoom: 1, panX: 0, panY: 0 } });
+  },
+
+  toggleSelected(id, additive, range) {
+    set((s) => {
+      if (range && s.activeId) {
+        const a = s.order.indexOf(s.activeId);
+        const b = s.order.indexOf(id);
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        return { selected: Array.from(new Set([...s.selected, ...s.order.slice(lo, hi + 1)])) };
+      }
+      if (additive) {
+        const has = s.selected.includes(id);
+        const base = s.selected.length || !s.activeId ? s.selected : [s.activeId];
+        return { selected: has ? base.filter((x) => x !== id) : [...base, id] };
+      }
+      return { selected: [], activeId: id };
+    });
+  },
+
+  selectAll() {
+    set((s) => ({ selected: [...s.order] }));
+  },
+
+  beginEdit(id) {
+    const s = get();
+    const pid = id ?? s.activeId;
+    if (!pid || !s.photos[pid]) return;
+    const p = s.photos[pid];
+    // Skip duplicate snapshots (e.g. a click on a slider that did not move it).
+    if (p.past.length && JSON.stringify(p.past[p.past.length - 1]) === JSON.stringify(p.adjustments)) return;
+    set({ photos: mapPhotos(s, [pid], (p) => withHistory(p, p.adjustments)) });
+  },
+
+  setAdjustment(key, value, id) {
+    const s = get();
+    const pid = id ?? s.activeId;
+    if (!pid || !s.photos[pid]) return;
+    set({
+      photos: mapPhotos(s, [pid], (p) => ({ ...p, adjustments: sanitizeAdjustments({ ...p.adjustments, [key]: value }) })),
+    });
+  },
+
+  updateAdjustments(patch, ids) {
+    const s = get();
+    set({
+      photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, sanitizeAdjustments({ ...p.adjustments, ...patch }))),
+    });
+  },
+
+  setColorMatch(match, ids) {
+    const s = get();
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, { ...p.adjustments, colorMatch: match })) });
+  },
+
+  undo(id) {
+    const s = get();
+    const pid = id ?? s.activeId;
+    const p = pid ? s.photos[pid] : null;
+    if (!p || !p.past.length) return;
+    const prev = p.past[p.past.length - 1];
+    set({
+      photos: { ...s.photos, [p.id]: { ...p, adjustments: prev, past: p.past.slice(0, -1), future: [p.adjustments, ...p.future] } },
+    });
+  },
+
+  redo(id) {
+    const s = get();
+    const pid = id ?? s.activeId;
+    const p = pid ? s.photos[pid] : null;
+    if (!p || !p.future.length) return;
+    const [next, ...rest] = p.future;
+    set({
+      photos: { ...s.photos, [p.id]: { ...p, adjustments: next, past: [...p.past, p.adjustments].slice(-HISTORY_LIMIT), future: rest } },
+    });
+  },
+
+  resetPhotos(ids) {
+    const s = get();
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, { ...DEFAULT_ADJUSTMENTS })) });
+  },
+
+  copySettings() {
+    const s = get();
+    if (s.activeId) set({ clipboard: { ...s.photos[s.activeId].adjustments } });
+  },
+
+  pasteSettings(ids) {
+    const s = get();
+    if (!s.clipboard) return;
+    const clip = s.clipboard;
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, { ...clip })) });
+  },
+
+  syncToSelected() {
+    const s = get();
+    if (!s.activeId) return;
+    const src = s.photos[s.activeId].adjustments;
+    const ids = (s.selected.length > 1 ? s.selected : s.order).filter((id) => id !== s.activeId);
+    set({ photos: mapPhotos(s, ids, (p) => withHistory(p, { ...src })) });
+  },
+
+  applyPresetTo(preset, ids) {
+    const s = get();
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, applyPreset(p.adjustments, preset, 'replace'))) });
+  },
+
+  saveCustomPreset(name) {
+    const s = get();
+    if (!s.activeId || !name.trim()) return null;
+    const preset: Preset = {
+      id: `custom-${Date.now().toString(36)}`,
+      name: name.trim().slice(0, 60),
+      description: 'Saved from your edits',
+      adjustments: { ...s.photos[s.activeId].adjustments },
+    };
+    const customPresets = [...s.customPresets, preset];
+    persistCustomPresets(customPresets);
+    set({ customPresets });
+    return preset;
+  },
+
+  deleteCustomPreset(id) {
+    const customPresets = get().customPresets.filter((p) => p.id !== id);
+    persistCustomPresets(customPresets);
+    set({ customPresets });
+  },
+
+  setAnalysis(id, state, analysis) {
+    const s = get();
+    if (!s.photos[id]) return;
+    set({ photos: { ...s.photos, [id]: { ...s.photos[id], analysisState: state, analysis: analysis ?? s.photos[id].analysis } } });
+  },
+
+  setLocalStats(id, stats) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], localStats: stats } } });
+  },
+
+  toggleRejected(id) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], rejected: !s.photos[id].rejected } } });
+  },
+
+  setView(patch) {
+    set((s) => ({ view: { ...s.view, ...patch } }));
+  },
+
+  setAiOnline(online) {
+    set({ aiOnline: online });
+  },
+
+  navigate(delta) {
+    const s = get();
+    if (!s.order.length) return;
+    const i = s.activeId ? s.order.indexOf(s.activeId) : -1;
+    const next = s.order[Math.min(s.order.length - 1, Math.max(0, i + delta))];
+    get().setActive(next);
+  },
+}));
+
+export const selectActivePhoto = (s: EditorState): Photo | null => (s.activeId ? s.photos[s.activeId] ?? null : null);

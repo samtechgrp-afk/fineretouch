@@ -1,0 +1,13 @@
+{
+  "name": "fineretouch",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["packages/*", "apps/*", "services/worker"],
+  "scripts": {
+    "dev:web": "npm run dev -w @fineretouch/web",
+    "dev:worker": "npm run dev -w @fineretouch/worker",
+    "build": "npm run build -w @fineretouch/shared && npm run build -w @fineretouch/web && npm run build -w @fineretouch/worker",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  }
+}

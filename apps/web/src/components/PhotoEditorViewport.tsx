@@ -1,0 +1,254 @@
+'use client';
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Renderer, type DisplayView } from '@/engine/renderer';
+import { faceMaskFor } from '@/lib/export';
+import { getProxy } from '@/lib/images';
+import { selectActivePhoto, useEditor } from '@/lib/store';
+
+const BG: [number, number, number] = [0.051, 0.055, 0.063];
+const MAX_ZOOM_PERCENT = 800;
+
+interface Geometry {
+  dpr: number;
+  cw: number; // device px
+  ch: number;
+  paneW: number;
+  fit: number; // device px per proxy px when zoom = 1
+}
+
+/**
+ * WebGL2 viewport. The proxy (<= 2560px) is uploaded once per photo; slider
+ * moves only re-run the retouch pass, so feedback stays within a frame.
+ */
+export function PhotoEditorViewport() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const rendererRef = useRef<Renderer | null>(null);
+  const loadedIdRef = useRef<string | null>(null);
+  const maskKeyRef = useRef<string>('');
+  const frameRef = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+  const [renderMs, setRenderMs] = useState<number | null>(null);
+
+  const photo = useEditor(selectActivePhoto);
+  const view = useEditor((s) => s.view);
+  const setView = useEditor((s) => s.setView);
+
+  // Create / destroy the GL context.
+  useEffect(() => {
+    try {
+      rendererRef.current = new Renderer(canvasRef.current!);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+    return () => {
+      rendererRef.current?.dispose();
+      rendererRef.current = null;
+      loadedIdRef.current = null;
+    };
+  }, []);
+
+  const geometry = useCallback((): Geometry | null => {
+    const r = rendererRef.current;
+    const canvas = canvasRef.current;
+    if (!r || !canvas || !r.width) return null;
+    const dpr = window.devicePixelRatio || 1;
+    const cw = canvas.width;
+    const ch = canvas.height;
+    const paneW = view.mode === 'side' ? cw / 2 : cw;
+    const fit = Math.min(paneW / r.width, ch / r.height) * 0.96;
+    return { dpr, cw, ch, paneW, fit };
+  }, [view.mode]);
+
+  const draw = useCallback(() => {
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(() => {
+      const r = rendererRef.current;
+      const st = useEditor.getState();
+      const p = selectActivePhoto(st);
+      if (!r || !p) return;
+      const proxy = getProxy(p.id);
+      if (!proxy) return;
+      const t0 = performance.now();
+      if (loadedIdRef.current !== p.id) {
+        r.setSource(proxy, proxy.width, proxy.height);
+        loadedIdRef.current = p.id;
+        maskKeyRef.current = '';
+      }
+      const maskKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
+      const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height);
+      if (maskKeyRef.current !== maskKey) {
+        r.setMask(mask?.data ?? null, mask?.width, mask?.height);
+        maskKeyRef.current = maskKey;
+      }
+      r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats });
+      const g = geometry();
+      if (!g) return;
+      const v = st.view;
+      const scale = g.fit * v.zoom;
+      const display: DisplayView = {
+        mode: v.mode,
+        scale,
+        offsetX: (g.paneW - r.width * scale) / 2 + v.panX * g.dpr,
+        offsetY: (g.ch - r.height * scale) / 2 + v.panY * g.dpr,
+        split: v.split,
+        showMask: v.showMask,
+        dpr: g.dpr,
+        background: BG,
+      };
+      r.display(display);
+      setRenderMs(performance.now() - t0);
+    });
+  }, [geometry]);
+
+  // Redraw whenever the photo, its edits/analysis or the view change.
+  useEffect(() => {
+    draw();
+  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, view, draw]);
+
+  // Keep the drawing buffer at device resolution.
+  useEffect(() => {
+    const wrap = wrapRef.current!;
+    const ro = new ResizeObserver(() => {
+      const dpr = window.devicePixelRatio || 1;
+      const canvas = canvasRef.current!;
+      canvas.width = Math.max(1, Math.round(wrap.clientWidth * dpr));
+      canvas.height = Math.max(1, Math.round(wrap.clientHeight * dpr));
+      draw();
+    });
+    ro.observe(wrap);
+    return () => ro.disconnect();
+  }, [draw]);
+
+  const zoomPercent = useCallback(
+    (zoom: number) => {
+      const g = geometry();
+      const r = rendererRef.current;
+      if (!g || !r || !photo) return 100;
+      // 100% = one original pixel per CSS pixel.
+      const devicePerOriginal = (g.fit * zoom * r.width) / photo.width;
+      return (devicePerOriginal / g.dpr) * 100;
+    },
+    [geometry, photo],
+  );
+
+  const maxZoom = useCallback(() => {
+    const pct = zoomPercent(1);
+    return Math.max(1, MAX_ZOOM_PERCENT / pct);
+  }, [zoomPercent]);
+
+  /** Zoom keeping the image point under (cx, cy) CSS px fixed. */
+  const zoomAt = useCallback(
+    (nextZoom: number, cx?: number, cy?: number) => {
+      const wrap = wrapRef.current;
+      if (!wrap) return;
+      const v = useEditor.getState().view;
+      const z = Math.min(maxZoom(), Math.max(0.25, nextZoom));
+      const paneW = v.mode === 'side' ? wrap.clientWidth / 2 : wrap.clientWidth;
+      const px = (cx ?? paneW / 2) % paneW;
+      const py = cy ?? wrap.clientHeight / 2;
+      // Point relative to the pane centre, before and after zoom.
+      const k = z / v.zoom;
+      const dx = px - paneW / 2;
+      const dy = py - wrap.clientHeight / 2;
+      setView({ zoom: z, panX: dx - (dx - v.panX) * k, panY: dy - (dy - v.panY) * k });
+    },
+    [maxZoom, setView],
+  );
+
+  useEffect(() => {
+    const wrap = wrapRef.current!;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = wrap.getBoundingClientRect();
+      const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015));
+      zoomAt(useEditor.getState().view.zoom * factor, e.clientX - rect.left, e.clientY - rect.top);
+    };
+    wrap.addEventListener('wheel', onWheel, { passive: false });
+    return () => wrap.removeEventListener('wheel', onWheel);
+  }, [zoomAt]);
+
+  // Expose zoom helpers to the toolbar via a custom event (keeps the store free of DOM).
+  useEffect(() => {
+    const onZoom = (e: Event) => {
+      const d = (e as CustomEvent<{ action: 'fit' | 'in' | 'out' | 'actual' }>).detail;
+      const v = useEditor.getState().view;
+      if (d.action === 'fit') setView({ zoom: 1, panX: 0, panY: 0 });
+      else if (d.action === 'in') zoomAt(v.zoom * 1.5);
+      else if (d.action === 'out') zoomAt(v.zoom / 1.5);
+      else if (d.action === 'actual') zoomAt(100 / zoomPercent(1));
+    };
+    window.addEventListener('fineretouch:zoom', onZoom);
+    return () => window.removeEventListener('fineretouch:zoom', onZoom);
+  }, [setView, zoomAt, zoomPercent]);
+
+  const drag = useRef<{ kind: 'pan' | 'split'; x: number; y: number; panX: number; panY: number } | null>(null);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    const rect = wrapRef.current!.getBoundingClientRect();
+    const v = useEditor.getState().view;
+    const x = e.clientX - rect.left;
+    const nearSplit = v.mode === 'split' && Math.abs(x - v.split * rect.width) < 24;
+    drag.current = { kind: nearSplit || (v.mode === 'split' && v.zoom <= 1) ? 'split' : 'pan', x: e.clientX, y: e.clientY, panX: v.panX, panY: v.panY };
+    (e.target as Element).setPointerCapture(e.pointerId);
+    if (drag.current.kind === 'split') setView({ split: Math.min(1, Math.max(0, x / rect.width)) });
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = drag.current;
+    if (!d) return;
+    const rect = wrapRef.current!.getBoundingClientRect();
+    if (d.kind === 'split') setView({ split: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) });
+    else setView({ panX: d.panX + e.clientX - d.x, panY: d.panY + e.clientY - d.y });
+  };
+  const onPointerUp = () => {
+    drag.current = null;
+  };
+
+  const pct = photo ? Math.round(zoomPercent(view.zoom)) : null;
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative h-full w-full touch-none select-none overflow-hidden bg-ink-950"
+      style={{ cursor: view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onDoubleClick={() => (view.zoom === 1 ? zoomAt(100 / zoomPercent(1)) : setView({ zoom: 1, panX: 0, panY: 0 }))}
+      data-testid="viewport"
+    >
+      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-label="Photo preview" />
+      {!photo && !error && (
+        <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-ink-400">
+          Drop photos anywhere or use Import to start.
+        </div>
+      )}
+      {error && <div className="absolute inset-0 grid place-items-center p-6 text-center text-rose-400">{error}</div>}
+      {photo && (view.mode === 'split' || view.mode === 'side') && (
+        <>
+          <Tag className="left-3">Before</Tag>
+          <Tag className="right-3">After</Tag>
+        </>
+      )}
+      {photo && (
+        <div className="pointer-events-none absolute bottom-3 right-3 rounded bg-black/60 px-2 py-1 font-mono text-[11px] text-ink-300">
+          {pct}% {renderMs !== null && `· ${renderMs.toFixed(1)} ms`}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Tag({ children, className }: { children: React.ReactNode; className: string }) {
+  return (
+    <span className={`pointer-events-none absolute top-3 rounded bg-black/60 px-2 py-0.5 text-[11px] uppercase tracking-wide text-ink-100 ${className}`}>
+      {children}
+    </span>
+  );
+}
+
+export function requestZoom(action: 'fit' | 'in' | 'out' | 'actual') {
+  window.dispatchEvent(new CustomEvent('fineretouch:zoom', { detail: { action } }));
+}

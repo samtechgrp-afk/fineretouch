@@ -1,0 +1,9 @@
+{
+  "identities": [
+    {
+      "name": "fineretouch",
+      "credentials": [{ "accessKey": "fineretouch", "secretKey": "fineretouch-dev-secret" }],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

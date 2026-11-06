@@ -1,0 +1,11 @@
+node_modules/
+.next/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+__pycache__/
+.pytest_cache/
+.venv/
+services/ai/models/*.task
+next-env.d.ts
