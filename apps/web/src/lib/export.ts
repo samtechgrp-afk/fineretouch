@@ -4,6 +4,7 @@ import type { Adjustments, ColorStats, ImageAnalysis } from '@fineretouch/shared
 import JSZip from 'jszip';
 import { Renderer } from '@/engine/renderer';
 import { buildFaceMask } from '@/engine/masks';
+import { ensureDepth, hairRoiFor } from './depth';
 import { fitSize, getCachedMask, setCachedMask } from './images';
 
 export const MASK_LONG_EDGE = 1536;
@@ -40,12 +41,13 @@ export const EXT = { jpeg: 'jpg', png: 'png', webp: 'webp' } as const;
  * run once at the original size (or the largest texture the GPU allows).
  */
 export async function renderFullRes(
-  file: File,
+  /** Upright full-size bitmap of the original (see decodeOriginal; RAW uses its embedded JPEG). */
+  loadSource: () => Promise<ImageBitmap>,
   adjustments: Adjustments,
   ctx: { id: string; analysis: ImageAnalysis | null; sourceStats: ColorStats | null },
   opts: ExportOptions,
 ): Promise<Blob> {
-  const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  const bmp = await loadSource();
   const canvas = new OffscreenCanvas(1, 1);
   const renderer = new Renderer(canvas);
   try {
@@ -56,6 +58,14 @@ export async function renderFullRes(
     if (source !== bmp) source.close();
     const mask = faceMaskFor(ctx.id, ctx.analysis, w, h);
     if (mask) renderer.setMask(mask.data, mask.width, mask.height);
+    if (adjustments.strayHairRemoval.enabled) {
+      const roi = hairRoiFor(ctx.id, ctx.analysis, w, h);
+      if (roi) renderer.setHairRoi(roi.data, roi.width, roi.height);
+    }
+    if (adjustments.depthBokeh.enabled) {
+      const d = await ensureDepth(ctx.id);
+      if (d) renderer.setDepth(d.source, d.width, d.height);
+    }
     renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats });
     const pixels = renderer.readPixels();
     const out = new OffscreenCanvas(w, h);

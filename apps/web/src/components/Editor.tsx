@@ -1,9 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { colorStatsFromRgba } from '@/engine/color';
+import { profileFromRgba } from '@/engine/style';
 import { aiHealth, analyze, pool } from '@/lib/ai';
-import { ACCEPTED_TYPES, bitmapPixels, clearCachedMask, fitSize, forgetImage, getProxy, loadImage, newId } from '@/lib/images';
+import { proxyJpeg } from '@/lib/depth';
+import { bitmapPixels, clearCachedMask, fitSize, forgetImage, isImportable, loadImage, newId } from '@/lib/images';
+import { IMPORT_ACCEPT } from '@/lib/rawParser';
 import { selectActivePhoto, useEditor, type CompareMode } from '@/lib/store';
 import { AdjustmentPanel } from './AdjustmentPanel';
 import { ExportDialog } from './ExportDialog';
@@ -11,16 +13,7 @@ import { Filmstrip, isFlagged, type CullFilter } from './Filmstrip';
 import { PhotoEditorViewport, requestZoom } from './PhotoEditorViewport';
 import { PresetPanel } from './PresetPanel';
 
-const ANALYZE_LONG_EDGE = 1280;
-
-/** Encode a downscaled JPEG of the proxy for the AI service (landmarks don't need full res). */
-async function analysisJpeg(id: string): Promise<Blob> {
-  const proxy = getProxy(id)!;
-  const [w, h] = fitSize(proxy.width, proxy.height, ANALYZE_LONG_EDGE);
-  const c = new OffscreenCanvas(w, h);
-  c.getContext('2d')!.drawImage(proxy, 0, 0, w, h);
-  return c.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
-}
+const PROFILE_LONG_EDGE = 512;
 
 async function runAnalysis(ids: string[]) {
   const st = useEditor.getState();
@@ -32,7 +25,7 @@ async function runAnalysis(ids: string[]) {
     }
     st.setAnalysis(id, 'pending');
     try {
-      const analysis = await analyze(await analysisJpeg(id));
+      const analysis = await analyze(await proxyJpeg(id));
       clearCachedMask(id);
       st.setAnalysis(id, 'done', analysis);
     } catch (e) {
@@ -46,6 +39,8 @@ export function Editor() {
   const fileInput = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState<{ done: number; total: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  /** Files the last import could not open (e.g. a RAW without a usable preview). */
+  const [importFailures, setImportFailures] = useState<string[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [filter, setFilter] = useState<CullFilter>('all');
   const aiOnline = useEditor((s) => s.aiOnline);
@@ -77,9 +72,10 @@ export function Editor() {
   }, []);
 
   const importFiles = useCallback(async (list: FileList | File[]) => {
-    const files = Array.from(list).filter((f) => ACCEPTED_TYPES.includes(f.type) || /\.(jpe?g|png|webp|avif|tiff?)$/i.test(f.name));
+    const files = Array.from(list).filter(isImportable);
     if (!files.length) return;
     setImporting({ done: 0, total: files.length });
+    const failures: string[] = [];
     const ids = files.map(() => newId());
     const loaded = new Set<string>();
     let done = 0;
@@ -87,16 +83,21 @@ export function Editor() {
       const id = ids[i];
       try {
         const img = await loadImage(id, file);
-        useEditor.getState().addPhotos([{ id, name: file.name, width: img.width, height: img.height, thumbUrl: img.thumbUrl }]);
-        useEditor.getState().setLocalStats(id, colorStatsFromRgba(bitmapPixels(img.proxy, 512)));
+        useEditor.getState().addPhotos([{ id, name: file.name, width: img.width, height: img.height, thumbUrl: img.thumbUrl, raw: img.raw }]);
+        const [pw, ph] = fitSize(img.proxy.width, img.proxy.height, PROFILE_LONG_EDGE);
+        const profile = profileFromRgba(bitmapPixels(img.proxy, PROFILE_LONG_EDGE), pw, ph);
+        useEditor.getState().setLocalStats(id, profile.stats);
+        useEditor.getState().setProfile(id, profile);
         loaded.add(id);
       } catch (e) {
         console.warn(`Could not open ${file.name}`, e);
+        failures.push(`${file.name}: ${(e as Error).message}`);
       } finally {
         setImporting({ done: ++done, total: files.length });
       }
     });
     setImporting(null);
+    setImportFailures(failures);
     const ok = ids.filter((id) => loaded.has(id));
     useEditor.getState().sortPhotos(ok); // parallel decoding finishes out of order
     void runAnalysis(ok);
@@ -130,6 +131,7 @@ export function Editor() {
       else if (e.key === '\\') s.setView({ mode: s.view.mode === 'original' ? 'edited' : 'original' });
       else if (e.key.toLowerCase() === 'y') s.setView({ mode: s.view.mode === 'split' ? 'edited' : 'split' });
       else if (e.key.toLowerCase() === 'm') s.setView({ showMask: !s.view.showMask });
+      else if (e.key.toLowerCase() === 'd') s.setView({ mode: s.view.mode === 'diff' ? 'edited' : 'diff' });
       else if (e.key.toLowerCase() === 'x' && s.activeId) s.toggleRejected(s.activeId);
       else if (e.key === '0') requestZoom('fit');
       else if (e.key === '1') requestZoom('actual');
@@ -163,8 +165,13 @@ export function Editor() {
         <Logo />
         <span className="hidden text-xs text-ink-400 sm:inline">{count ? `${count} photo${count === 1 ? '' : 's'}` : 'No photos'}</span>
         <AiPill online={aiOnline} />
+        {importFailures.length > 0 && (
+          <button className="text-xs text-rose-400 underline-offset-2 hover:underline" title={importFailures.join('\n')} onClick={() => setImportFailures([])}>
+            Couldn&apos;t open {importFailures.length} file{importFailures.length === 1 ? '' : 's'}
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-2">
-          <input ref={fileInput} type="file" accept={ACCEPTED_TYPES.join(',')} multiple hidden onChange={(e) => e.target.files && importFiles(e.target.files)} />
+          <input ref={fileInput} type="file" accept={IMPORT_ACCEPT} multiple hidden onChange={(e) => e.target.files && importFiles(e.target.files)} />
           <button className="btn" onClick={() => fileInput.current?.click()} disabled={Boolean(importing)}>
             {importing ? `Importing ${importing.done}/${importing.total}` : 'Import'}
           </button>
@@ -188,6 +195,7 @@ export function Editor() {
                   ['original', 'Original'],
                   ['split', 'Split'],
                   ['side', 'Side by side'],
+                  ['diff', 'Difference'],
                 ] as Array<[CompareMode, string]>
               ).map(([m, label]) => (
                 <button key={m} className="seg" aria-pressed={view.mode === m} onClick={() => setView({ mode: m })}>

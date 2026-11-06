@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .schemas import ColorStats
+from .schemas import TONE_QUANTILE_COUNT, ColorStats
 
 _RGB_TO_XYZ = np.array(
     [
@@ -60,27 +60,91 @@ def lab_to_rgb(lab: np.ndarray) -> np.ndarray:
     return linear_to_srgb(lin)
 
 
+TONE_QUANTILES = np.linspace(0.0, 1.0, TONE_QUANTILE_COUNT)
+# Added to covariance diagonals (L*a*b* units squared) so flat images stay invertible.
+COV_EPS = 1.0
+# Clipped pixels (blown studio white, crushed black) carry no colour information and would
+# dominate the statistics of a backdrop shot; they are ignored unless they are nearly everything.
+CLIP_LOW, CLIP_HIGH, MIN_CONTENT_SHARE = 2.0, 98.0, 0.05
+# Largest shift (L* units) the tone curve may apply at any knot, so a reference with a very
+# different histogram (e.g. mostly white) re-grades the photo instead of blowing it out.
+MAX_CURVE_SHIFT = 25.0
+
+
 def color_stats(rgb: np.ndarray, max_pixels: int = 512 * 512) -> ColorStats:
-    """Mean/std of L*a*b* over the image (subsampled for speed)."""
+    """Mean/std/covariance of L*a*b* and L* quantiles over the image (subsampled for speed)."""
     flat = rgb.reshape(-1, 3)
     if flat.shape[0] > max_pixels:
         step = int(np.ceil(flat.shape[0] / max_pixels))
         flat = flat[::step]
-    lab = rgb_to_lab(flat)
+    lab = rgb_to_lab(flat).astype(np.float64)
+    content = (lab[:, 0] > CLIP_LOW) & (lab[:, 0] < CLIP_HIGH)
+    if content.sum() >= MIN_CONTENT_SHARE * lab.shape[0]:
+        lab = lab[content]
     mean = lab.mean(axis=0)
     std = lab.std(axis=0)
-    return ColorStats(mean=tuple(float(x) for x in mean), std=tuple(float(max(x, 1e-3)) for x in std))
+    cov = np.cov(lab, rowvar=False, bias=True)
+    q = np.quantile(lab[:, 0], TONE_QUANTILES)
+    return ColorStats(
+        mean=tuple(float(x) for x in mean),
+        std=tuple(float(max(x, 1e-3)) for x in std),
+        cov=[float(x) for x in cov.reshape(-1)],
+        lQuantiles=[float(x) for x in q],
+    )
+
+
+def _sym_pow(m: np.ndarray, p: float) -> np.ndarray:
+    w, v = np.linalg.eigh(m)
+    return (v * np.maximum(w, 1e-9) ** p) @ v.T
+
+
+def match_matrix(source: ColorStats, reference: ColorStats) -> np.ndarray:
+    """3x3 linear map in L*a*b* (applied to lab - source.mean).
+
+    With covariances on both sides it is the Monge-Kantorovich solution, the linear map
+    that sends the source covariance exactly onto the reference covariance while moving
+    colours as little as possible (Pitie & Kokaram 2007). Otherwise per-channel scaling
+    (Reinhard et al. 2001). Mirrored in apps/web/src/engine/color.ts.
+    """
+    if source.cov is not None and reference.cov is not None:
+        cs = np.array(source.cov, np.float64).reshape(3, 3) + np.eye(3) * COV_EPS
+        cr = np.array(reference.cov, np.float64).reshape(3, 3) + np.eye(3) * COV_EPS
+        cs_h = _sym_pow(cs, 0.5)
+        cs_ih = _sym_pow(cs, -0.5)
+        return (cs_ih @ _sym_pow(cs_h @ cr @ cs_h, 0.5) @ cs_ih).astype(np.float32)
+    s_std = np.maximum(np.array(source.std, np.float32), 1e-3)
+    return np.diag(np.array(reference.std, np.float32) / s_std).astype(np.float32)
+
+
+def monotone_quantiles(q: list[float] | tuple[float, ...]) -> np.ndarray:
+    """Quantiles made strictly increasing so they can be used as interpolation knots."""
+    out = np.array(q, np.float64)
+    for i in range(1, out.size):
+        out[i] = max(out[i], out[i - 1] + 1e-3)
+    return out
+
+
+def tone_curve_knots(source: list[float], reference: list[float]) -> tuple[np.ndarray, np.ndarray]:
+    """Histogram-matching knots (x = source L*, y = target L*), with each shift limited to MAX_CURVE_SHIFT."""
+    qs = monotone_quantiles(source)
+    qr = monotone_quantiles(reference)
+    qr = qs + np.clip(qr - qs, -MAX_CURVE_SHIFT, MAX_CURVE_SHIFT)
+    return qs, monotone_quantiles(qr)
 
 
 def transfer_lab(rgb: np.ndarray, source: ColorStats, reference: ColorStats, amount: float) -> np.ndarray:
-    """Reinhard et al. statistics transfer in L*a*b*, blended by `amount` in [0, 1]."""
+    """Statistical colour transfer in L*a*b*, blended by `amount` in [0, 1].
+
+    a*/b* (and L* when no tone curve is available) follow the linear `match_matrix`;
+    with L* quantiles on both sides, L* is histogram matched through a 17-knot tone curve.
+    """
     if amount <= 0:
         return rgb
     lab = rgb_to_lab(rgb)
-    s_mean = np.array(source.mean, dtype=np.float32)
-    s_std = np.maximum(np.array(source.std, dtype=np.float32), 1e-3)
-    r_mean = np.array(reference.mean, dtype=np.float32)
-    r_std = np.array(reference.std, dtype=np.float32)
-    matched = (lab - s_mean) / s_std * r_std + r_mean
-    out = lab_to_rgb(matched)
+    m = match_matrix(source, reference)
+    matched = (lab - np.array(source.mean, np.float32)) @ m.T + np.array(reference.mean, np.float32)
+    if source.lQuantiles is not None and reference.lQuantiles is not None:
+        qs, qr = tone_curve_knots(source.lQuantiles, reference.lQuantiles)
+        matched[..., 0] = np.interp(lab[..., 0], qs, qr).astype(np.float32)
+    out = lab_to_rgb(matched.astype(np.float32))
     return (rgb * (1.0 - amount) + out * amount).astype(np.float32)

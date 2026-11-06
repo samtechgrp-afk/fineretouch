@@ -131,3 +131,81 @@ function boxLine(buf: Float32Array, start: number, stride: number, len: number, 
   }
   for (let i = 0; i < len; i++) buf[start + i * stride] = tmp[i];
 }
+
+/** Scale a pixel polygon about its centroid; points above the centroid use `syUp`, below `syDown`. */
+function scalePolygon(pts: [number, number][], sx: number, syUp: number, syDown: number): [number, number][] {
+  const cx = pts.reduce((a, p) => a + p[0], 0) / pts.length;
+  const cy = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+  return pts.map(([x, y]) => [cx + (x - cx) * sx, cy + (y - cy) * (y < cy ? syUp : syDown)]);
+}
+
+/**
+ * Where stray-hair cleanup may act: a band around the face oval and forehead, minus eyes,
+ * brows and lips, and nothing below the mouth. Port of stray_hair_roi in
+ * services/ai/app/retouch_engine.py (feature exclusion is approximated by enlarged polygons).
+ * Returns a single-channel 0..255 mask.
+ */
+export function buildHairRoiMask(faces: FaceAnalysis[], width: number, height: number): Uint8Array {
+  const roi = new Float32Array(width * height);
+  const px = (pts: Point[]) => pts.map(([x, y]) => [x * width, y * height] as [number, number]);
+  let faceW = 1;
+  for (const f of faces) {
+    const r = f.regions;
+    if (r.faceOval.length < 3) continue;
+    faceW = Math.max(faceW, f.box[2] * width);
+    const oval = px(r.faceOval);
+    const band = new Float32Array(width * height);
+    fillPolygon(band, width, height, scalePolygon(oval, 1.28, 1.45, 1.05), 1);
+    fillPolygon(band, width, height, scalePolygon(oval, 0.78, 0.55, 0.8), 0);
+    for (const feat of [r.leftEye, r.rightEye, r.leftBrow, r.rightBrow, r.lips]) {
+      if (feat.length >= 3) fillPolygon(band, width, height, scalePolygon(px(feat), 1.6, 2.2, 2.2), 0);
+    }
+    const mouthY = (r.lips.length ? r.lips.reduce((a, p) => a + p[1], 0) / r.lips.length : f.box[1] + f.box[3] * 0.75) * height;
+    for (let y = Math.max(0, Math.floor(mouthY)); y < height; y++) band.fill(0, y * width, (y + 1) * width);
+    for (let i = 0; i < roi.length; i++) roi[i] = Math.max(roi[i], band[i]);
+  }
+  gaussianApprox(roi, width, height, faceW * 0.01);
+  return Uint8Array.from(roi, (v) => Math.round(clamp01(v) * 255));
+}
+
+/**
+ * Client-side depth fallback (0 = subject, 255 = far) when the AI service cannot provide
+ * a depth map: a head ellipse plus shoulders from the face boxes, as portrait_prior in
+ * services/ai/app/depth.py, or a centre-weighted falloff when there is no face.
+ */
+export function buildDepthPrior(faces: FaceAnalysis[], width: number, height: number): Uint8Array {
+  const person = new Float32Array(width * height);
+  for (const f of faces) {
+    const [x, y, bw, bh] = f.box;
+    const cx = (x + bw / 2) * width;
+    const cy = (y + bh / 2) * height;
+    const fw = bw * width;
+    const fh = bh * height;
+    const ell: [number, number][] = Array.from({ length: 48 }, (_, i) => {
+      const t = (i / 48) * Math.PI * 2;
+      return [cx + Math.cos(t) * fw * 0.75, cy - fh * 0.1 + Math.sin(t) * fh * 0.85];
+    });
+    fillPolygon(person, width, height, ell, 1);
+    const neckY = cy + fh * 0.55;
+    fillPolygon(person, width, height, [[cx - fw * 0.45, neckY], [cx + fw * 0.45, neckY], [cx + fw * 1.9, height], [cx - fw * 1.9, height]], 1);
+  }
+  const out = new Uint8Array(width * height);
+  if (!faces.length) {
+    for (let yy = 0; yy < height; yy++)
+      for (let xx = 0; xx < width; xx++) {
+        const d = Math.hypot((xx + 0.5) / width - 0.5, (yy + 0.5) / height - 0.45) / 0.6;
+        out[yy * width + xx] = Math.round(clamp01(d) * 255);
+      }
+    return out;
+  }
+  gaussianApprox(person, width, height, Math.max(width, height) * 0.01);
+  for (let yy = 0; yy < height; yy++) {
+    const t = clamp01(((yy + 0.5) / height - 0.6) / 0.4);
+    const bg = 1 - 0.35 * t;
+    for (let xx = 0; xx < width; xx++) {
+      const i = yy * width + xx;
+      out[i] = Math.round(clamp01(bg * (1 - person[i])) * 255);
+    }
+  }
+  return out;
+}

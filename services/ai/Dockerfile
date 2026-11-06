@@ -12,6 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 # MediaPipe Face Landmarker (478-point mesh). Apache-2.0, published by Google.
 ARG FACE_LANDMARKER_URL=https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
 RUN mkdir -p models && curl -fsSL -o models/face_landmarker.task "$FACE_LANDMARKER_URL"
+# Optional depth / segmentation models for bokeh and stray-hair cleanup (the service degrades
+# gracefully without them). Build with --build-arg WITH_DEPTH_MODELS=0 to skip (~80 MB).
+ARG WITH_DEPTH_MODELS=1
+ARG SEGMENTER_URL=https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite
+ARG MIDAS_URL=https://github.com/isl-org/MiDaS/releases/download/v2_1/model-small.onnx
+RUN if [ "$WITH_DEPTH_MODELS" = "1" ]; then \
+      curl -fsSL -o models/selfie_multiclass.tflite "$SEGMENTER_URL" \
+      && curl -fsSL -o models/midas_small.onnx "$MIDAS_URL"; \
+    fi
 
 COPY app ./app
 

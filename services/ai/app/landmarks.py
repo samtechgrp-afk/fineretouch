@@ -151,6 +151,8 @@ class FaceLandmarkService:
     def _detect_haar(self, rgb: np.ndarray) -> list[FaceAnalysis]:
         if self._haar is None:
             self._haar = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+        if self._haar.empty():  # some OpenCV builds ship without the cascade files
+            return []
         h, w = rgb.shape[:2]
         grey = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         boxes = self._haar.detectMultiScale(grey, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48))
