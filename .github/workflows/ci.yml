@@ -58,6 +58,7 @@ jobs:
       - run: npm run build:desktop:web
       # tauri-build checks that the sidecar exists; the real one is built in desktop.yml.
       - name: Placeholder engine sidecar
-        run: touch "src-tauri/binaries/fineretouch-engine-$(rustc -vV | sed -n 's/^host: //p')"
+        run: |
+          touch "src-tauri/binaries/fineretouch-engine-$(rustc -vV | sed -n 's/^host: //p')"
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
       - run: cargo test --manifest-path src-tauri/Cargo.toml

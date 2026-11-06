@@ -34,6 +34,7 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 | `src-tauri` | Tauri v2 desktop shell: window, native dialogs, engine sidecar lifecycle |
 | `scripts/package_desktop.py` | Freezes services/ai into the offline engine sidecar and stages the models |
 | `docs/DESKTOP.md` | Offline desktop app: build, develop, security model, data folders |
+| `docs/BUILD_DESKTOP_INSTALLERS.md` | Windows / macOS / Linux installer builds (CI and local), opening unsigned builds |
 
 ## Desktop app (offline)
 
