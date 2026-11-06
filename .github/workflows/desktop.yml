@@ -86,10 +86,11 @@ jobs:
       - name: Setup uv
         uses: astral-sh/setup-uv@v6
 
-      # uv instead of pip: on macOS Intel the NumPy-1.x pins send pip's resolver backtracking
-      # through dozens of large OpenCV/SciPy releases; uv resolves the same set in seconds.
+      # uv resolves fast, and --only-binary makes it pick releases that ship a wheel for this
+      # runner. macOS Intel needs that: newer rawpy and sentencepiece have no x86_64 macOS
+      # wheels, and building them from source stalled the job.
       - name: Install Python dependencies
-        run: uv pip install --system --python python -r services/ai/requirements.txt pyinstaller
+        run: uv pip install --system --python python --only-binary ':all:' -r services/ai/requirements.txt pyinstaller
 
       - name: Freeze engine sidecar and stage model pack
         run: python scripts/package_desktop.py

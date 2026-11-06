@@ -14,5 +14,6 @@ opencv-contrib-python<4.12; sys_platform == "darwin" and platform_machine == "x8
 mediapipe>=0.10.20
 pillow>=11.0
 rawpy>=0.24  # LibRaw bundled in the wheel: camera RAW demosaicing
+rawpy<0.26; sys_platform == "darwin" and platform_machine == "x86_64"  # last macOS Intel wheel
 exifread>=3.0  # fallback EXIF reader for RAW maker layouts
 boto3>=1.35
