@@ -2,12 +2,25 @@
 
 import type { Adjustments, ColorStats, ImageAnalysis } from '@fineretouch/shared';
 
-/** Base URL of services/ai. Configure with NEXT_PUBLIC_AI_URL. */
-export const AI_URL = (process.env.NEXT_PUBLIC_AI_URL ?? 'http://localhost:8000').replace(/\/$/, '');
+import { desktopInfo } from './desktop';
+
+/**
+ * Base URL of services/ai. In the desktop app this is the bundled engine sidecar on a
+ * loopback port chosen at launch; on the web it comes from NEXT_PUBLIC_AI_URL.
+ */
+export function aiUrl(): string {
+  return (desktopInfo()?.engineUrl ?? process.env.NEXT_PUBLIC_AI_URL ?? 'http://localhost:8000').replace(/\/$/, '');
+}
+
+/** The desktop engine rejects requests without its per-launch token. */
+function aiHeaders(): HeadersInit | undefined {
+  const token = desktopInfo()?.engineToken;
+  return token ? { 'x-fineretouch-token': token } : undefined;
+}
 
 export async function aiHealth(signal?: AbortSignal): Promise<{ status: string; faceBackend: string; depthBackend?: string } | null> {
   try {
-    const res = await fetch(`${AI_URL}/health`, { signal, cache: 'no-store' });
+    const res = await fetch(`${aiUrl()}/health`, { signal, cache: 'no-store', headers: aiHeaders() });
     return res.ok ? await res.json() : null;
   } catch {
     return null;
@@ -18,7 +31,7 @@ async function postFile<T>(path: string, file: Blob, extra?: Record<string, stri
   const form = new FormData();
   form.append('file', file, (file as File).name ?? 'image.jpg');
   for (const [k, v] of Object.entries(extra ?? {})) form.append(k, v);
-  const res = await fetch(`${AI_URL}${path}`, { method: 'POST', body: form, signal });
+  const res = await fetch(`${aiUrl()}${path}`, { method: 'POST', body: form, signal, headers: aiHeaders() });
   if (!res.ok) throw new Error(`AI service ${res.status}: ${(await res.text()).slice(0, 200)}`);
   return res;
 }

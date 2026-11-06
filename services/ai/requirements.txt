@@ -2,9 +2,18 @@ fastapi>=0.115
 uvicorn[standard]>=0.32
 python-multipart>=0.0.12
 pydantic>=2.9
-numpy>=2.1
+# MediaPipe stopped publishing macOS Intel wheels after 0.10.21, which needs NumPy 1.x
+# (and with it OpenCV < 4.12). Everywhere else stays on the current stack.
+numpy>=2.1; sys_platform != "darwin" or platform_machine != "x86_64"
+numpy>=1.26,<2; sys_platform == "darwin" and platform_machine == "x86_64"
 opencv-python-headless>=4.10
+opencv-python-headless<4.12; sys_platform == "darwin" and platform_machine == "x86_64"
+# MediaPipe 0.10.21 also pulls opencv-contrib-python unpinned; without this cap pip walks
+# back through every NumPy-2-only release before it finds one that fits.
+opencv-contrib-python<4.12; sys_platform == "darwin" and platform_machine == "x86_64"
 mediapipe>=0.10.20
 pillow>=11.0
 rawpy>=0.24  # LibRaw bundled in the wheel: camera RAW demosaicing
+rawpy<0.26; sys_platform == "darwin" and platform_machine == "x86_64"  # last macOS Intel wheel
+exifread>=3.0  # fallback EXIF reader for RAW maker layouts
 boto3>=1.35

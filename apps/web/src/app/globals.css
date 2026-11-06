@@ -18,6 +18,11 @@
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
+html {
+  /* Native controls (scrollbars, <select> popups) follow the dark UI in every webview. */
+  color-scheme: dark;
+}
+
 html,
 body {
   height: 100%;
@@ -55,5 +60,13 @@ body {
   }
   .field {
     @apply w-full rounded-md border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs text-ink-100 outline-none focus:border-apricot-400;
+  }
+  /* WebKitGTK (Linux desktop app) paints native selects light and ignores the background. */
+  select.field {
+    appearance: none;
+    padding-right: 1.75rem;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a1a1aa' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.6rem center;
   }
 }

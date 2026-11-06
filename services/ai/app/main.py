@@ -22,6 +22,7 @@ replicas behind the gateway (see docker-compose.yml).
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -29,9 +30,9 @@ import time
 
 import numpy as np
 import cv2
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -63,12 +64,29 @@ EYES_CLOSED_THRESHOLD = float(os.environ.get("EYES_CLOSED_THRESHOLD", "0.2"))
 ANALYZE_LONG_EDGE = 2048
 
 app = FastAPI(title="FineRetouch AI", version="0.1.0")
+# Desktop builds (services/ai/app/desktop.py) bind to loopback and set a per-launch token so
+# other local programs, or web pages open in a browser, cannot drive the engine. Server
+# deployments leave it unset and rely on the gateway instead.
+ENGINE_TOKEN = os.environ.get("FINERETOUCH_ENGINE_TOKEN") or None
+
+
+@app.middleware("http")
+async def require_engine_token(request: Request, call_next):
+    if ENGINE_TOKEN and request.method != "OPTIONS":
+        supplied = request.headers.get("x-fineretouch-token", "")
+        if not hmac.compare_digest(supplied, ENGINE_TOKEN):
+            return JSONResponse({"detail": "Missing or invalid engine token"}, status_code=401)
+    return await call_next(request)
+
+
+# Added last so it is the outermost layer: even a 401 carries CORS headers the webview can read.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 faces_service = FaceLandmarkService()
 depth_service = DepthEstimator()
 MAX_SYNC_TARGETS = int(os.environ.get("MAX_SYNC_TARGETS", "200"))

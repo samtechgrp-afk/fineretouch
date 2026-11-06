@@ -31,6 +31,11 @@ from typing import Literal
 
 import numpy as np
 
+try:  # Optional second EXIF reader for maker layouts the built-in parser does not cover.
+    import exifread
+except ImportError:  # pragma: no cover - exercised only without the dependency
+    exifread = None
+
 try:  # rawpy ships manylinux wheels with LibRaw bundled; keep the service importable without it.
     import rawpy
 except ImportError:  # pragma: no cover - exercised only where rawpy is absent
@@ -357,7 +362,66 @@ def read_raw_metadata(data: bytes, filename: str | None = None) -> RawMetadata:
             _fill_from_tiff(meta, tiff, tiff.first_ifd)
     except (ValueError, struct.error) as exc:
         log.debug("metadata parse stopped early: %s", exc)
+    if meta.make is None or meta.iso is None or meta.exposure_time is None:
+        _fill_from_exifread(data, meta)
     return meta
+
+
+_EXIFREAD_COLOR_SPACE = {1: "sRGB", 2: "Adobe RGB", 0xFFFF: "Uncalibrated"}
+
+
+def _ratio(value) -> float | None:
+    """exifread Ratio / int / list -> float."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    try:
+        return float(value.num) / float(value.den) if hasattr(value, "num") else float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _fill_from_exifread(data: bytes, meta: RawMetadata) -> None:
+    """Second opinion from ``exifread`` for fields the built-in reader left empty.
+
+    The built-in TIFF reader covers the containers we test against; exifread knows more
+    maker quirks (older NEF/ORF/PEF layouts, odd IFD chains). Only unset fields are filled,
+    and a missing or failing exifread never breaks metadata reads.
+    """
+    if exifread is None:
+        return
+    try:
+        tags = exifread.process_file(io.BytesIO(data), details=False, extract_thumbnail=False)
+    except Exception as exc:  # exifread raises plain Exceptions on unknown layouts
+        log.debug("exifread could not parse file: %s", exc)
+        return
+
+    def text(*names: str) -> str | None:
+        for n in names:
+            if n in tags and (v := str(tags[n].printable).strip().strip("\x00").strip()):
+                return v
+        return None
+
+    def values(name: str):
+        return tags[name].values if name in tags else None
+
+    meta.make = meta.make or text("Image Make")
+    meta.model = meta.model or text("Image Model")
+    meta.lens = meta.lens or text("EXIF LensModel")
+    meta.datetime_original = meta.datetime_original or text("EXIF DateTimeOriginal", "Image DateTime")
+    if meta.iso is None and (iso := _ratio(values("EXIF ISOSpeedRatings") or values("EXIF PhotographicSensitivity"))):
+        meta.iso = int(iso)
+    if meta.exposure_time is None:
+        meta.exposure_time = _ratio(values("EXIF ExposureTime"))
+    if meta.f_number is None:
+        meta.f_number = _ratio(values("EXIF FNumber"))
+    if meta.focal_length is None:
+        meta.focal_length = _ratio(values("EXIF FocalLength"))
+    if meta.orientation == 1 and (o := _ratio(values("Image Orientation"))) and 1 <= int(o) <= 8:
+        meta.orientation = int(o)
+    if meta.color_space is None and (cs := _ratio(values("EXIF ColorSpace"))) is not None:
+        meta.color_space = _EXIFREAD_COLOR_SPACE.get(int(cs))
 
 
 # --------------------------------------------------------------------------------------
