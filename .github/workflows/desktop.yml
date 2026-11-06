@@ -89,7 +89,7 @@ jobs:
       # uv instead of pip: on macOS Intel the NumPy-1.x pins send pip's resolver backtracking
       # through dozens of large OpenCV/SciPy releases; uv resolves the same set in seconds.
       - name: Install Python dependencies
-        run: uv pip install --python python -r services/ai/requirements.txt pyinstaller
+        run: uv pip install --system --python python -r services/ai/requirements.txt pyinstaller
 
       - name: Freeze engine sidecar and stage model pack
         run: python scripts/package_desktop.py
