@@ -4,7 +4,9 @@
 //! * Starts the local AI engine (`binaries/fineretouch-engine`, built by
 //!   `scripts/package_desktop.py`) as a Tauri sidecar on a free loopback port, hands it the
 //!   bundled models and a per-launch token, and stops it when the app exits.
-//! * Gives the editor native Save As / folder dialogs for exports.
+//! * Gives the editor native Save As / folder dialogs and direct disk writes for exports
+//!   (tauri-plugin-dialog + tauri-plugin-fs, limited to the exports folder and dialog picks;
+//!   see src/files.rs), with picked folders remembered by tauri-plugin-persisted-scope.
 //!
 //! Nothing here needs the network: models, engine and UI all ship inside the installer.
 
@@ -18,20 +20,20 @@ use tauri::{RunEvent, WebviewWindowBuilder};
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_fs::init())
+        // After fs: restores folders granted in earlier sessions (e.g. the default export folder).
+        .plugin(tauri_plugin_persisted_scope::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(engine::EngineState::default())
-        .manage(files::ExportScope::default())
         .invoke_handler(tauri::generate_handler![
             engine::engine_status,
             engine::restart_engine,
-            files::choose_save_path,
-            files::choose_export_folder,
-            files::write_export,
             files::reveal_path,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
             let dirs = paths::AppPaths::resolve(&handle)?;
+            files::allow_exports_dir(&handle, &dirs.exports)?;
             let launch = engine::start(&handle, &dirs)?;
 
             // The editor reads this synchronously at module load (apps/web/src/lib/desktop.ts),
@@ -40,6 +42,7 @@ pub fn run() {
                 "engineUrl": launch.url,
                 "engineToken": launch.token,
                 "dataDir": dirs.data.to_string_lossy(),
+                "exportsDir": dirs.exports.to_string_lossy(),
                 "version": app.package_info().version.to_string(),
                 "platform": std::env::consts::OS,
             });

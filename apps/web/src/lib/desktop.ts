@@ -15,6 +15,8 @@ export interface DesktopInfo {
   engineToken: string;
   /** %APPDATA%/FineRetouch, ~/Library/Application Support/FineRetouch or ~/.local/share/FineRetouch */
   dataDir: string;
+  /** <dataDir>/exports: the default export folder, created by the shell and always writable. */
+  exportsDir: string;
   version: string;
   platform: 'windows' | 'macos' | 'linux' | string;
 }
@@ -55,40 +57,10 @@ export function restartEngine(): Promise<EngineStatus> {
 }
 
 /**
- * Save exports through native dialogs instead of a browser download (which webviews either
- * ignore or drop into Downloads without asking).
- *
- * One file: a Save As dialog. Several files: a folder picker, then every file is written
- * into that folder (no ZIP needed on the desktop). Returns where the files went, or null if
- * the user cancelled.
+ * Show a file or folder in Explorer / Finder / the file manager. Only paths the webview
+ * may write (picked in a dialog, or the exports folder) can be revealed.
+ * Saving itself lives in exportManager.ts (tauri-plugin-dialog + tauri-plugin-fs).
  */
-export async function saveExports(files: Array<{ name: string; blob: Blob }>): Promise<string | null> {
-  if (!files.length) return null;
-  if (files.length === 1) {
-    const target = await invoke<string | null>('choose_save_path', { defaultName: files[0].name });
-    if (!target) return null;
-    await writeBytes(target, '', files[0].blob);
-    return target;
-  }
-  const dir = await invoke<string | null>('choose_export_folder');
-  if (!dir) return null;
-  for (const f of files) await writeBytes(dir, f.name, f.blob);
-  return dir;
-}
-
-/**
- * Bytes travel as the raw IPC body (not JSON), which keeps 50 MB TIFF/PNG exports fast.
- * The shell only writes into paths the user picked in its own dialogs.
- */
-async function writeBytes(target: string, name: string, blob: Blob): Promise<void> {
-  const body = new Uint8Array(await blob.arrayBuffer());
-  await invoke<void>('write_export', body, {
-    'x-fineretouch-target': encodeURIComponent(target),
-    'x-fineretouch-name': encodeURIComponent(name),
-  });
-}
-
-/** Show a file or folder in Explorer / Finder / the file manager. */
 export function revealInFolder(path: string): Promise<void> {
   return invoke<void>('reveal_path', { path });
 }

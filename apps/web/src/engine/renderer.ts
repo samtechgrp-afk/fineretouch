@@ -1,5 +1,7 @@
 import type { Adjustments, ColorStats } from '@fineretouch/shared';
+import { gradingIsDefault, hslIsDefault } from '@fineretouch/shared';
 import { matchMatrix, toneCurveKnots } from './color';
+import { gradeBounds, gradeUniform, hslUniform } from './colorMixer';
 import {
   BLUR_FRAG,
   BLUR_SIGMAS,
@@ -200,6 +202,18 @@ export class Renderer {
     u('uSharpen', adj.sharpen / 100);
     u('uVignette', adj.vignette / 100);
     u('uMultiplier', adj.skinMultiplier);
+    gl.uniform1i(this.loc(p, 'uProtectMoles'), adj.protectBeautyMarks ? 1 : 0);
+    const skinWork = adj.skinSmoothing > 0 || adj.blemishRemoval > 0 || adj.skinToneUnify > 0 || adj.skinMultiplier > 1;
+    gl.uniform1i(this.loc(p, 'uToneGuard'), adj.skinToneGuard && skinWork ? 1 : 0);
+    const hsl = !hslIsDefault(adj.hsl);
+    gl.uniform1i(this.loc(p, 'uHsl'), hsl ? 1 : 0);
+    if (hsl) gl.uniform3fv(this.loc(p, 'uHslK'), hslUniform(adj.hsl));
+    const grade = !gradingIsDefault(adj.colorGrading);
+    gl.uniform1i(this.loc(p, 'uGrade'), grade ? 1 : 0);
+    if (grade) {
+      gl.uniform3fv(this.loc(p, 'uGradeOff'), gradeUniform(adj.colorGrading));
+      gl.uniform3fv(this.loc(p, 'uGradeBounds'), gradeBounds(adj.colorGrading));
+    }
     const hair = adj.strayHairRemoval.enabled && this.hairRoi !== null;
     gl.uniform1i(this.loc(p, 'uHair'), hair ? 1 : 0);
     u('uHairStrength', adj.strayHairRemoval.strength / 100);

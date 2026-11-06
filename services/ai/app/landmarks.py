@@ -34,6 +34,9 @@ LIPS = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291, 409, 270, 269, 267, 0
 INNER_MOUTH = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308, 415, 310, 311, 312, 13, 82, 81, 80, 191]
 LEFT_BROW = [276, 283, 282, 295, 285, 300, 293, 334, 296, 336]
 RIGHT_BROW = [46, 53, 52, 65, 55, 70, 63, 105, 66, 107]
+# Lower nose: subnasale, columella, nostril openings, alae and the sides just above them.
+# Spot healing treats the convex hull of these as off-limits (nostril shadows read as spots).
+NOSE_BOTTOM = [2, 19, 97, 98, 64, 48, 326, 327, 294, 278]
 # Eye-aspect-ratio pairs: (top, bottom) x2 and (outer, inner) corners.
 RIGHT_EAR = ((159, 145), (158, 153), (33, 133))
 LEFT_EAR = ((386, 374), (385, 380), (263, 362))
@@ -43,6 +46,13 @@ MODEL_PATH = Path(os.environ.get("FACE_LANDMARKER_MODEL", Path(__file__).resolve
 
 def _ring(pts: np.ndarray, idx: list[int]) -> list[Point]:
     return [(float(pts[i, 0]), float(pts[i, 1])) for i in idx]
+
+
+def _hull(pts: np.ndarray, idx: list[int], aspect: float) -> list[Point]:
+    """Convex hull (normalised coords) of a landmark subset; hull computed in pixel-proportional space."""
+    sub = pts[idx, :2].astype(np.float32) * np.array([aspect, 1.0], np.float32)
+    hull = cv2.convexHull(sub).reshape(-1, 2) / np.array([aspect, 1.0], np.float32)
+    return [(float(x), float(y)) for x, y in hull]
 
 
 def _under_eye(pts: np.ndarray, lid: list[int], aspect: float) -> list[Point]:
@@ -137,6 +147,7 @@ class FaceLandmarkService:
                 lips=_ring(pts, LIPS),
                 leftBrow=_ring(pts, LEFT_BROW),
                 rightBrow=_ring(pts, RIGHT_BROW),
+                nose=_hull(pts, NOSE_BOTTOM, aspect),
             )
             faces.append(
                 FaceAnalysis(

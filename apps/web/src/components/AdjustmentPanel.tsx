@@ -2,15 +2,16 @@
 
 import * as Slider from '@radix-ui/react-slider';
 import { DEFAULT_ADJUSTMENTS, GROUP_LABELS, SLIDERS, type AdjustmentGroup, type SliderSpec } from '@fineretouch/shared';
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { selectActivePhoto, useEditor } from '@/lib/store';
+import { ColorMixerPanel } from './ColorMixerPanel';
 import { RetouchControlPanel } from './RetouchControlPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
 
 export function AdjustmentPanel() {
   const photo = useEditor(selectActivePhoto);
-  const [open, setOpen] = useState<Record<string, boolean>>({ pro: true, skin: true, face: true, light: true, color: true, detail: false });
+  const [open, setOpen] = useState<Record<string, boolean>>({ pro: true, skin: true, face: true, light: true, color: true, mixer: false, detail: false });
   if (!photo) return <aside className="p-4 text-sm text-ink-400">Select a photo to edit.</aside>;
 
   const faceState =
@@ -33,12 +34,19 @@ export function AdjustmentPanel() {
         <RetouchControlPanel photo={photo} />
       </Section>
       {GROUP_ORDER.map((g) => (
-        <Section key={g} title={GROUP_LABELS[g]} open={open[g]} onToggle={() => setOpen((o) => ({ ...o, [g]: !o[g] }))}
-          note={g === 'face' ? faceState : g === 'skin' && !hasFace ? 'Using colour-based skin detection' : undefined}>
-          {SLIDERS.filter((s) => s.group === g).map((s) => (
-            <AdjustmentSlider key={s.key} spec={s} value={photo.adjustments[s.key]} disabled={Boolean(s.needsFace && !hasFace)} />
-          ))}
-        </Section>
+        <Fragment key={g}>
+          <Section title={GROUP_LABELS[g]} open={open[g]} onToggle={() => setOpen((o) => ({ ...o, [g]: !o[g] }))}
+            note={g === 'face' ? faceState : g === 'skin' && !hasFace ? 'Using colour-based skin detection' : undefined}>
+            {SLIDERS.filter((s) => s.group === g).map((s) => (
+              <AdjustmentSlider key={s.key} spec={s} value={photo.adjustments[s.key]} disabled={Boolean(s.needsFace && !hasFace)} />
+            ))}
+          </Section>
+          {g === 'color' && (
+            <Section title="Colour mixer & grading" open={open.mixer} onToggle={() => setOpen((o) => ({ ...o, mixer: !o.mixer }))}>
+              <ColorMixerPanel photo={photo} />
+            </Section>
+          )}
+        </Fragment>
       ))}
     </aside>
   );
@@ -81,7 +89,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
         <label
           htmlFor={id}
           className="cursor-pointer text-ink-300"
-          title="Double-click to reset"
+          title={spec.hint ? `${spec.hint} Double-click to reset.` : 'Double-click to reset'}
           onDoubleClick={() => !disabled && updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         >
           {spec.label}
@@ -89,6 +97,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
         <span className={`font-mono tabular-nums ${value !== def ? 'text-apricot-300' : 'text-ink-400'}`}>
           {value > 0 && bipolar ? '+' : ''}
           {Math.round(value)}
+          {spec.unit}
         </span>
       </div>
       <Slider.Root
@@ -111,6 +120,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
           {bipolar && <CentreFill value={value} min={spec.min} max={spec.max} />}
         </Slider.Track>
         <Slider.Thumb
+          aria-label={spec.label}
           className="block h-3.5 w-3.5 rounded-full border-2 border-ink-900 bg-ink-100 shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-apricot-400"
           onDoubleClick={() => updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         />
