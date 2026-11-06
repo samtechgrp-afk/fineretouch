@@ -111,6 +111,8 @@ class Adjustments(BaseModel):
     depthBokeh: DepthBokehSettings = DepthBokehSettings()
     # v0.5: spot healing keeps moles / beauty marks; colour mixer and grading wheels.
     protectBeautyMarks: bool = True
+    # CIELAB a*/b* lock: retouched skin may not turn ashen or drift off its undertone.
+    skinToneGuard: bool = True
     hsl: HslMixer = HslMixer()
     colorGrading: ColorGrading = ColorGrading()
 

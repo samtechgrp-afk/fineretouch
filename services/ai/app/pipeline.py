@@ -4,14 +4,18 @@ apps/web/src/engine/shaders.ts; any change to one must be mirrored in the other.
 Stages (all on float32 sRGB in [0, 1]):
   1. Three Gaussian bands at radii proportional to the long edge (s0 < s1 < s2).
   2. Skin probability (YCbCr box) gated by the face-oval mask from landmarks.
-  3. Frequency separation: suppress the mid band (blotches) and part of the fine
-     band (texture) on skin, keeping strong edges.
-  4. Spot healing (retouch_engine.heal_spots): acne, pimples and dark spots found by
-     multi-scale LoG are inpainted and re-textured from healthy skin, one at a time;
-     the 1x/2x/3x multiplier widens detection. The preview approximates this stage.
+  3-4. Natural retouch (retouch_engine.natural_skin_retouch):
+     spot healing first (acne, pimples and dark spots found by multi-scale LoG are
+     inpainted in the tone layer and re-textured from healthy skin, one at a time; the
+     1x/2x/3x multiplier widens detection), then frequency separation into a tone layer
+     (s1) and a detail layer: the blotch band (s1..s2) is suppressed and an adaptive
+     median evens the tone layer, and the detail layer is re-injected by the Texture
+     retention factor. The preview approximates spot healing and the median.
   5. Skin tone unification: chroma pulled toward the local average.
   5b. Boosted skin (2x/3x) and stray-hair cleanup (retouch_engine; the preview
       approximates these, so they are excluded from the parity guarantee).
+  5c. Skin-tone guard (retouch_engine.skin_tone_guard): CIELAB chroma floor and hue
+      lock so retouched skin never turns ashen or shifts away from its undertone.
   6. Landmark-driven features: eyes, dark circles, teeth.
   7. L*a*b* colour match (covariance transform + tone curve when available).
   8. Global tone: exposure / white balance (linear light), highlights, shadows,
@@ -29,7 +33,13 @@ import numpy as np
 
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine
-from .retouch_engine import apply_boosted_skin_retouch, apply_depth_bokeh, heal_spots, remove_stray_hairs
+from .retouch_engine import (
+    apply_boosted_skin_retouch,
+    apply_depth_bokeh,
+    natural_skin_retouch,
+    remove_stray_hairs,
+    skin_tone_guard,
+)
 from .schemas import Adjustments, ColorStats, FaceAnalysis
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
@@ -146,23 +156,19 @@ def render(
     skin = skin[..., None]
 
     c = src.copy()
+    skin_w = skin[..., 0]
     smooth = adj.skinSmoothing / 100.0
-    texture = adj.skinTexture / 100.0
-    fine = src - low1
-    mid = low1 - low2
 
-    # 3. Frequency separation.
-    if smooth > 0:
-        edge = smoothstep(0.08, 0.22, np.abs(luma(fine)) + np.abs(luma(mid)))[..., None]
-        k = skin * smooth * (1.0 - edge)
-        c = c - k * ((1.0 - texture) * fine + 0.85 * mid)
-
-    # 4. Spot healing: acne, pimples and dark spots are detected one by one (LoG on a
-    #    darkness + redness signal) and repaired locally; moles and features are kept.
-    if adj.blemishRemoval > 0:
-        c = heal_spots(
-            np.clip(c, 0.0, 1.0).astype(np.float32), skin[..., 0], faces, adj.blemishRemoval,
-            int(adj.skinMultiplier), adj.protectBeautyMarks,
+    # 3 + 4. Natural frequency-separation retouch: spots healed one by one (tone inpainted,
+    #    healthy pores cloned in), then blotches smoothed and median-evened on the tone layer
+    #    only, and the detail layer re-injected by the Texture retention factor.
+    if adj.skinSmoothing > 0 or adj.blemishRemoval > 0:
+        c = natural_skin_retouch(
+            c, skin_w, faces,
+            smoothing=adj.skinSmoothing, texture_retention=adj.skinTexture,
+            spot_amount=adj.blemishRemoval, multiplier=int(adj.skinMultiplier),
+            protect_beauty_marks=adj.protectBeautyMarks,
+            sigma_tone=S1 * L, sigma_base=S2 * L, bands=(low1, low2),
         )
 
     # 5. Skin tone unification.
@@ -176,6 +182,10 @@ def render(
     # 5b. Boosted retouch and flyaway hair.
     if adj.skinMultiplier > 1:
         c = apply_boosted_skin_retouch(np.clip(c, 0.0, 1.0).astype(np.float32), skin[..., 0], float(adj.skinMultiplier))
+    # 5c. Skin-tone guard: CIELAB a*/b* lock against ashen or off-hue skin.
+    skin_work = adj.skinSmoothing > 0 or adj.blemishRemoval > 0 or adj.skinToneUnify > 0 or adj.skinMultiplier > 1
+    if adj.skinToneGuard and skin_work:
+        c = skin_tone_guard(np.clip(c, 0.0, 1.0).astype(np.float32), src, low2, skin_w)
     if adj.strayHairRemoval.enabled and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
 

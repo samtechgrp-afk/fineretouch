@@ -84,9 +84,10 @@ flowchart LR
 | Stage | What it does |
 | :--- | :--- |
 | Skin probability | YCbCr chroma box, gated by the face-oval mask when a face exists |
-| Frequency separation | Removes the mid band (blotches) and part of the fine band (pores, scaled by *Keep texture*), skipping strong edges |
+| Frequency separation | Tone layer = s1 band, detail layer = source − s1. The blotch band (s1 − s2) is removed from the tone layer and the detail layer is re-injected by *Texture retention* (100 % keeps every pore), skipping strong edges. Export adds an adaptive median on the tone layer (§2b) |
 | Spot healing | Spots darker or redder than their surroundings at the fine/coarse scale get the coarse band plus their own texture (face mask only, so red pimples are not skipped); 2x/3x widen detection; very dark neutral spots are kept as beauty marks. Export runs the full local healer (§2b) |
 | Even skin tone | Pulls skin chroma toward the local average |
+| Skin-tone guard | CIELAB chroma floor and hue lock on retouched skin (*Protect skin tone*, §2b); same maths in the shader and `skin_tone_guard` |
 | Eyes / dark circles / teeth | Region-masked exposure + local contrast; under-eye luminance lift and chroma neutralisation; yellow removal and lift on bright mouth pixels |
 | Skin boost 2x/3x | Extra pass for stubborn spots, pigment and redness (see §2a); approximated live, full algorithm on server export |
 | Stray hair cleanup | Thin-strand removal inside a band around the face outline and forehead (see §2a); approximated live |
@@ -110,7 +111,16 @@ These live in `services/ai/app/retouch_engine.py` (full quality, used by server 
 | Depth bokeh | `depthBokeh: {enabled, blurRadius 0–100, bokehMultiplier 100–300 %, apertureShape circle \| hex, highlightBoost}` | Depth (0 = subject, 1 = far) from MiDaS v2.1 small via OpenCV DNN, normalised to the faces, with the person mask pinned to the focal plane and edges refined by a guided filter. Layered disk/hex convolution in linear light (8 CoC layers, normalised so the subject never halos), highlight gain before blurring, large radii run downscaled. | Same depth map (`POST /v1/depth`) or a face-box portrait prior offline; gather bokeh with a 48-tap Vogel-spiral kernel (hexagon-stretched for `hex`), sample CoC test to stop subject bleed, two passes |
 | Style sync | `colorMatch` (palette mode) or ordinary sliders | `style_profile` (L\*a\*b\* mean/covariance/quantiles, contrast, warmth, chroma, Laplacian sharpness, skin texture energy) → `map_style_to_adjustments` | Same profile computed in the browser; `mapStyleToAdjustments` in `packages/shared/src/style.ts` |
 
-### 2b. Spot healing, colour mixer and grading, exports and watermarks (v0.5)
+### 2b. Natural retouch, spot healing, colour mixer and grading, exports and watermarks (v0.5)
+
+**Natural frequency-separation retouch** (`natural_skin_retouch` in `retouch_engine.py`; the *Smoothing*, *Texture retention* and *Spot healing* sliders). Replaces flat blurring with work on two layers:
+
+1. Spots are healed first (below): their tone is inpainted and their outline, which is detail-scale, is replaced by healthy pores cloned from nearby skin. Nothing else is touched.
+2. The image is split into a **tone layer** (Gaussian, σ = 0.4 % of the long edge, the renderer's s1) and a **detail layer** (the remainder: pores, peach fuzz, fine lines); tone + detail reproduces the image exactly.
+3. Only the tone layer is smoothed: the blotch band between s1 and s2 is suppressed (× 0.85 × Smoothing × skin, skipping strong edges), then an **adaptive median** evens what is left. The median runs on a copy shrunk to ~0.6 σ per pixel and its change fades out where it would exceed 0.025–0.06 luma anywhere nearby, so moles, brows and contours stay.
+4. The detail layer goes back on top: `detail × (1 − k × (1 − retention))`, where k is the local smoothing weight. At 100 % *Texture retention* every pore returns unchanged; at 0 % Smoothing also flattens texture (the "plastic" look, there if someone wants it).
+
+**Skin-tone guard** (`skin_tone_guard`, *Protect skin tone*, on by default). Runs after smoothing, spot healing, even skin tone and the 2x/3x boost. In CIELAB, a retouched skin pixel's chroma may not fall below 90 % of the lower of its original chroma and its surroundings' chroma (the s2 band of the original), and its hue may leave the arc between those two hues by at most 6°. L\* is never changed, and pixels the retouch did not desaturate or turn keep their exact values, so freckles and natural variation in melanin are untouched; only ashen or off-hue results are pulled back. Constants live in `SKIN_TONE_GUARD` (shared) and `TONE_GUARD_*` (Python), and a test keeps them equal.
 
 **Spot healing** (`heal_spots` in `retouch_engine.py`, the *Spot healing* slider plus the 1x/2x/3x multiplier). Replaces the old global low-band blend on export with local repairs:
 

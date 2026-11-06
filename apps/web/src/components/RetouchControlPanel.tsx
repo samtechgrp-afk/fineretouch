@@ -148,6 +148,7 @@ function SkinBoost({ photo }: { photo: Photo }) {
   const updateAdjustments = useEditor((s) => s.updateAdjustments);
   const value = photo.adjustments.skinMultiplier;
   const keepMarks = photo.adjustments.protectBeautyMarks;
+  const guard = photo.adjustments.skinToneGuard;
   return (
     <section>
       <Heading
@@ -165,6 +166,15 @@ function SkinBoost({ photo }: { photo: Photo }) {
           Keep beauty marks
         </span>
         <Toggle checked={keepMarks} onChange={(v) => updateAdjustments({ protectBeautyMarks: v })} label="Keep beauty marks" />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
+        <span
+          className="text-xs text-ink-300"
+          title="Locks skin colour in CIELAB: smoothing, spot healing, even tone and the 2x/3x boost may not turn skin grey or ashen, or shift it away from the person's own undertone."
+        >
+          Protect skin tone
+        </span>
+        <Toggle checked={guard} onChange={(v) => updateAdjustments({ skinToneGuard: v })} label="Protect skin tone" />
       </div>
     </section>
   );

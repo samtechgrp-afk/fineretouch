@@ -89,7 +89,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
         <label
           htmlFor={id}
           className="cursor-pointer text-ink-300"
-          title="Double-click to reset"
+          title={spec.hint ? `${spec.hint} Double-click to reset.` : 'Double-click to reset'}
           onDoubleClick={() => !disabled && updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         >
           {spec.label}
@@ -97,6 +97,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
         <span className={`font-mono tabular-nums ${value !== def ? 'text-apricot-300' : 'text-ink-400'}`}>
           {value > 0 && bipolar ? '+' : ''}
           {Math.round(value)}
+          {spec.unit}
         </span>
       </div>
       <Slider.Root
@@ -119,6 +120,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
           {bipolar && <CentreFill value={value} min={spec.min} max={spec.max} />}
         </Slider.Track>
         <Slider.Thumb
+          aria-label={spec.label}
           className="block h-3.5 w-3.5 rounded-full border-2 border-ink-900 bg-ink-100 shadow focus:outline-none focus-visible:ring-2 focus-visible:ring-apricot-400"
           onDoubleClick={() => updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         />

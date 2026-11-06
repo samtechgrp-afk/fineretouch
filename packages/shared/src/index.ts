@@ -18,6 +18,10 @@ export interface SliderSpec {
   group: AdjustmentGroup;
   /** Needs face landmarks from the AI service to have any effect. */
   needsFace?: boolean;
+  /** Shown after the value, e.g. '%'. */
+  unit?: string;
+  /** Tooltip on the label. */
+  hint?: string;
 }
 
 export type AdjustmentGroup = 'light' | 'color' | 'skin' | 'face' | 'detail';
@@ -93,6 +97,14 @@ export const HSL_LUM_RANGE = 0.6;
 /** Saturation where the mixer reaches full strength (greys are left alone). */
 export const HSL_NEUTRAL_EDGE = 0.2;
 
+/**
+ * Skin-tone guard (CIELAB), same values as TONE_GUARD_* in services/ai/app/retouch_engine.py.
+ * Retouched skin keeps at least `chromaKeep` of the lower of its own and its surroundings'
+ * chroma, and its hue may leave the arc between those two by at most `hueTolerance` degrees.
+ * The hue lock fades in between the two `minChroma` values (a*b* units).
+ */
+export const SKIN_TONE_GUARD = Object.freeze({ chromaKeep: 0.9, hueTolerance: 6, minChroma: [2, 6] as const });
+
 export interface HslValue {
   hue: number; // -100..100
   saturation: number; // -100..100
@@ -162,7 +174,7 @@ export interface Adjustments {
   vibrance: number; // -100..100
   // Skin
   skinSmoothing: number; // 0..100 frequency-separation strength on skin
-  skinTexture: number; // 0..100 how much high-frequency pore detail is preserved
+  skinTexture: number; // 0..100 texture retention: share of the pore / detail layer re-injected after smoothing
   blemishRemoval: number; // 0..100
   skinToneUnify: number; // 0..100 pulls skin chroma toward the face average
   // Face (landmark driven)
@@ -181,6 +193,8 @@ export interface Adjustments {
   // Spot healing, colour mixer and grading (v0.5)
   /** Spot healing (the blemishRemoval slider) leaves moles / beauty marks alone. */
   protectBeautyMarks: boolean;
+  /** CIELAB a* and b* lock: retouched skin may not turn ashen or drift off its own undertone. */
+  skinToneGuard: boolean;
   hsl: HslMixer;
   colorGrading: ColorGrading;
 }
@@ -188,7 +202,14 @@ export interface Adjustments {
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
 export type AdjustmentKey = Exclude<
   keyof Adjustments,
-  'colorMatch' | 'skinMultiplier' | 'strayHairRemoval' | 'depthBokeh' | 'protectBeautyMarks' | 'hsl' | 'colorGrading'
+  | 'colorMatch'
+  | 'skinMultiplier'
+  | 'strayHairRemoval'
+  | 'depthBokeh'
+  | 'protectBeautyMarks'
+  | 'skinToneGuard'
+  | 'hsl'
+  | 'colorGrading'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -223,6 +244,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   strayHairRemoval: DEFAULT_STRAY_HAIR,
   depthBokeh: DEFAULT_DEPTH_BOKEH,
   protectBeautyMarks: true,
+  skinToneGuard: true,
   hsl: DEFAULT_HSL,
   colorGrading: DEFAULT_COLOR_GRADING,
 });
@@ -237,7 +259,10 @@ export const SLIDERS: readonly SliderSpec[] = [
   { key: 'saturation', label: 'Saturation', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'vibrance', label: 'Vibrance', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'skinSmoothing', label: 'Smoothing', min: 0, max: 100, step: 1, group: 'skin' },
-  { key: 'skinTexture', label: 'Keep texture', min: 0, max: 100, step: 1, group: 'skin' },
+  {
+    key: 'skinTexture', label: 'Texture retention', min: 0, max: 100, step: 1, group: 'skin', unit: '%',
+    hint: 'Share of the pore and fine-detail layer put back after Smoothing evens the tone layer. 100% keeps every pore.',
+  },
   { key: 'blemishRemoval', label: 'Spot healing', min: 0, max: 100, step: 1, group: 'skin' },
   { key: 'skinToneUnify', label: 'Even skin tone', min: 0, max: 100, step: 1, group: 'skin' },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
@@ -295,6 +320,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
     highlightBoost: num(db.highlightBoost, 0, 100, DEFAULT_DEPTH_BOKEH.highlightBoost),
   };
   if (typeof src.protectBeautyMarks === 'boolean') out.protectBeautyMarks = src.protectBeautyMarks;
+  if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
   return out;

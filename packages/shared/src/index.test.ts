@@ -62,6 +62,7 @@ describe('v0.5 colour mixer, grading and spot healing settings', () => {
   it('defaults are neutral and keep beauty marks', () => {
     const d = sanitizeAdjustments({});
     expect(d.protectBeautyMarks).toBe(true);
+    expect(d.skinToneGuard).toBe(true);
     expect(Object.keys(d.hsl)).toEqual([...HSL_CHANNELS]);
     expect(d.colorGrading.blending).toBe(50);
     expect(isDefault(d)).toBe(true);
@@ -89,6 +90,8 @@ describe('v0.5 colour mixer, grading and spot healing settings', () => {
 
   it('beauty-mark protection is a plain boolean', () => {
     expect(sanitizeAdjustments({ protectBeautyMarks: false }).protectBeautyMarks).toBe(false);
+    expect(sanitizeAdjustments({ skinToneGuard: false }).skinToneGuard).toBe(false);
+    expect(sanitizeAdjustments({ skinToneGuard: 'no' } as unknown as Partial<Adjustments>).skinToneGuard).toBe(true);
     expect(sanitizeAdjustments({ protectBeautyMarks: 0 } as unknown as Partial<Adjustments>).protectBeautyMarks).toBe(true);
   });
 });

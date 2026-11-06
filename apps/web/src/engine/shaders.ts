@@ -24,6 +24,7 @@ import {
   HSL_HUE_RANGE,
   HSL_LUM_RANGE,
   HSL_NEUTRAL_EDGE,
+  SKIN_TONE_GUARD,
 } from '@fineretouch/shared';
 
 const glslFloat = (v: number) => (Number.isInteger(v) ? `${v}.0` : `${v}`);
@@ -146,6 +147,7 @@ uniform bool uMatch;
 uniform float uMatchAmount;
 uniform vec3 uSrcMean, uRefMean;
 uniform bool uProtectMoles;     // spot healing keeps beauty marks
+uniform bool uToneGuard;        // CIELAB skin-tone guard on and some skin retouch active
 uniform bool uHsl;              // 8-channel mixer active
 uniform vec3 uHslK[8];          // per channel (hue, saturation, luminance) in -1..1
 uniform bool uGrade;            // colour grading active
@@ -153,6 +155,23 @@ uniform vec3 uGradeOff[3];      // shadows / midtones / highlights RGB offsets (
 uniform vec3 uGradeBounds;      // shadow pivot, highlight pivot, crossover width
 ${COMMON}
 const float HUE_C[9] = ${HUE_CENTERS_GLSL};
+// Skin-tone guard (retouch_engine.skin_tone_guard): chroma floor and hue lock in CIELAB.
+float wrapDeg(float d) { return mod(d + 180.0, 360.0) - 180.0; }
+vec3 toneGuard(vec3 c, vec3 orig, vec3 ref) {
+  vec3 lab = rgbToLab(c), lo = rgbToLab(orig), lr = rgbToLab(ref);
+  float ch = length(lab.yz), cho = length(lo.yz), chr = length(lr.yz);
+  float hr = chr < 1e-5 ? 0.0 : degrees(atan(lr.z, lr.y));
+  float hue = ch < 1e-5 ? hr : degrees(atan(lab.z, lab.y));
+  float ho = cho < 1e-5 ? hr : degrees(atan(lo.z, lo.y));
+  float chn = max(ch, ${glslFloat(SKIN_TONE_GUARD.chromaKeep)} * min(cho, chr));
+  float d = wrapDeg(hue - hr), dO = wrapDeg(ho - hr);
+  float dn = clamp(d, min(dO, 0.0) - ${glslFloat(SKIN_TONE_GUARD.hueTolerance)}, max(dO, 0.0) + ${glslFloat(SKIN_TONE_GUARD.hueTolerance)});
+  float lock = smoothstep(${glslFloat(SKIN_TONE_GUARD.minChroma[0])}, ${glslFloat(SKIN_TONE_GUARD.minChroma[1])}, min(chr, chn));
+  float turn = (dn - d) * lock;
+  if (chn <= ch + 1e-4 && abs(turn) <= 1e-3) return c;
+  float hn = radians(hr + d + turn);
+  return clamp(labToRgb(vec3(lab.x, chn * cos(hn), chn * sin(hn))), 0.0, 1.0);
+}
 vec3 hslMixer(vec3 c) {
   vec3 hsv = rgb2hsv(c);
   int lo = 0;
@@ -196,7 +215,10 @@ void main() {
   vec3 fine = src - low1;
   vec3 mid = low1 - low2;
 
-  // Frequency separation: drop the blotchy mid band, keep a share of the pores.
+  // Frequency separation (preview of retouch_engine.natural_skin_retouch): tone layer = low1,
+  // detail layer = src - low1. The blotch band (low1 - low2) is dropped from the tone layer and
+  // the detail layer comes back by the Texture retention factor. Export also runs an adaptive
+  // median on the tone layer and heals spots before the split.
   if (uSmooth > 0.0) {
     float edge = smoothstep(0.08, 0.22, abs(luma(fine)) + abs(luma(mid)));
     float k = skin * uSmooth * (1.0 - edge);
@@ -236,6 +258,11 @@ void main() {
     float t = clamp(max(pig, redl) * (0.55 + 0.25 * extra) + 0.12 * extra, 0.0, 1.0) * skin;
     float yb = luma(c) + lift * skin;
     c = fromYCbCr(yb, cbOf(c) + (cbOf(low3) - cbOf(low2)) * t, crOf(c) + (crOf(low3) - crOf(low2)) * t);
+  }
+  // Skin-tone guard: retouched skin never goes ashen or drifts off its undertone.
+  if (uToneGuard) {
+    c = clamp(c, 0.0, 1.0);
+    c = mix(c, toneGuard(c, src, low2), skin);
   }
   // Stray hair: thin strands that differ from their surroundings inside the face-outline band.
   if (uHair) {

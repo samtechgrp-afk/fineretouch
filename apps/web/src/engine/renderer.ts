@@ -203,6 +203,8 @@ export class Renderer {
     u('uVignette', adj.vignette / 100);
     u('uMultiplier', adj.skinMultiplier);
     gl.uniform1i(this.loc(p, 'uProtectMoles'), adj.protectBeautyMarks ? 1 : 0);
+    const skinWork = adj.skinSmoothing > 0 || adj.blemishRemoval > 0 || adj.skinToneUnify > 0 || adj.skinMultiplier > 1;
+    gl.uniform1i(this.loc(p, 'uToneGuard'), adj.skinToneGuard && skinWork ? 1 : 0);
     const hsl = !hslIsDefault(adj.hsl);
     gl.uniform1i(this.loc(p, 'uHsl'), hsl ? 1 : 0);
     if (hsl) gl.uniform3fv(this.loc(p, 'uHslK'), hslUniform(adj.hsl));
