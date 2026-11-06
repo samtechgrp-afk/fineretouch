@@ -1,0 +1,63 @@
+name: Desktop installers
+
+# Builds the offline desktop app for each OS. PyInstaller cannot cross-compile, so every
+# platform freezes its own engine sidecar before `tauri build` bundles it with the models.
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest # Apple Silicon (aarch64-apple-darwin)
+          - os: macos-13 # Intel (x86_64-apple-darwin)
+          - os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux webview and EGL libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev libegl1 libgles2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: services/ai/requirements*.txt
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+      - run: pip install -r services/ai/requirements.txt pyinstaller
+
+      - name: Freeze engine sidecar and stage models
+        run: python scripts/package_desktop.py
+
+      - name: Build installer
+        run: npm run desktop:build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fineretouch-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
+            src-tauri/target/release/bundle/**/*.AppImage
+          if-no-files-found: error

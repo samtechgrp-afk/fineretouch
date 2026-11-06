@@ -11,3 +11,14 @@ services/ai/models/*.task
 services/ai/models/*.tflite
 services/ai/models/*.onnx
 next-env.d.ts
+
+# Desktop (Tauri) build outputs. Engine binaries and models are produced by
+# scripts/package_desktop.py and bundled at build time, not committed.
+apps/web/out/
+build/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/*
+!src-tauri/binaries/.gitkeep
+src-tauri/resources/models/*
+!src-tauri/resources/models/.gitkeep

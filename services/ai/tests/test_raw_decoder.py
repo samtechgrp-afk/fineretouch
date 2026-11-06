@@ -317,3 +317,25 @@ def test_raw_metadata_and_preview_endpoints() -> None:
 def test_unreadable_raw_is_a_415_not_a_grey_render() -> None:
     res = client.post("/v1/render", files={"file": ("x.nef", make_tiff_raw("NIKON")[:40], "application/octet-stream")})
     assert res.status_code == 415
+
+
+def test_exifread_fills_fields_the_builtin_reader_left_empty() -> None:
+    if raw_engine.exifread is None:
+        pytest.skip("exifread not installed")
+    data = make_dng(iso=1600)
+    meta = raw_engine.RawMetadata(format="dng")
+    raw_engine._fill_from_exifread(data, meta)
+    assert (meta.make, meta.model, meta.lens) == ("FineRetouch", "Synthetic DNG", "FR 85mm F1.4")
+    assert meta.iso == 1600 and meta.exposure_time == pytest.approx(1 / 250)
+    assert meta.f_number == pytest.approx(2.8) and meta.focal_length == pytest.approx(85)
+    assert meta.color_space == "sRGB"
+    # Only unset fields are touched.
+    preset = raw_engine.RawMetadata(format="dng", make="Kept")
+    raw_engine._fill_from_exifread(data, preset)
+    assert preset.make == "Kept"
+
+
+def test_exifread_failure_is_harmless() -> None:
+    meta = raw_engine.RawMetadata()
+    raw_engine._fill_from_exifread(b"\x00" * 64, meta)
+    assert meta.make is None

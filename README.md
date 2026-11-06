@@ -31,6 +31,19 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 | `services/worker` | BullMQ batch worker: fan-out, retries, progress, manifests |
 | `db/init.sql` | PostgreSQL + pgvector schema |
 | `docs/ARCHITECTURE.md` | System design, data flow, AI model map, setup and roadmap |
+| `src-tauri` | Tauri v2 desktop shell: window, native dialogs, engine sidecar lifecycle |
+| `scripts/package_desktop.py` | Freezes services/ai into the offline engine sidecar and stages the models |
+| `docs/DESKTOP.md` | Offline desktop app: build, develop, security model, data folders |
+
+## Desktop app (offline)
+
+FineRetouch also ships as a standalone Windows, macOS and Linux app with the AI engine and
+models built in, so it runs with no network at all. See [docs/DESKTOP.md](docs/DESKTOP.md).
+
+```bash
+npm install && pip install -r services/ai/requirements.txt pyinstaller
+python scripts/package_desktop.py --bundle   # installer in src-tauri/target/release/bundle/
+```
 
 ## Quick start
 

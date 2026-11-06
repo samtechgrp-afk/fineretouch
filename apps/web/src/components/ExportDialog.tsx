@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { pool, renderOnServer } from '@/lib/ai';
 import { cloudAvailable, runCloudBatch } from '@/lib/cloud';
 import { downloadBlob, exportName, renderFullRes, zipBlobs, type ExportOptions } from '@/lib/export';
+import { isDesktop, revealInFolder, saveExports } from '@/lib/desktop';
 import { decodeOriginal, getFile, isRawPhoto } from '@/lib/images';
 import { useEditor } from '@/lib/store';
 import { isFlagged } from './Filmstrip';
@@ -22,6 +23,8 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [links, setLinks] = useState<Array<{ imageId: string; url: string }>>([]);
+  const [savedTo, setSavedTo] = useState<string | null>(null);
+  const desktop = isDesktop();
   const abortRef = useRef<AbortController | null>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
@@ -42,6 +45,7 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
   const run = async () => {
     setError(null);
     setResult(null);
+    setSavedTo(null);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const photos = useEditor.getState().photos;
@@ -76,6 +80,18 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
         setStatus({ label: 'Rendering full resolution', done: ++done, total: ids.length });
       });
       if (ctrl.signal.aborted) return;
+      if (isDesktop()) {
+        // Native Save As (one photo) or folder picker (several); files land as-is, no ZIP.
+        setStatus({ label: 'Saving', done: ids.length, total: ids.length });
+        const where = await saveExports(out);
+        if (!where) {
+          setResult('Export cancelled; nothing was saved.');
+          return;
+        }
+        setSavedTo(where);
+        setResult(`Saved ${out.length} photo${out.length === 1 ? '' : 's'} to ${where}`);
+        return;
+      }
       if (out.length === 1) downloadBlob(out[0].blob, out[0].name);
       else {
         setStatus({ label: 'Packing ZIP', done: ids.length, total: ids.length });
@@ -124,17 +140,27 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
           <Seg<Engine>
             value={engine}
             onChange={setEngine}
-            options={[
-              ['browser', 'This device (GPU)'],
-              ['server', aiOnline ? 'AI service' : 'AI service (offline)'],
-              ['cloud', cloud ? 'Cloud batch' : 'Cloud (not set up)'],
-            ]}
+            options={
+              desktop
+                ? // The desktop app is offline: no cloud batch, and the "server" is the bundled engine.
+                  [
+                    ['browser', 'GPU preview engine'],
+                    ['server', aiOnline ? 'Local AI engine' : 'Local AI engine (starting)'],
+                  ]
+                : [
+                    ['browser', 'This device (GPU)'],
+                    ['server', aiOnline ? 'AI service' : 'AI service (offline)'],
+                    ['cloud', cloud ? 'Cloud batch' : 'Cloud (not set up)'],
+                  ]
+            }
             disabled={{ server: !aiOnline, cloud: !cloud }}
           />
         </Field>
         {engine === 'browser' && ids.some(isRawPhoto) && (
           <p className="text-xs text-ink-400">
-            RAW files export from the camera&apos;s embedded JPEG on this device. Choose the AI service or Cloud batch to develop them from the full 16-bit sensor data.
+            {desktop
+              ? 'RAW files export from the camera\u2019s embedded JPEG with the GPU engine. Choose the local AI engine to develop them from the full 16-bit sensor data.'
+              : 'RAW files export from the camera\u2019s embedded JPEG on this device. Choose the AI service or Cloud batch to develop them from the full 16-bit sensor data.'}
           </p>
         )}
         {status && (
@@ -150,7 +176,12 @@ export function ExportDialog({ onClose }: { onClose(): void }) {
             </div>
           </div>
         )}
-        {result && <p className="text-xs text-mint-400">{result}</p>}
+        {result && <p className="break-all text-xs text-mint-400">{result}</p>}
+        {savedTo && (
+          <button className="text-xs text-apricot-300 underline-offset-2 hover:underline" onClick={() => void revealInFolder(savedTo)}>
+            Show in folder
+          </button>
+        )}
         {links.length > 0 && (
           <ul className="max-h-32 space-y-0.5 overflow-y-auto text-xs">
             {links.map((l) => (

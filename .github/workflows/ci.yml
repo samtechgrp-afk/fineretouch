@@ -37,3 +37,27 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ./scripts/download-model.sh
       - run: pytest -q
+
+  desktop-shell:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      # The static export Tauri serves (no /api routes).
+      - run: npm run build:desktop:web
+      # tauri-build checks that the sidecar exists; the real one is built in desktop.yml.
+      - name: Placeholder engine sidecar
+        run: touch "src-tauri/binaries/fineretouch-engine-$(rustc -vV | sed -n 's/^host: //p')"
+      - run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D warnings
+      - run: cargo test --manifest-path src-tauri/Cargo.toml
