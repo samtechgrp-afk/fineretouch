@@ -1,0 +1,113 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FineRetouch",
+  "version": "0.4.0",
+  "identifier": "com.fineretouch.desktop",
+  "build": {
+    "beforeDevCommand": "npm run build -w @fineretouch/shared && npm run dev:desktop -w @fineretouch/web",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "npm run build -w @fineretouch/shared && npm run build:desktop -w @fineretouch/web",
+    "frontendDist": "../apps/web/out"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "create": false,
+        "title": "FineRetouch",
+        "url": "editor/",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 680,
+        "center": true,
+        "resizable": true,
+        "maximizable": true,
+        "minimizable": true,
+        "closable": true,
+        "decorations": true,
+        "fullscreen": false,
+        "theme": "Dark",
+        "backgroundColor": "#0d0e10",
+        "dragDropEnabled": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --enable-gpu-rasterization --enable-zero-copy --ignore-gpu-blocklist --enable-features=CanvasOopRasterization"
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self' ipc: http://ipc.localhost",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' blob: data:",
+        "media-src": "'self' blob:",
+        "font-src": "'self' data:",
+        "worker-src": "'self' blob:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* blob: data:"
+      },
+      "devCsp": {
+        "default-src": "'self' ipc: http://ipc.localhost",
+        "script-src": "'self' 'unsafe-eval' 'unsafe-inline'",
+        "style-src": "'self' 'unsafe-inline'",
+        "img-src": "'self' blob: data:",
+        "media-src": "'self' blob:",
+        "font-src": "'self' data:",
+        "worker-src": "'self' blob:",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* http://localhost:* ws://localhost:* blob: data:"
+      },
+      "dangerousDisableAssetCspModification": [
+        "style-src"
+      ],
+      "capabilities": [
+        "default"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "Photography",
+    "shortDescription": "Offline AI batch portrait retouching",
+    "longDescription": "FineRetouch retouches portraits in batches on your own computer: skin, blemishes, stray hair, depth bokeh, colour and style sync, with camera RAW support. Everything, including the AI models, runs locally.",
+    "copyright": "© FineRetouch",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/fineretouch-engine"
+    ],
+    "resources": {
+      "resources/models/": "models/"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libegl1",
+          "libgles2"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "mesa-libEGL",
+          "mesa-libGLES"
+        ]
+      }
+    }
+  }
+}

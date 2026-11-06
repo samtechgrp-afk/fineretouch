@@ -1,13 +1,24 @@
 import { MAX_BATCH_ITEMS } from '@fineretouch/shared';
 import { NextResponse } from 'next/server';
+import { RAW_MIME } from '@/lib/rawParser';
 import { cloudEnabled } from '@/lib/server/config';
 import { presignUpload } from '@/lib/server/s3';
 import { userId } from '@/lib/server/session';
 
 export const dynamic = 'force-dynamic';
 
-const MAX_BYTES = 150 * 1024 * 1024;
-const EXT: Record<string, string> = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/tiff': 'tif', 'image/avif': 'avif' };
+/** Medium-format RAWs (e.g. 100 MP, uncompressed) run past 200 MB. */
+const MAX_BYTES = 400 * 1024 * 1024;
+const EXT: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/tiff': 'tif',
+  'image/avif': 'avif',
+  // Camera RAW (the AI service detects the real container from the bytes).
+  ...Object.fromEntries(Object.entries(RAW_MIME).map(([ext, mime]) => [mime, ext])),
+  'application/octet-stream': 'raw',
+};
 
 interface UploadRequest {
   files: Array<{ id: string; type: string; size: number }>;

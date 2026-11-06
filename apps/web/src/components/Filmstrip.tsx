@@ -2,6 +2,7 @@
 
 import { isDefault } from '@fineretouch/shared';
 import { useEffect, useRef } from 'react';
+import { describeExif } from '@/lib/rawParser';
 import { useEditor, type Photo } from '@/lib/store';
 
 export type CullFilter = 'all' | 'keep' | 'flagged';
@@ -46,7 +47,7 @@ export function Filmstrip({ filter }: { filter: CullFilter }) {
             className={`relative h-[84px] shrink-0 overflow-hidden rounded-md border-2 transition ${
               isActive ? 'border-apricot-400' : isSel ? 'border-apricot-500/60' : 'border-transparent hover:border-ink-600'
             } ${p.rejected ? 'opacity-40' : ''}`}
-            title={p.name}
+            title={p.raw ? `${p.name}\n${describeExif(p.raw.exif)}` : p.name}
           >
             <img src={p.thumbUrl} alt={p.name} className="h-full w-auto max-w-[140px] object-cover" draggable={false} />
             <div className="absolute left-1 top-1 flex gap-0.5">
@@ -55,6 +56,14 @@ export function Filmstrip({ filter }: { filter: CullFilter }) {
               {p.analysis?.cull.eyesClosed && <Badge tone="warn">Eyes closed</Badge>}
               {p.rejected && <Badge tone="warn">Rejected</Badge>}
             </div>
+            {p.raw && (
+              <span
+                className="absolute bottom-1 left-1 rounded bg-black/75 px-1 py-px font-mono text-[9px] font-semibold tracking-wide text-apricot-300 ring-1 ring-apricot-400/40"
+                aria-label={`${p.raw.label} camera RAW`}
+              >
+                {p.raw.label}
+              </span>
+            )}
             {!isDefault(p.adjustments) && (
               <span className="absolute bottom-1 right-1 h-2 w-2 rounded-full bg-apricot-400" title="Edited" />
             )}

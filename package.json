@@ -2,12 +2,24 @@
   "name": "fineretouch",
   "private": true,
   "version": "0.1.0",
-  "workspaces": ["packages/*", "apps/*", "services/worker"],
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "services/worker"
+  ],
   "scripts": {
     "dev:web": "npm run dev -w @fineretouch/web",
     "dev:worker": "npm run dev -w @fineretouch/worker",
     "build": "npm run build -w @fineretouch/shared && npm run build -w @fineretouch/web && npm run build -w @fineretouch/worker",
     "test": "npm test --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present"
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "build:desktop:web": "npm run build -w @fineretouch/shared && npm run build:desktop -w @fineretouch/web",
+    "desktop:engine": "python scripts/package_desktop.py",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
   }
 }

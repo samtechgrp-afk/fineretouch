@@ -4,8 +4,9 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 
 ## What works today
 
-- **Batch import** of JPEG, PNG, WebP and AVIF, with a filmstrip, multi-select (Ctrl/Cmd-click, Shift-click) and keyboard navigation.
+- **Batch import** of JPEG, PNG, WebP, AVIF, TIFF and **camera RAW** (Canon CR2/CR3, Nikon NEF, Sony ARW, Fujifilm RAF, Adobe DNG, Olympus ORF, Panasonic RW2, Pentax PEF), with a filmstrip, multi-select (Ctrl/Cmd-click, Shift-click) and keyboard navigation.
 - **Real-time GPU preview** (WebGL2) on a 2560 px proxy: only one shader pass runs per slider move.
+- **RAW workflow:** the browser pulls each RAW's embedded full-size camera JPEG and EXIF in milliseconds (no demosaic), shows a format badge and camera/ISO/shutter tooltip in the filmstrip, and AI-service or cloud exports develop the original from 16-bit sensor data with LibRaw (camera or Kelvin white balance, highlight recovery, AHD/DHT/PPG demosaic, sRGB/Adobe RGB/ProPhoto).
 - **AI face analysis** (MediaPipe 478-point face mesh) drives face-aware masks for skin, eyes, under-eyes and mouth. Without the AI service, colour-based skin detection still works.
 - **Skin retouch:** frequency-separation smoothing with texture preservation, blemish removal, and even skin tone.
 - **1x / 2x / 3x skin & blemish boost:** recursive guided-filter clean-up of stubborn dark spots, acne and redness that keeps pore texture.
@@ -30,6 +31,20 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 | `services/worker` | BullMQ batch worker: fan-out, retries, progress, manifests |
 | `db/init.sql` | PostgreSQL + pgvector schema |
 | `docs/ARCHITECTURE.md` | System design, data flow, AI model map, setup and roadmap |
+| `src-tauri` | Tauri v2 desktop shell: window, native dialogs, engine sidecar lifecycle |
+| `scripts/package_desktop.py` | Freezes services/ai into the offline engine sidecar and stages the models |
+| `docs/DESKTOP.md` | Offline desktop app: build, develop, security model, data folders |
+| `docs/BUILD_DESKTOP_INSTALLERS.md` | Windows / macOS / Linux installer builds (CI and local), opening unsigned builds |
+
+## Desktop app (offline)
+
+FineRetouch also ships as a standalone Windows, macOS and Linux app with the AI engine and
+models built in, so it runs with no network at all. See [docs/DESKTOP.md](docs/DESKTOP.md).
+
+```bash
+npm install && pip install -r services/ai/requirements.txt pyinstaller
+python scripts/package_desktop.py --bundle   # installer in src-tauri/target/release/bundle/
+```
 
 ## Quick start
 

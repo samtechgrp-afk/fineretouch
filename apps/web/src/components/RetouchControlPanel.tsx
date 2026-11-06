@@ -7,7 +7,8 @@ import { SKIN_MULTIPLIERS, mapStyleToAdjustments, type ApertureShape, type SkinM
 import { useRef, useState } from 'react';
 import { extractPalette } from '@/engine/color';
 import { profileFromRgba } from '@/engine/style';
-import { bitmapPixels, fitSize, newId } from '@/lib/images';
+import { bitmapPixels, decodeUpright, fitSize, newId } from '@/lib/images';
+import { IMPORT_ACCEPT, isRawFileName } from '@/lib/rawParser';
 import { useEditor, type DepthState, type Photo } from '@/lib/store';
 
 /**
@@ -273,18 +274,18 @@ function StyleSync() {
   const [note, setNote] = useState<string | null>(null);
 
   const read = async (file: File) => {
-    if (!file.type.startsWith('image/')) return;
+    if (!file.type.startsWith('image/') && !isRawFileName(file.name)) return;
     setBusy(true);
     setNote(null);
     try {
-      const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const { bitmap: bmp, preview } = await decodeUpright(file);
       const [w, h] = fitSize(bmp.width, bmp.height, 512);
       const px = bitmapPixels(bmp, 512);
       bmp.close();
       setStyleReference({
         referenceImageId: newId(),
         referenceName: file.name,
-        referenceUrl: URL.createObjectURL(file),
+        referenceUrl: URL.createObjectURL(preview?.blob ?? file),
         profile: profileFromRgba(px, w, h),
         matchedPalette: extractPalette(px, 5),
       });
@@ -314,7 +315,7 @@ function StyleSync() {
   return (
     <section>
       <Heading title="Sync style from reference" hint="Drop any photo whose look you like. Colour, tone and retouch strength are measured and mapped onto your shots." />
-      <input ref={inputRef} type="file" accept="image/*" hidden onChange={(e) => e.target.files?.[0] && read(e.target.files[0])} />
+      <input ref={inputRef} type="file" accept={IMPORT_ACCEPT} hidden onChange={(e) => e.target.files?.[0] && read(e.target.files[0])} />
       <button
         type="button"
         onClick={() => inputRef.current?.click()}
