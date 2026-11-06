@@ -5,12 +5,16 @@ machine. Each OS has to build its own installer, because the AI engine is frozen
 PyInstaller and PyInstaller cannot cross-compile. A Windows PC makes the Windows
 installer, a Mac makes the macOS one.
 
-| Platform | Output | Approx. size |
+| Platform | Output | CI artifact (both formats together) |
 | :--- | :--- | :--- |
-| Windows x64 | `FineRetouch_0.4.0_x64-setup.exe` (NSIS), `FineRetouch_0.4.0_x64_en-US.msi` | ~450 MB (includes WebView2 offline runtime) |
-| macOS Apple Silicon | `FineRetouch_0.4.0_aarch64.dmg`, `FineRetouch.app` | ~300 MB |
-| macOS Intel | `FineRetouch_0.4.0_x64.dmg`, `FineRetouch.app` | ~300 MB |
-| Linux x64 | `.deb`, `.rpm`, `.AppImage` | ~300 MB |
+| Windows x64 | `FineRetouch_0.4.0_x64-setup.exe` (NSIS) and `FineRetouch_0.4.0_x64_en-US.msi`, each with the WebView2 offline runtime | `FineRetouch-Windows-Installer`, ~850 MB |
+| macOS Apple Silicon | `FineRetouch_0.4.0_aarch64.dmg` and `FineRetouch.app` | `FineRetouch-macOS-Installer`, ~430 MB |
+| macOS Intel | `FineRetouch_0.4.0_x64.dmg` and `FineRetouch.app` | `FineRetouch-macOS-Intel-Installer`, ~740 MB |
+| Linux x64 | `.deb`, `.rpm` and `.AppImage` | `FineRetouch-Linux-Installer`, ~920 MB |
+
+Each artifact holds every format for its platform, so a single installer is a fraction of
+the artifact size. The Intel build is larger because the last MediaPipe release for Intel
+Macs (0.10.21) pulls in extra libraries (JAX, a second OpenCV).
 
 There is no single "universal" macOS build: MediaPipe and OpenCV publish separate arm64
 and x86_64 wheels, so the engine cannot be frozen as a universal2 binary. Ship the arm64
