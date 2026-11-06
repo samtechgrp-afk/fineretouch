@@ -59,8 +59,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
-          cache-dependency-path: services/ai/requirements*.txt
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -85,8 +83,13 @@ jobs:
       - name: Install Node dependencies
         run: npm ci
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      # uv instead of pip: on macOS Intel the NumPy-1.x pins send pip's resolver backtracking
+      # through dozens of large OpenCV/SciPy releases; uv resolves the same set in seconds.
       - name: Install Python dependencies
-        run: python -m pip install -r services/ai/requirements.txt pyinstaller
+        run: uv pip install --python python -r services/ai/requirements.txt pyinstaller
 
       - name: Freeze engine sidecar and stage model pack
         run: python scripts/package_desktop.py
