@@ -16,6 +16,8 @@ import {
   VERT,
   apertureKernel,
 } from './shaders';
+import { decodeLut } from '@fineretouch/shared';
+import { OVERLAY_FRAG, OVERLAY_MODES, STUDIO_FRAG, type StudioOverlay } from '@/components/viewport/shaders';
 
 type GL = WebGL2RenderingContext;
 type TexSource = ImageBitmap | ImageData | HTMLCanvasElement | OffscreenCanvas | HTMLImageElement;
@@ -37,6 +39,8 @@ export interface DisplayView {
   /** Split line position as a fraction of the canvas width. */
   split: number;
   showMask: boolean;
+  /** Pro studio QA overlay (glare veil, texture retention, garment mask); display only. */
+  overlay?: StudioOverlay;
   dpr: number;
   background: [number, number, number];
 }
@@ -60,6 +64,20 @@ export class Renderer {
   private downProg: WebGLProgram;
   private bokehProg: WebGLProgram;
   private compositeProg: WebGLProgram;
+  private studioProg: WebGLProgram;
+  private overlayProg: WebGLProgram;
+  /** Lens region (single channel) for glare reduction, from the eye landmarks. */
+  private lens: WebGLTexture | null = null;
+  /** Engine segmentation (r clothes, g hair, b person) for the clothing tools. */
+  private seg: WebGLTexture | null = null;
+  private lut: WebGLTexture | null = null;
+  private lutKey = '';
+  private lutSize = 0;
+  /** STUDIO pass output and the QA overlay (never exported). */
+  private studio: Target | null = null;
+  private overlayTarget: Target | null = null;
+  /** Retouch output after the studio pass: what bokeh and export read. */
+  private base: Target | null = null;
   private hairRoi: WebGLTexture | null = null;
   private depth: WebGLTexture | null = null;
   /** Bokeh working targets at reduced size: [downsampled, pass 1, pass 2]. */
@@ -89,6 +107,8 @@ export class Renderer {
     this.downProg = this.program(VERT, DOWNSAMPLE_FRAG);
     this.bokehProg = this.program(VERT, BOKEH_FRAG);
     this.compositeProg = this.program(VERT, COMPOSITE_FRAG);
+    this.studioProg = this.program(VERT, STUDIO_FRAG);
+    this.overlayProg = this.program(VERT, OVERLAY_FRAG);
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
     const buf = gl.createBuffer();
@@ -110,7 +130,7 @@ export class Renderer {
   }
 
   private programs(): WebGLProgram[] {
-    return [this.blurProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg];
+    return [this.blurProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg, this.studioProg, this.overlayProg];
   }
 
   /** Upload a new photo and precompute its four Gaussian bands. */
@@ -124,10 +144,14 @@ export class Renderer {
     this.bands = [0, 1, 2, 3].map(() => this.target(width, height));
     this.out = this.target(width, height);
     this.final = this.target(width, height);
-    this.shown = this.out;
+    this.studio = this.target(width, height);
+    this.overlayTarget = null;
+    this.shown = this.base = this.out;
     this.setMask(null);
     this.setHairRoi(null);
     this.setDepth(null);
+    this.setLensRoi(null);
+    this.setSegmentation(null);
 
     const L = Math.max(width, height);
     const sigmas = [BLUR_SIGMAS.s0, BLUR_SIGMAS.s1, BLUR_SIGMAS.s2, BLUR_SIGMAS.s3].map((s) => Math.max(s * L, 0.6));
@@ -161,6 +185,54 @@ export class Renderer {
     if (!source) this.depth = null;
     else if (source instanceof Uint8Array) this.depth = this.texture(width, height, null, expandGrey(source));
     else this.depth = this.texture(width, height, source);
+  }
+
+  /** Single-channel (0..255) eyeglass lens region, or null (glare reduction off). */
+  setLensRoi(data: Uint8Array | null, width = 1, height = 1): void {
+    if (this.lens) this.gl.deleteTexture(this.lens);
+    this.lens = data ? this.texture(width, height, null, expandGrey(data)) : null;
+  }
+
+  /** Segmentation from the engine (PNG: r clothes, g hair, b person), or null. */
+  setSegmentation(source: TexSource | null, width = 1, height = 1): void {
+    if (this.seg) this.gl.deleteTexture(this.seg);
+    this.seg = source ? this.texture(width, height, source) : null;
+  }
+
+  get hasSegmentation(): boolean {
+    return this.seg !== null;
+  }
+
+  /** Upload a look LUT as an RGBA16F 3D texture (x = red, y = green, z = blue). Cached by content. */
+  private ensureLut(look: NonNullable<Adjustments['lut']>): boolean {
+    const key = `${look.size}:${look.data.length}:${look.data.slice(0, 64)}:${look.data.slice(-64)}`;
+    if (key === this.lutKey && this.lut) return true;
+    const gl = this.gl;
+    let table: Float32Array;
+    try {
+      table = decodeLut(look);
+    } catch {
+      return false;
+    }
+    const n = look.size;
+    const rgba = new Float32Array(n * n * n * 4);
+    for (let i = 0; i < n * n * n; i++) {
+      rgba[i * 4] = table[i * 3];
+      rgba[i * 4 + 1] = table[i * 3 + 1];
+      rgba[i * 4 + 2] = table[i * 3 + 2];
+      rgba[i * 4 + 3] = 1;
+    }
+    if (this.lut) gl.deleteTexture(this.lut);
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_3D, tex);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    for (const p of [gl.TEXTURE_WRAP_S, gl.TEXTURE_WRAP_T, gl.TEXTURE_WRAP_R]) gl.texParameteri(gl.TEXTURE_3D, p, gl.CLAMP_TO_EDGE);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.RGBA16F, n, n, n, 0, gl.RGBA, gl.FLOAT, rgba);
+    this.lut = tex;
+    this.lutKey = key;
+    this.lutSize = n;
+    return true;
   }
 
   get hasDepth(): boolean {
@@ -235,9 +307,74 @@ export class Renderer {
     }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
+    this.base = this.studioPass(adj, info.hasFace) ? this.studio! : this.out;
     const b = adj.depthBokeh;
     const maxCoc = (b.blurRadius / 100) * BOKEH_RADIUS_SHARE * Math.max(this.width, this.height) * (b.bokehMultiplier / 100);
-    this.shown = b.enabled && this.depth && maxCoc >= 0.75 ? this.bokeh(maxCoc, b.apertureShape, b.highlightBoost / 100) : this.out;
+    this.shown = b.enabled && this.depth && maxCoc >= 0.75 ? this.bokeh(maxCoc, b.apertureShape, b.highlightBoost / 100) : this.base;
+  }
+
+  /** Glasses glare, clothing iron / recolour and the look LUT. Returns false when nothing is on. */
+  private studioPass(adj: Adjustments, hasFace: boolean): boolean {
+    const gl = this.gl;
+    const glare = adj.glareReduction > 0 && hasFace && this.lens !== null;
+    const cl = adj.clothing;
+    const iron = cl.enabled && cl.wrinkleStrength > 0 && this.seg !== null;
+    const recolour = cl.enabled && (cl.hueShift !== 0 || cl.saturation !== 0) && this.seg !== null;
+    const lut = adj.lut !== null && adj.lut.amount > 0 && this.ensureLut(adj.lut);
+    if (!glare && !iron && !recolour && !lut) return false;
+    const p = this.studioProg;
+    gl.useProgram(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.studio!.fbo);
+    gl.viewport(0, 0, this.width, this.height);
+    this.bindTex(p, 'uImg', this.out!.tex, 0);
+    this.bindTex(p, 'uLow0', this.bands[0].tex, 1);
+    this.bindTex(p, 'uLow1', this.bands[1].tex, 2);
+    this.bindTex(p, 'uLow3', this.bands[3].tex, 3);
+    this.bindTex(p, 'uLens', this.lens ?? this.mask!, 4);
+    this.bindTex(p, 'uSeg', this.seg ?? this.mask!, 5);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_3D, lut ? this.lut : null);
+    gl.uniform1i(this.loc(p, 'uLut'), 6);
+    gl.uniform1i(this.loc(p, 'uGlare'), glare ? 1 : 0);
+    gl.uniform1i(this.loc(p, 'uIron'), iron ? 1 : 0);
+    gl.uniform1i(this.loc(p, 'uRecolour'), recolour ? 1 : 0);
+    gl.uniform1i(this.loc(p, 'uLutOn'), lut ? 1 : 0);
+    gl.uniform1f(this.loc(p, 'uGlareStrength'), adj.glareReduction / 100);
+    gl.uniform1f(this.loc(p, 'uIronStrength'), cl.wrinkleStrength / 100);
+    gl.uniform1f(this.loc(p, 'uHue'), cl.hueShift);
+    gl.uniform1f(this.loc(p, 'uSatShift'), cl.saturation / 100);
+    gl.uniform1f(this.loc(p, 'uLutSize'), this.lutSize || 2);
+    gl.uniform1f(this.loc(p, 'uLutAmount'), (adj.lut?.amount ?? 0) / 100);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.activeTexture(gl.TEXTURE6);
+    gl.bindTexture(gl.TEXTURE_3D, null);
+    return true;
+  }
+
+  /** Render the QA overlay into its own target (display only), or drop it. */
+  private overlayPass(mode: StudioOverlay, glareStrength: number): WebGLTexture | null {
+    if (mode === 'none' || !this.src) return null;
+    if (mode === 'glare' && !this.lens) return null;
+    if (mode === 'clothing' && !this.seg) return null;
+    const gl = this.gl;
+    this.overlayTarget ??= this.target(this.width, this.height);
+    const p = this.overlayProg;
+    gl.useProgram(p);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.overlayTarget.fbo);
+    gl.viewport(0, 0, this.width, this.height);
+    this.bindTex(p, 'uSrc', this.src, 0);
+    this.bindTex(p, 'uEdited', (this.base ?? this.out)!.tex, 1);
+    this.bindTex(p, 'uLow1', this.bands[1].tex, 2);
+    this.bindTex(p, 'uLow3', this.bands[3].tex, 3);
+    this.bindTex(p, 'uLens', this.lens ?? this.mask!, 4);
+    this.bindTex(p, 'uSeg', this.seg ?? this.mask!, 5);
+    this.bindTex(p, 'uMask', this.mask!, 6);
+    gl.uniform1i(this.loc(p, 'uMode'), OVERLAY_MODES[mode]);
+    gl.uniform1f(this.loc(p, 'uGlareStrength'), glareStrength);
+    const ring = Math.max(1.5, BLUR_SIGMAS.s0 * Math.max(this.width, this.height));
+    gl.uniform2f(this.loc(p, 'uRing'), ring / this.width, ring / this.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    return this.overlayTarget.tex;
   }
 
   /** Downsample, two gather passes, composite. Returns the target holding the result. */
@@ -256,7 +393,7 @@ export class Renderer {
 
     gl.useProgram(this.downProg);
     gl.bindFramebuffer(gl.FRAMEBUFFER, small.fbo);
-    this.bindTex(this.downProg, 'uTex', this.out!.tex, 0);
+    this.bindTex(this.downProg, 'uTex', this.base!.tex, 0);
     gl.uniform2f(this.loc(this.downProg, 'uFootprint'), 1 / bw, 1 / bh);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -280,7 +417,7 @@ export class Renderer {
     gl.useProgram(c);
     gl.viewport(0, 0, this.width, this.height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.final!.fbo);
-    this.bindTex(c, 'uSharp', this.out!.tex, 0);
+    this.bindTex(c, 'uSharp', this.base!.tex, 0);
     this.bindTex(c, 'uBlur', bt.tex, 1);
     this.bindTex(c, 'uDepth', this.depth!, 2);
     gl.uniform1f(this.loc(c, 'uMaxCocFull'), maxCoc);
@@ -289,9 +426,10 @@ export class Renderer {
   }
 
   /** Composite into the visible canvas. */
-  display(view: DisplayView): void {
+  display(view: DisplayView, glareStrength = 0.6): void {
     if (!this.src || !this.out) return;
     const gl = this.gl;
+    const overlay = this.overlayPass(view.overlay ?? 'none', glareStrength);
     const p = this.displayProg;
     const cw = gl.drawingBufferWidth;
     const ch = gl.drawingBufferHeight;
@@ -309,6 +447,8 @@ export class Renderer {
     gl.uniform1i(this.loc(p, 'uMode'), mode);
     gl.uniform1f(this.loc(p, 'uSplit'), view.split * cw);
     gl.uniform1i(this.loc(p, 'uShowMask'), view.showMask ? 1 : 0);
+    gl.uniform1i(this.loc(p, 'uOverlayOn'), overlay ? 1 : 0);
+    this.bindTex(p, 'uOverlay', overlay ?? this.mask!, 3);
     gl.uniform3fv(this.loc(p, 'uBg'), view.background);
     gl.uniform1f(this.loc(p, 'uDpr'), view.dpr);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -329,6 +469,9 @@ export class Renderer {
     this.disposeImageResources();
     const gl = this.gl;
     this.programs().forEach((p) => gl.deleteProgram(p));
+    if (this.lut) gl.deleteTexture(this.lut);
+    this.lut = null;
+    this.lutKey = '';
     gl.deleteVertexArray(this.vao);
     // A canvas keeps one context for its lifetime, so losing it would break a
     // remount of the viewport (e.g. React StrictMode); export canvases opt in.
@@ -357,10 +500,10 @@ export class Renderer {
 
   private disposeImageResources() {
     const gl = this.gl;
-    for (const t of [this.src, this.mask, this.hairRoi, this.depth]) if (t) gl.deleteTexture(t);
-    this.disposeTargets([this.tmp, this.out, this.final, ...this.bands, ...this.bokehTargets]);
-    this.src = this.mask = this.hairRoi = this.depth = null;
-    this.tmp = this.out = this.final = this.shown = null;
+    for (const t of [this.src, this.mask, this.hairRoi, this.depth, this.lens, this.seg]) if (t) gl.deleteTexture(t);
+    this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.bokehTargets]);
+    this.src = this.mask = this.hairRoi = this.depth = this.lens = this.seg = null;
+    this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = null;
     this.bands = [];
     this.bokehTargets = [];
     this.bokehSize = [0, 0];

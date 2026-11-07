@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { Renderer } from '@/engine/renderer';
 import { buildFaceMask } from '@/engine/masks';
 import { ensureDepth, hairRoiFor } from './depth';
+import { ensureSegmentation, lensRoiFor } from './studio';
 import { fitSize, getCachedMask, setCachedMask } from './images';
 import { drawWatermark, watermarkActive, type WatermarkSettings } from './watermark';
 
@@ -64,6 +65,14 @@ export async function renderFullRes(
     if (adjustments.strayHairRemoval.enabled) {
       const roi = hairRoiFor(ctx.id, ctx.analysis, w, h);
       if (roi) renderer.setHairRoi(roi.data, roi.width, roi.height);
+    }
+    if (adjustments.glareReduction > 0) {
+      const roi = lensRoiFor(ctx.id, ctx.analysis, w, h);
+      if (roi) renderer.setLensRoi(roi.data, roi.width, roi.height);
+    }
+    if (adjustments.clothing.enabled) {
+      const seg = await ensureSegmentation(ctx.id);
+      if (seg) renderer.setSegmentation(seg, seg.width, seg.height);
     }
     if (adjustments.depthBokeh.enabled) {
       const d = await ensureDepth(ctx.id);

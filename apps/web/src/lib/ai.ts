@@ -49,6 +49,54 @@ export async function depthMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<B
   return (await postFile('/v1/depth', proxyJpeg, undefined, signal)).blob();
 }
 
+/** Segmentation PNG (r clothes, g hair, b person) of the proxy, for the clothing tools' preview. */
+export async function segmentMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<Blob> {
+  return (await postFile('/v1/segment', proxyJpeg, undefined, signal)).blob();
+}
+
+export interface FittedLook {
+  name: string;
+  size: number;
+  data: string;
+  amount: number;
+  /** The same LUT as .cube text, for saving to disk. */
+  cube: string;
+}
+
+/** Fit the reference's grade as a 3D LUT from its original and its edited render. */
+export async function fitLook(before: Blob, after: Blob, name: string, size = 17): Promise<FittedLook> {
+  const form = new FormData();
+  form.append('before', before, 'before.jpg');
+  form.append('after', after, 'after.jpg');
+  form.append('size', String(size));
+  form.append('name', name);
+  const res = await fetch(`${aiUrl()}/v1/lut/fit`, { method: 'POST', body: form, headers: aiHeaders() });
+  if (!res.ok) throw new Error(`AI service ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  return res.json();
+}
+
+/** JSON call to the engine (the local batch queue). */
+export async function engineJson<T>(path: string, init: { method?: string; body?: unknown } = {}): Promise<T> {
+  const headers: Record<string, string> = { ...(aiHeaders() as Record<string, string> | undefined) };
+  let body: BodyInit | undefined;
+  if (init.body instanceof FormData) body = init.body;
+  else if (init.body !== undefined) {
+    headers['content-type'] = 'application/json';
+    body = JSON.stringify(init.body);
+  }
+  const res = await fetch(`${aiUrl()}${path}`, { method: init.method ?? (body ? 'POST' : 'GET'), body, headers, cache: 'no-store' });
+  if (!res.ok) {
+    let detail = (await res.text()).slice(0, 300);
+    try {
+      detail = JSON.parse(detail).detail ?? detail;
+    } catch {
+      /* plain text */
+    }
+    throw new Error(String(detail));
+  }
+  return res.json();
+}
+
 export async function referenceStats(file: Blob): Promise<ColorStats> {
   return (await postFile('/v1/color-stats', file)).json();
 }

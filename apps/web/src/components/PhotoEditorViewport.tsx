@@ -3,8 +3,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Renderer, type DisplayView } from '@/engine/renderer';
 import { ensureDepth, hairRoiFor } from '@/lib/depth';
+import { ensureSegmentation, lensRoiFor } from '@/lib/studio';
 import { faceMaskFor } from '@/lib/export';
-import { getDepth, getProxy } from '@/lib/images';
+import { getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 
 const BG: [number, number, number] = [0.051, 0.055, 0.063];
@@ -30,6 +31,8 @@ export function PhotoEditorViewport() {
   const maskKeyRef = useRef<string>('');
   const hairKeyRef = useRef<string>('');
   const depthKeyRef = useRef<string>('');
+  const lensKeyRef = useRef<string>('');
+  const segKeyRef = useRef<string>('');
   const frameRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -77,7 +80,7 @@ export function PhotoEditorViewport() {
       if (loadedIdRef.current !== p.id) {
         r.setSource(proxy, proxy.width, proxy.height);
         loadedIdRef.current = p.id;
-        maskKeyRef.current = hairKeyRef.current = depthKeyRef.current = '';
+        maskKeyRef.current = hairKeyRef.current = depthKeyRef.current = lensKeyRef.current = segKeyRef.current = '';
       }
       const maskKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
       const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height);
@@ -98,6 +101,19 @@ export function PhotoEditorViewport() {
         r.setDepth(d?.source ?? null, d?.width, d?.height);
         depthKeyRef.current = depthKey;
       }
+      const glareOn = p.adjustments.glareReduction > 0 || st.view.overlay === 'glare';
+      const lensKey = `${maskKey}:${glareOn}`;
+      if (lensKeyRef.current !== lensKey) {
+        const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
+        r.setLensRoi(roi?.data ?? null, roi?.width, roi?.height);
+        lensKeyRef.current = lensKey;
+      }
+      const segKey = `${p.id}:${p.segmentState}`;
+      if (segKeyRef.current !== segKey) {
+        const seg = getSegmentation(p.id);
+        r.setSegmentation(seg ?? null, seg?.width, seg?.height);
+        segKeyRef.current = segKey;
+      }
       r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats });
       const g = geometry();
       if (!g) return;
@@ -110,10 +126,11 @@ export function PhotoEditorViewport() {
         offsetY: (g.ch - r.height * scale) / 2 + v.panY * g.dpr,
         split: v.split,
         showMask: v.showMask,
+        overlay: v.overlay,
         dpr: g.dpr,
         background: BG,
       };
-      r.display(display);
+      r.display(display, p.adjustments.glareReduction / 100);
       setRenderMs(performance.now() - t0);
     });
   }, [geometry]);
@@ -121,7 +138,7 @@ export function PhotoEditorViewport() {
   // Redraw whenever the photo, its edits/analysis or the view change.
   useEffect(() => {
     draw();
-  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, view, draw]);
+  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, view, draw]);
 
   // Fetch (or upgrade) the depth map once bokeh is switched on for this photo.
   const bokehOn = Boolean(photo?.adjustments.depthBokeh.enabled);
@@ -129,6 +146,17 @@ export function PhotoEditorViewport() {
   useEffect(() => {
     if (photo && bokehOn && photo.depthState !== 'pending' && photo.depthState !== 'model') void ensureDepth(photo.id);
   }, [photo?.id, bokehOn, photo?.depthState, photo?.analysisState, aiOnline]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Fetch the garment mask once a clothing tool (or its overlay) is switched on.
+  const clothingOn = Boolean(photo?.adjustments.clothing.enabled) || view.overlay === 'clothing';
+  useEffect(() => {
+    if (photo && clothingOn && photo.segmentState === 'none') void ensureSegmentation(photo.id);
+  }, [photo?.id, clothingOn, photo?.segmentState]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The engine came back: try again for a photo that had no segmentation.
+  useEffect(() => {
+    const p = selectActivePhoto(useEditor.getState());
+    if (aiOnline && p?.segmentState === 'unavailable') useEditor.getState().setSegmentState(p.id, 'none');
+  }, [aiOnline]);
 
   // Keep the drawing buffer at device resolution.
   useEffect(() => {
