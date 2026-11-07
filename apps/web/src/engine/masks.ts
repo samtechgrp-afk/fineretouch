@@ -209,3 +209,29 @@ export function buildDepthPrior(faces: FaceAnalysis[], width: number, height: nu
   }
   return out;
 }
+
+/**
+ * Where eyeglass lenses sit: an ellipse around each eye (0.2 x 0.15 face widths, centred
+ * slightly below the eye). Port of glasses_lens_roi in services/ai/app/retouch_engine.py,
+ * lightly feathered. Single-channel 0..255.
+ */
+export function buildLensRoiMask(faces: FaceAnalysis[], width: number, height: number): Uint8Array {
+  const roi = new Float32Array(width * height);
+  let faceW = 1;
+  for (const f of faces) {
+    const fw = f.box[2] * width;
+    faceW = Math.max(faceW, fw);
+    for (const eye of [f.regions.leftEye, f.regions.rightEye]) {
+      if (eye.length < 3) continue;
+      const cx = (eye.reduce((a, p) => a + p[0], 0) / eye.length) * width;
+      const cy = (eye.reduce((a, p) => a + p[1], 0) / eye.length) * height + 0.02 * fw;
+      const ellipse: [number, number][] = Array.from({ length: 48 }, (_, i) => {
+        const t = (i / 48) * Math.PI * 2;
+        return [cx + 0.2 * fw * Math.cos(t), cy + 0.15 * fw * Math.sin(t)];
+      });
+      fillPolygon(roi, width, height, ellipse, 1);
+    }
+  }
+  gaussianApprox(roi, width, height, faceW * 0.01);
+  return Uint8Array.from(roi, (v) => Math.round(clamp01(v) * 255));
+}

@@ -1,6 +1,6 @@
 import type { FaceAnalysis } from '@fineretouch/shared';
 import { describe, expect, it } from 'vitest';
-import { buildFaceMask, fillPolygon, gaussianApprox } from './masks';
+import { buildFaceMask, buildLensRoiMask, fillPolygon, gaussianApprox } from './masks';
 
 const square = (x0: number, y0: number, x1: number, y1: number): [number, number][] => [
   [x0, y0],
@@ -68,5 +68,19 @@ describe('mask rasterisation', () => {
 
   it('is empty without faces', () => {
     expect(buildFaceMask([], 8, 8).every((v) => v === 0)).toBe(true);
+  });
+});
+
+describe('buildLensRoiMask', () => {
+  it('covers both eyes with lens-sized ellipses and nothing else', () => {
+    const w = 200;
+    const h = 200;
+    const m = buildLensRoiMask([face()], w, h);
+    const at = (x: number, y: number) => m[Math.round(y * h) * w + Math.round(x * w)];
+    expect(at(0.65, 0.41)).toBe(255);
+    expect(at(0.35, 0.41)).toBe(255);
+    expect(at(0.65 + 0.12, 0.41)).toBeGreaterThan(200); // wider than the eye opening
+    expect(at(0.5, 0.85)).toBe(0);
+    expect(buildLensRoiMask([], w, h).every((v) => v === 0)).toBe(true);
   });
 });

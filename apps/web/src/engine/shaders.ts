@@ -9,6 +9,8 @@
  *
  * Pass graph per slider change:
  *   RETOUCH (skin, boost, stray hair, face, colour, tone) -> out
+ *   [pro studio on] STUDIO out -> studio (glasses glare, clothing iron / recolour, look LUT;
+ *              see components/viewport/shaders)
  *   [bokeh on] DOWNSAMPLE out -> small, BOKEH x2 ("double blur") small -> a -> b,
  *              COMPOSITE out + b by depth -> final
  *   DISPLAY final (or out) with compare modes.
@@ -337,7 +339,8 @@ void main() {
 export const DISPLAY_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 out vec4 outColor;
-uniform sampler2D uProcessed, uOriginal, uMask;
+uniform sampler2D uProcessed, uOriginal, uMask, uOverlay;
+uniform bool uOverlayOn;  // pro studio QA overlay (premultiplied by its own alpha below)
 uniform vec2 uCanvas;   // canvas size in device pixels
 uniform vec2 uImage;    // proxy size in pixels
 uniform float uScale;   // device pixels per image pixel
@@ -389,6 +392,10 @@ void main() {
     c = mix(c, vec3(0.2, 0.9, 0.4), m.g * 0.6);
     c = mix(c, vec3(0.3, 0.5, 1.0), m.b * 0.6);
     c = mix(c, vec3(1.0, 0.9, 0.2), m.a * 0.6);
+  }
+  if (uOverlayOn && !original) {
+    vec4 o = texture(uOverlay, ip / uImage);
+    c = mix(c, o.rgb, o.a);
   }
   outColor = vec4(c, 1.0);
 }`;

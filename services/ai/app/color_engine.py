@@ -28,7 +28,11 @@ HSL mixer
 
 from __future__ import annotations
 
+import base64
+from functools import lru_cache
+
 import cv2
+
 import numpy as np
 
 from .schemas import ColorGrading, HslMixer
@@ -215,3 +219,56 @@ def apply_color_grading(rgb: np.ndarray, grading: ColorGrading) -> np.ndarray:
 def apply_color_engine(rgb: np.ndarray, hsl: HslMixer, grading: ColorGrading) -> np.ndarray:
     """Mixer, then grading: the order the renderer and the shader use."""
     return apply_color_grading(apply_hsl_mixer(rgb, hsl), grading)
+
+
+# ---------------------------------------------------------------------------
+# 3D look LUTs (v0.6)
+# ---------------------------------------------------------------------------
+
+
+@lru_cache(maxsize=16)
+def decode_lut(data: str, size: int) -> np.ndarray:
+    """base64 little-endian uint16 RGB, red fastest -> float32 [b, g, r, channel] in [0, 1]."""
+    raw = base64.b64decode(data, validate=True)
+    if len(raw) != size**3 * 6:
+        raise ValueError(f"LUT data holds {len(raw)} bytes, expected {size ** 3 * 6} for size {size}")
+    lut = np.frombuffer(raw, dtype="<u2").astype(np.float32) / 65535.0
+    lut = lut.reshape(size, size, size, 3)
+    lut.setflags(write=False)
+    return lut
+
+
+def encode_lut(lut: np.ndarray) -> str:
+    """Inverse of decode_lut: [b, g, r, 3] float in [0, 1] -> base64."""
+    q = (np.clip(lut, 0.0, 1.0) * 65535.0 + 0.5).astype("<u2")
+    return base64.b64encode(q.tobytes()).decode("ascii")
+
+
+def apply_lut(rgb: np.ndarray, lut: np.ndarray, amount: float = 1.0, rows: int = 512) -> np.ndarray:
+    """Trilinear 3D LUT lookup on HxWx3 float32 sRGB, mixed with the input by `amount` (0..1).
+    The WebGL preview does the same lookup with a hardware-filtered 3D texture."""
+    if amount <= 0:
+        return rgb
+    n = lut.shape[0]
+    flat = lut.reshape(-1, 3)
+    out = np.empty_like(rgb)
+    for y0 in range(0, rgb.shape[0], rows):
+        c = np.clip(rgb[y0:y0 + rows], 0.0, 1.0) * (n - 1)
+        i0 = np.minimum(np.floor(c).astype(np.int32), n - 2)
+        f = c - i0
+        r0, g0, b0 = i0[..., 0], i0[..., 1], i0[..., 2]
+        fr, fg, fb = f[..., 0:1], f[..., 1:2], f[..., 2:3]
+        acc = np.zeros(c.shape, np.float32)
+        for db, wb in ((0, 1 - fb), (1, fb)):
+            for dg, wg in ((0, 1 - fg), (1, fg)):
+                for dr, wr in ((0, 1 - fr), (1, fr)):
+                    idx = ((b0 + db) * n + (g0 + dg)) * n + (r0 + dr)
+                    acc += flat[idx] * (wb * wg * wr)
+        out[y0:y0 + rows] = rgb[y0:y0 + rows] + (acc - rgb[y0:y0 + rows]) * amount
+    return out
+
+
+def identity_lut(size: int) -> np.ndarray:
+    g = np.linspace(0.0, 1.0, size, dtype=np.float32)
+    b, gg, r = np.meshgrid(g, g, g, indexing="ij")
+    return np.stack([r, gg, b], axis=-1)

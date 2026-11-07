@@ -20,6 +20,7 @@ import {
   type StyleSyncMode,
 } from '@fineretouch/shared';
 import { create } from 'zustand';
+import type { StudioOverlay } from '@/components/viewport/shaders';
 import type { RawInfo } from './images';
 
 export const HISTORY_LIMIT = 100;
@@ -28,6 +29,8 @@ export type AnalysisState = 'idle' | 'pending' | 'done' | 'error' | 'offline';
 export type CompareMode = 'edited' | 'original' | 'split' | 'side' | 'diff';
 /** Where a photo's depth map came from: the AI service's model, or the client-side portrait prior. */
 export type DepthState = 'none' | 'pending' | 'model' | 'prior' | 'error';
+/** Engine segmentation (clothes / hair / person) for the clothing tools' live preview. */
+export type SegmentState = 'none' | 'pending' | 'ready' | 'unavailable';
 
 export interface PaletteSwatch {
   rgb: [number, number, number];
@@ -67,6 +70,7 @@ export interface Photo {
   /** Style metrics of the original (for style sync, smart sync and auto retouch). */
   profile: StyleProfile | null;
   depthState: DepthState;
+  segmentState: SegmentState;
   rejected: boolean;
   /** Camera RAW original: format, badge label and EXIF (null for JPEG/PNG/...). */
   raw?: RawInfo | null;
@@ -80,6 +84,8 @@ export interface ViewState {
   panX: number; // CSS px
   panY: number;
   showMask: boolean;
+  /** Pro studio QA overlay in the viewport (never exported). */
+  overlay: StudioOverlay;
 }
 
 export interface EditorState {
@@ -123,6 +129,7 @@ export interface EditorState {
   autoRetouch(ids?: string[]): number;
   setProfile(id: string, profile: StyleProfile): void;
   setDepthState(id: string, state: DepthState): void;
+  setSegmentState(id: string, state: SegmentState): void;
   undo(id?: string): void;
   redo(id?: string): void;
   resetPhotos(ids?: string[]): void;
@@ -188,7 +195,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   order: [],
   activeId: null,
   selected: [],
-  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false },
+  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false, overlay: 'none' },
   clipboard: null,
   customPresets: loadCustomPresets(),
   aiOnline: null,
@@ -219,6 +226,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           localStats: null,
           profile: null,
           depthState: 'none',
+          segmentState: 'none',
           rejected: false,
         };
         order.push(p.id);
@@ -406,6 +414,11 @@ export const useEditor = create<EditorState>()((set, get) => ({
   setProfile(id, profile) {
     const s = get();
     if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], profile } } });
+  },
+
+  setSegmentState(id, state) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], segmentState: state } } });
   },
 
   setDepthState(id, state) {
