@@ -65,6 +65,30 @@ export interface StrayHairSettings {
 
 export type ApertureShape = 'circle' | 'hex';
 
+/** Clothing "virtual iron" and recolour (services/ai retouch_engine.remove_clothing_wrinkles). */
+export interface ClothingSettings {
+  enabled: boolean;
+  wrinkleStrength: number; // 0..100 how much of the crease / fold shading is ironed out
+  texturePreservation: number; // 0..100 share of the weave / thread layer kept at full strength
+  hueShift: number; // -180..180 degrees, CIELAB hue rotation of the garment
+  saturation: number; // -100..100 garment chroma
+}
+
+/** Largest 3D LUT accepted (33^3 entries); same as LUT_MAX_SIZE in services/ai/app/schemas.py. */
+export const LUT_MAX_SIZE = 33;
+
+/**
+ * A 3D colour lookup table ("look"): fitted from a graded reference by the engine, or loaded
+ * from a .cube file. `data` is base64 of size^3 RGB triples as little-endian uint16, red index
+ * fastest (the .cube order); see lut.ts.
+ */
+export interface LookLut {
+  name: string;
+  size: number; // 2..LUT_MAX_SIZE
+  data: string;
+  amount: number; // 0..100
+}
+
 export interface DepthBokehSettings {
   enabled: boolean;
   /** 0..100: base background blur, as a share of 2% of the long edge. */
@@ -197,6 +221,14 @@ export interface Adjustments {
   skinToneGuard: boolean;
   hsl: HslMixer;
   colorGrading: ColorGrading;
+  // Pro studio (v0.6)
+  /** Removes flash / window reflections on eyeglass lenses (needs eye landmarks). */
+  glareReduction: number; // 0..100
+  /** Evens yellow or dark patches on teeth toward their own enamel colour. */
+  teethStainRemoval: number; // 0..100
+  clothing: ClothingSettings;
+  /** Reference look as a 3D LUT, applied after colour grading. */
+  lut: LookLut | null;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -210,9 +242,18 @@ export type AdjustmentKey = Exclude<
   | 'skinToneGuard'
   | 'hsl'
   | 'colorGrading'
+  | 'clothing'
+  | 'lut'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
+export const DEFAULT_CLOTHING: Readonly<ClothingSettings> = Object.freeze({
+  enabled: false,
+  wrinkleStrength: 60,
+  texturePreservation: 80,
+  hueShift: 0,
+  saturation: 0,
+});
 export const DEFAULT_DEPTH_BOKEH: Readonly<DepthBokehSettings> = Object.freeze({
   enabled: false,
   blurRadius: 50,
@@ -247,6 +288,10 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   skinToneGuard: true,
   hsl: DEFAULT_HSL,
   colorGrading: DEFAULT_COLOR_GRADING,
+  glareReduction: 0,
+  teethStainRemoval: 0,
+  clothing: DEFAULT_CLOTHING,
+  lut: null,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -268,6 +313,14 @@ export const SLIDERS: readonly SliderSpec[] = [
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'darkCircles', label: 'Reduce dark circles', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
+  {
+    key: 'teethStainRemoval', label: 'Teeth stains', min: 0, max: 100, step: 1, group: 'face', needsFace: true,
+    hint: 'Evens yellow or dark patches toward the teeth\'s own enamel colour, keeping their texture.',
+  },
+  {
+    key: 'glareReduction', label: 'Glasses glare', min: 0, max: 100, step: 1, group: 'face', needsFace: true,
+    hint: 'Removes flash and window reflections on eyeglass lenses so the eyes behind them show again.',
+  },
   { key: 'sharpen', label: 'Sharpen', min: 0, max: 100, step: 1, group: 'detail' },
   { key: 'vignette', label: 'Vignette', min: -100, max: 100, step: 1, group: 'detail' },
 ];
@@ -323,7 +376,29 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
+  const cl = asRecord(src.clothing);
+  out.clothing = {
+    enabled: typeof cl.enabled === 'boolean' ? cl.enabled : DEFAULT_CLOTHING.enabled,
+    wrinkleStrength: num(cl.wrinkleStrength, 0, 100, DEFAULT_CLOTHING.wrinkleStrength),
+    texturePreservation: num(cl.texturePreservation, 0, 100, DEFAULT_CLOTHING.texturePreservation),
+    hueShift: num(cl.hueShift, -180, 180, DEFAULT_CLOTHING.hueShift),
+    saturation: num(cl.saturation, -100, 100, DEFAULT_CLOTHING.saturation),
+  };
+  out.lut = sanitizeLookLut(src.lut);
   return out;
+}
+
+/** Base64 length of a size^3 uint16 RGB LUT. */
+export const lutDataLength = (size: number) => 4 * Math.ceil((size ** 3 * 6) / 3);
+
+export function sanitizeLookLut(input: unknown): LookLut | null {
+  if (!input || typeof input !== 'object') return null;
+  const r = input as Record<string, unknown>;
+  const size = r.size;
+  if (typeof size !== 'number' || !Number.isInteger(size) || size < 2 || size > LUT_MAX_SIZE) return null;
+  if (typeof r.data !== 'string' || r.data.length !== lutDataLength(size) || !/^[A-Za-z0-9+/]*={0,2}$/.test(r.data)) return null;
+  const name = typeof r.name === 'string' && r.name.trim() ? r.name.slice(0, 120) : 'Look';
+  return { name, size, data: r.data, amount: num(r.amount, 0, 100, 100) };
 }
 
 export function sanitizeHsl(input: unknown): HslMixer {
@@ -379,7 +454,9 @@ export function isDefault(adj: Adjustments): boolean {
     !adj.strayHairRemoval.enabled &&
     !adj.depthBokeh.enabled &&
     hslIsDefault(adj.hsl) &&
-    gradingIsDefault(adj.colorGrading)
+    gradingIsDefault(adj.colorGrading) &&
+    !adj.clothing.enabled &&
+    adj.lut === null
   );
 }
 
@@ -565,3 +642,4 @@ export interface BatchProgress {
 export const MAX_BATCH_ITEMS = 5000;
 
 export * from './style.js';
+export * from './lut.js';

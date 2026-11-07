@@ -11,6 +11,10 @@ Endpoints
   POST /v1/style/sync          reference + N targets -> per-target adjustment patches ("Sync to All")
   POST /v1/raw/metadata        camera RAW format + EXIF (camera, lens, ISO, shutter, aperture, orientation)
   POST /v1/raw/preview         camera RAW -> JPEG (embedded preview, or a fast half-size demosaic)
+  POST /v1/segment             person / hair / clothes masks (PNG, R clothes, G hair, B person) for the preview
+  POST /v1/lut/fit             before + after of a graded reference -> 3D look LUT (+ .cube text)
+  POST /v1/lut/parse           .cube file -> look LUT
+  /v1/batch/...                local SQLite batch queue (desktop engine only, see LOCAL_BATCH)
 
 Every image endpoint accepts camera RAW (CR2, CR3, NEF, ARW, RAF, DNG, ORF, RW2, PEF);
 renders demosaic them at 16 bits per channel through raw_engine.
@@ -26,7 +30,10 @@ import hmac
 import json
 import logging
 import os
+import threading
 import time
+from collections.abc import Callable
+from pathlib import Path
 
 import numpy as np
 import cv2
@@ -36,7 +43,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import imageio, raw_engine, storage
+from . import batch_engine, imageio, raw_engine, storage
 from .color import color_stats
 from .depth import DepthEstimator
 from .landmarks import FaceLandmarkService
@@ -44,6 +51,8 @@ from .pipeline import render, sharpness
 from .retouch_engine import style_profile, sync_style_arrays
 from .schemas import (
     Adjustments,
+    BatchJobRequest,
+    BatchJobSettings,
     ColorStats,
     CullFlags,
     FaceAnalysis,
@@ -162,20 +171,27 @@ def _parse_adjustments(raw: str) -> Adjustments:
         raise HTTPException(422, f"Invalid adjustments: {exc}") from exc
 
 
-def _render_bytes(data: bytes, adj: Adjustments, out: OutputSpec) -> tuple[bytes, str, CullFlags]:
+def _render_bytes(
+    data: bytes, adj: Adjustments | Callable[[np.ndarray], Adjustments], out: OutputSpec
+) -> tuple[bytes, str, CullFlags]:
+    """adj may be a function of a small proxy of the decoded photo (batch smart sync)."""
     try:
         hq = imageio.decode_hq(data, out.maxLongEdge)  # uint16 for camera RAW
     except Exception as exc:
         raise HTTPException(415, f"Unsupported or corrupt image: {exc}") from exc
     rgb = raw_engine.to_uint8(hq)
+    if callable(adj):
+        adj = adj(raw_engine.resize_long_edge(rgb, 1024))
     # Landmarks are resolution independent; detecting on the full image would only cost time.
     faces = faces_service.detect(rgb)
     depth = depth_service.estimate(rgb, faces) if adj.depthBokeh.enabled else None
-    hair = None
-    if adj.strayHairRemoval.enabled and faces:
+    hair = clothes = None
+    want_clothes = adj.clothing.enabled
+    if (adj.strayHairRemoval.enabled and faces) or want_clothes:
         seg = depth_service.segment(rgb)
-        hair = seg[1] if seg is not None else None
-    result = render(hq, adj, faces, depth=depth, hair_prob=hair)
+        if seg is not None:
+            hair, clothes = seg[1], seg[2]
+    result = render(hq, adj, faces, depth=depth, hair_prob=hair, clothes_prob=clothes if want_clothes else None)
     encoded, mime = imageio.encode(result, out.format, out.quality)
     return encoded, mime, cull_flags(faces, sharpness(rgb))
 
@@ -311,3 +327,168 @@ async def raw_preview(
 
     encoded, source = await run_in_threadpool(work)
     return Response(encoded, media_type="image/jpeg", headers={"X-Raw-Source": source})
+
+
+@app.post("/v1/segment")
+async def segment_map(file: UploadFile = File(...)) -> Response:
+    """Segmentation for the live preview: PNG with R = clothes, G = hair, B = person (0..255),
+    on the same pixels the editor shows. 404 when the segmenter model is not installed."""
+    data = await _read_upload(file)
+
+    def work() -> bytes:
+        rgb = _decode(data, ANALYZE_LONG_EDGE)
+        seg = depth_service.segment(rgb)
+        if seg is None:
+            raise HTTPException(404, "Segmentation model not available")
+        person, hair, clothes = seg
+        planes = np.stack([person, hair, clothes], axis=-1)  # BGR order for OpenCV
+        ok, png = cv2.imencode(".png", (np.clip(planes, 0, 1) * 255 + 0.5).astype(np.uint8))
+        if not ok:
+            raise HTTPException(500, "Could not encode segmentation")
+        return png.tobytes()
+
+    return Response(await run_in_threadpool(work), media_type="image/png")
+
+
+def _lut_response(lut: np.ndarray, name: str) -> dict:
+    look = batch_engine.look_from_lut(lut, name)
+    return {**look.model_dump(), "cube": batch_engine.lut_to_cube(lut, name)}
+
+
+@app.post("/v1/lut/fit")
+async def lut_fit(
+    before: UploadFile = File(...),
+    after: UploadFile = File(...),
+    size: int = Form(17),
+    name: str = Form("Reference look"),
+) -> dict:
+    """Fit the reference's grade as a 3D LUT from its original and its graded version."""
+    if not 2 <= size <= 33:
+        raise HTTPException(422, "size must be 2..33")
+    b_bytes, a_bytes = await _read_upload(before), await _read_upload(after)
+
+    def work() -> dict:
+        return _lut_response(batch_engine.fit_lut(_decode(b_bytes, 1024), _decode(a_bytes, 1024), size), name)
+
+    return await run_in_threadpool(work)
+
+
+@app.post("/v1/lut/parse")
+async def lut_parse(file: UploadFile = File(...)) -> dict:
+    data = await _read_upload(file)
+    try:
+        lut, title = batch_engine.parse_cube(data.decode("utf-8", errors="replace"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _lut_response(lut, title)
+
+
+# --- local batch queue ------------------------------------------------------------------
+#
+# The queue reads and writes folders on this machine, so it only runs where the engine is
+# the user's own local process: the desktop sidecar (FINERETOUCH_DATA_DIR set, token
+# required) or a developer who opts in with FINERETOUCH_LOCAL_BATCH=1. Server deployments
+# use services/worker (BullMQ + object storage) instead.
+
+LOCAL_BATCH = os.environ.get("FINERETOUCH_LOCAL_BATCH", "1" if os.environ.get("FINERETOUCH_DATA_DIR") else "0") == "1"
+_batch_lock = threading.Lock()
+_batch: tuple[batch_engine.BatchQueue, batch_engine.BatchRunner] | None = None
+
+
+def _batch_db_path() -> str:
+    explicit = os.environ.get("FINERETOUCH_BATCH_DB")
+    if explicit:
+        return explicit
+    base = os.environ.get("FINERETOUCH_DATA_DIR") or str(Path.home() / ".fineretouch")
+    return str(Path(base) / "batch.sqlite3")
+
+
+def _process_batch_item(item: batch_engine.BatchItem, settings: BatchJobSettings) -> None:
+    data = Path(item.source).read_bytes()
+    encoded, _, _ = _render_bytes(data, lambda proxy: batch_engine.plan_adjustments(settings, proxy), settings.output)
+    batch_engine.write_atomic(item.output, encoded)
+
+
+def batch_service() -> tuple[batch_engine.BatchQueue, batch_engine.BatchRunner]:
+    global _batch
+    if not LOCAL_BATCH:
+        raise HTTPException(404, "The local batch queue is only available in the desktop engine")
+    with _batch_lock:
+        if _batch is None:
+            queue = batch_engine.BatchQueue(_batch_db_path())
+            recovered = queue.recover()
+            if recovered:
+                log.info("batch queue: %d interrupted item(s) back to pending", recovered)
+            runner = batch_engine.BatchRunner(queue, _process_batch_item, os.environ.get("FINERETOUCH_BATCH_PROFILE", "balanced"))
+            runner.start()
+            _batch = (queue, runner)
+        return _batch
+
+
+@app.post("/v1/batch/jobs")
+def batch_create(req: BatchJobRequest) -> dict:
+    queue, runner = batch_service()
+    try:
+        files = batch_engine.discover_images(req.sources, req.recursive)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if not files:
+        raise HTTPException(422, "No photos (JPEG, PNG, TIFF, WebP or camera RAW) found in the selected folders")
+    out_dir = Path(req.outputDir).expanduser()
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(422, f"Cannot create output folder {out_dir}: {exc}") from exc
+    if req.profile:
+        runner.set_profile(req.profile)
+    job_id = queue.create_job(req.name, files, out_dir, req.settings)
+    runner.notify()
+    return queue.progress(job_id, runner.profile.workers)
+
+
+@app.get("/v1/batch/jobs")
+def batch_list() -> dict:
+    queue, runner = batch_service()
+    return {"profile": runner.profile_name, "workers": runner.profile.workers, "jobs": queue.list_jobs(runner.profile.workers)}
+
+
+@app.get("/v1/batch/jobs/{job_id}")
+def batch_get(job_id: str) -> dict:
+    queue, runner = batch_service()
+    try:
+        return queue.progress(job_id, runner.profile.workers)
+    except KeyError as exc:
+        raise HTTPException(404, "No such batch") from exc
+
+
+@app.post("/v1/batch/jobs/{job_id}/{action}")
+def batch_action(job_id: str, action: str) -> dict:
+    queue, runner = batch_service()
+    if action not in ("pause", "resume", "cancel", "retry"):
+        raise HTTPException(422, "action must be pause, resume, cancel or retry")
+    try:
+        queue.set_status(job_id, action)
+    except KeyError as exc:
+        raise HTTPException(404, "No such batch") from exc
+    runner.notify()
+    return queue.progress(job_id, runner.profile.workers)
+
+
+@app.delete("/v1/batch/jobs/{job_id}")
+def batch_delete(job_id: str) -> dict:
+    queue, _ = batch_service()
+    if queue.job_status(job_id) is None:
+        raise HTTPException(404, "No such batch")
+    queue.set_status(job_id, "cancel")
+    queue.delete_job(job_id)
+    return {"deleted": job_id}
+
+
+@app.post("/v1/batch/profile")
+def batch_profile(profile: str = Form(...)) -> dict:
+    _, runner = batch_service()
+    try:
+        runner.set_profile(profile)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"profile": runner.profile_name, "workers": runner.profile.workers, "cvThreads": runner.profile.cv_threads}

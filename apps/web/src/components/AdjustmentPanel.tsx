@@ -6,12 +6,14 @@ import { Fragment, useState } from 'react';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 import { ColorMixerPanel } from './ColorMixerPanel';
 import { RetouchControlPanel } from './RetouchControlPanel';
+import { BatchSyncPanel } from './panels/BatchSyncPanel';
+import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
 
 export function AdjustmentPanel() {
   const photo = useEditor(selectActivePhoto);
-  const [open, setOpen] = useState<Record<string, boolean>>({ pro: true, skin: true, face: true, light: true, color: true, mixer: false, detail: false });
+  const [open, setOpen] = useState<Record<string, boolean>>({ studio: true, batch: false, pro: true, skin: true, face: true, light: true, color: true, mixer: false, detail: false });
   if (!photo) return <aside className="p-4 text-sm text-ink-400">Select a photo to edit.</aside>;
 
   const faceState =
@@ -30,6 +32,12 @@ export function AdjustmentPanel() {
 
   return (
     <aside className="flex h-full min-w-0 flex-col overflow-y-auto overflow-x-hidden" aria-label="Adjustments">
+      <Section title="Pro studio retouch" open={open.studio} onToggle={() => setOpen((o) => ({ ...o, studio: !o.studio }))} note={faceState}>
+        <RetouchStudioPanel photo={photo} />
+      </Section>
+      <Section title="Batch style sync" open={open.batch} onToggle={() => setOpen((o) => ({ ...o, batch: !o.batch }))}>
+        <BatchSyncPanel photo={photo} />
+      </Section>
       <Section title="AI pro tools" open={open.pro} onToggle={() => setOpen((o) => ({ ...o, pro: !o.pro }))}>
         <RetouchControlPanel photo={photo} />
       </Section>

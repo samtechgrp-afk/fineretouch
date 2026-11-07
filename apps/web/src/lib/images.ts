@@ -42,6 +42,8 @@ export interface DepthData {
   kind: 'model' | 'prior';
 }
 const depths = new Map<string, DepthData>();
+const segmentations = new Map<string, ImageBitmap>();
+const lensRois = new Map<string, Uint8Array>();
 
 export const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/avif', 'image/bmp', 'image/tiff'];
 
@@ -139,6 +141,7 @@ export const setCachedMask = (id: string, m: Uint8Array) => masks.set(id, m);
 export const clearCachedMask = (id: string) => {
   masks.delete(id);
   hairRois.delete(id);
+  lensRois.delete(id);
 };
 export const getCachedHairRoi = (id: string) => hairRois.get(id);
 export const setCachedHairRoi = (id: string, m: Uint8Array) => hairRois.set(id, m);
@@ -149,7 +152,18 @@ export const setDepth = (id: string, d: DepthData) => {
   depths.set(id, d);
 };
 
+export const getSegmentation = (id: string) => segmentations.get(id);
+export const setSegmentation = (id: string, bmp: ImageBitmap) => {
+  segmentations.get(id)?.close();
+  segmentations.set(id, bmp);
+};
+export const getCachedLensRoi = (id: string) => lensRois.get(id);
+export const setCachedLensRoi = (id: string, m: Uint8Array) => lensRois.set(id, m);
+
 export function forgetImage(id: string) {
+  segmentations.get(id)?.close();
+  segmentations.delete(id);
+  lensRois.delete(id);
   proxies.get(id)?.close();
   proxies.delete(id);
   files.delete(id);

@@ -16,11 +16,14 @@ Stages (all on float32 sRGB in [0, 1]):
       approximates these, so they are excluded from the parity guarantee).
   5c. Skin-tone guard (retouch_engine.skin_tone_guard): CIELAB chroma floor and hue
       lock so retouched skin never turns ashen or shifts away from its undertone.
-  6. Landmark-driven features: eyes, dark circles, teeth.
+  5d. Glasses glare (retouch_engine.reduce_glasses_glare) and 5e. clothing virtual iron and
+      recolour (remove_clothing_wrinkles / shift_clothing_color, v0.6).
+  6. Landmark-driven features: eyes, dark circles, teeth (correct_teeth: CIELAB whitening and
+     stain removal on an enamel mask).
   7. L*a*b* colour match (covariance transform + tone curve when available).
   8. Global tone: exposure / white balance (linear light), highlights, shadows,
      contrast, saturation, vibrance; 8b. HSL mixer and colour grading (color_engine);
-     then sharpening and vignette.
+     8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
 """
 
@@ -32,12 +35,17 @@ import cv2
 import numpy as np
 
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
-from .color_engine import apply_color_engine
+from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .retouch_engine import (
     apply_boosted_skin_retouch,
     apply_depth_bokeh,
+    clothing_mask,
+    correct_teeth,
     natural_skin_retouch,
+    reduce_glasses_glare,
+    remove_clothing_wrinkles,
     remove_stray_hairs,
+    shift_clothing_color,
     skin_tone_guard,
 )
 from .schemas import Adjustments, ColorStats, FaceAnalysis
@@ -134,11 +142,14 @@ def render(
     source_stats: ColorStats | None = None,
     depth: np.ndarray | None = None,
     hair_prob: np.ndarray | None = None,
+    clothes_prob: np.ndarray | None = None,
 ) -> np.ndarray:
     """rgb8: HxWx3 uint8 (or uint16, e.g. a demosaiced camera RAW) sRGB -> HxWx3 uint8 sRGB.
 
     depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
     hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
+    clothes_prob: optional garment probability (HxW, the segmenter's clothes class) for the
+    clothing iron and recolour; without it a portrait prior below the chin is used.
     """
     src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
     h, w = src.shape[:2]
@@ -188,6 +199,19 @@ def render(
         c = skin_tone_guard(np.clip(c, 0.0, 1.0).astype(np.float32), src, low2, skin_w)
     if adj.strayHairRemoval.enabled and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
+    # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted.
+    if adj.glareReduction > 0 and faces:
+        c = reduce_glasses_glare(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.glareReduction)
+    # 5e. Clothing: virtual iron, then recolour.
+    cl = adj.clothing
+    if cl.enabled and (cl.wrinkleStrength > 0 or cl.hueShift != 0 or cl.saturation != 0):
+        garment = clothing_mask(src, faces, clothes_prob)
+        if garment is not None:
+            face_w = max((f.box[2] * w for f in faces), default=0.0) or None
+            c = np.clip(c, 0.0, 1.0).astype(np.float32)
+            if cl.wrinkleStrength > 0:
+                c = remove_clothing_wrinkles(c, garment, cl.wrinkleStrength, cl.texturePreservation, face_w)
+            c = shift_clothing_color(c, garment, cl.hueShift, cl.saturation)
 
     # 6. Face features.
     if masks.has_face:
@@ -201,12 +225,8 @@ def render(
             cb2, cr2 = cbcr(low2)
             y = y + np.maximum(0.0, luma(low2) * 1.06 - y) * d
             c = from_ycbcr(y, cb + (cb2 - cb) * 0.5 * d, cr + (cr2 - cr) * 0.5 * d)
-        if adj.teethWhiten > 0:
-            y = luma(c)
-            tp = smoothstep(0.30, 0.55, y) * masks.mouth * (adj.teethWhiten / 100.0)
-            neutral = np.maximum(c[..., 2], (c[..., 0] + c[..., 1]) * 0.5)
-            c[..., 2] = c[..., 2] + (neutral - c[..., 2]) * tp
-            c = c * (1.0 + 0.08 * tp)[..., None]
+        if adj.teethWhiten > 0 or adj.teethStainRemoval > 0:
+            c = correct_teeth(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.teethWhiten, adj.teethStainRemoval)
 
     c = np.clip(c, 0.0, 1.0)
 
@@ -234,6 +254,9 @@ def render(
 
     # 8b. HSL colour mixer and 3-way colour grading (app/color_engine.py).
     c = apply_color_engine(np.clip(c, 0.0, 1.0).astype(np.float32), adj.hsl, adj.colorGrading)
+    # 8c. Look LUT (a reference grade fitted by batch_engine.fit_lut, or an imported .cube).
+    if adj.lut is not None and adj.lut.amount > 0:
+        c = apply_lut(c, decode_lut(adj.lut.data, adj.lut.size), adj.lut.amount / 100.0)
 
     if adj.sharpen > 0:
         c = c + (adj.sharpen / 100.0) * 1.2 * (src - low0) * (1.0 - 0.8 * skin * smooth)

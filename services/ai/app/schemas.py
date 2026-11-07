@@ -85,6 +85,36 @@ class ColorGrading(BaseModel):
     balance: float = Field(0, ge=-100, le=100)
 
 
+class ClothingSettings(BaseModel):
+    """Clothing "virtual iron" and recolour (retouch_engine.remove_clothing_wrinkles / shift_clothing_color)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    wrinkleStrength: float = Field(60, ge=0, le=100)
+    texturePreservation: float = Field(80, ge=0, le=100)
+    hueShift: float = Field(0, ge=-180, le=180)
+    saturation: float = Field(0, ge=-100, le=100)
+
+
+LUT_MAX_SIZE = 33
+
+
+class LookLut(BaseModel):
+    """A 3D colour lookup table ("look"), e.g. fitted from a graded reference or loaded from a .cube.
+
+    data: base64 of size^3 RGB triples as little-endian uint16 (0..65535), red index fastest
+    (the .cube order). See app/color_engine.py decode_lut / apply_lut.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = Field("Look", max_length=120)
+    size: int = Field(17, ge=2, le=LUT_MAX_SIZE)
+    data: str = Field(..., max_length=(LUT_MAX_SIZE**3 * 6 * 4) // 3 + 8)
+    amount: float = Field(100, ge=0, le=100)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -115,6 +145,11 @@ class Adjustments(BaseModel):
     skinToneGuard: bool = True
     hsl: HslMixer = HslMixer()
     colorGrading: ColorGrading = ColorGrading()
+    # v0.6 pro studio: glasses glare, teeth stains, clothing iron / recolour, look LUT.
+    glareReduction: float = Field(0, ge=0, le=100)
+    teethStainRemoval: float = Field(0, ge=0, le=100)
+    clothing: ClothingSettings = ClothingSettings()
+    lut: LookLut | None = None
 
 
 class StyleProfile(BaseModel):
@@ -199,3 +234,37 @@ class RenderObjectResponse(BaseModel):
     bytes: int
     ms: float
     cull: CullFlags
+
+
+class BatchSyncSpec(BaseModel):
+    """How a batch carries the reference look to each photo (app/batch_engine.py).
+
+    copy     the same adjustments on every photo.
+    smart    the reference's edits plus per-photo exposure / white-balance compensation
+             against the reference's original (referenceStats).
+    palette  the reference's retouch plus a colour and tone transfer to the graded reference
+             (referenceLookStats).
+    A look LUT, when set in the adjustments, applies in every mode.
+    """
+
+    mode: Literal["copy", "smart", "palette"] = "smart"
+    referenceStats: ColorStats | None = None
+    referenceLookStats: ColorStats | None = None
+    amount: float = Field(100, ge=0, le=100)
+
+
+class BatchJobSettings(BaseModel):
+    adjustments: Adjustments = Adjustments()
+    sync: BatchSyncSpec = BatchSyncSpec()
+    output: OutputSpec = OutputSpec()
+
+
+class BatchJobRequest(BaseModel):
+    """POST /v1/batch/jobs (desktop / local engine only)."""
+
+    name: str = Field("Batch", max_length=120)
+    sources: list[str] = Field(..., min_length=1, max_length=64)
+    recursive: bool = True
+    outputDir: str = Field(..., min_length=1)
+    settings: BatchJobSettings = BatchJobSettings()
+    profile: Literal["quiet", "balanced", "performance"] | None = None
