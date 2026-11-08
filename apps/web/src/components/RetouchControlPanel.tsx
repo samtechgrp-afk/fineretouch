@@ -1,5 +1,6 @@
 'use client';
 
+import { EffectControlsRow } from './panels/EffectControls';
 import { SKIN_MULTIPLIERS, mapStyleToAdjustments, type ApertureShape, type SkinMultiplier, type StyleSyncMode } from '@fineretouch/shared';
 import { useRef, useState } from 'react';
 import { extractPalette } from '@/engine/color';
@@ -113,6 +114,7 @@ function StrayHair({ photo, hasFace }: { photo: Photo; hasFace: boolean }) {
         onStart={() => beginEdit()}
         onChange={(v) => setStray({ strength: v }, { live: true })}
       />
+      <EffectControlsRow id="strayHair" adj={photo.adjustments} disabled={!st.enabled || !hasFace} />
     </section>
   );
 }

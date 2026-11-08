@@ -9,6 +9,8 @@
  * Every slider is a plain number with a documented range so a preset is just JSON.
  */
 
+import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControls } from './effects.js';
+
 export interface SliderSpec {
   key: AdjustmentKey;
   label: string;
@@ -229,6 +231,11 @@ export interface Adjustments {
   clothing: ClothingSettings;
   /** Reference look as a 3D LUT, applied after colour grading. */
   lut: LookLut | null;
+  // Per-effect controls (v0.7, effects.ts): enable / 1x-2x-3x / opacity per retouch effect,
+  // and a master strength over all of them. Slider values above are never rewritten.
+  effects: EffectControls;
+  /** 0..100: scales every retouch effect's contribution (not light / colour). */
+  globalStrength: number;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -244,6 +251,8 @@ export type AdjustmentKey = Exclude<
   | 'colorGrading'
   | 'clothing'
   | 'lut'
+  | 'effects'
+  | 'globalStrength'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -292,6 +301,8 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   teethStainRemoval: 0,
   clothing: DEFAULT_CLOTHING,
   lut: null,
+  effects: DEFAULT_EFFECTS,
+  globalStrength: 100,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -385,6 +396,8 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
     saturation: num(cl.saturation, -100, 100, DEFAULT_CLOTHING.saturation),
   };
   out.lut = sanitizeLookLut(src.lut);
+  out.effects = sanitizeEffects(src.effects);
+  out.globalStrength = num(src.globalStrength, 0, 100, 100);
   return out;
 }
 
@@ -456,7 +469,9 @@ export function isDefault(adj: Adjustments): boolean {
     hslIsDefault(adj.hsl) &&
     gradingIsDefault(adj.colorGrading) &&
     !adj.clothing.enabled &&
-    adj.lut === null
+    adj.lut === null &&
+    adj.globalStrength === 100 &&
+    effectsAreDefault(adj.effects)
   );
 }
 
@@ -643,3 +658,4 @@ export const MAX_BATCH_ITEMS = 5000;
 
 export * from './style.js';
 export * from './lut.js';
+export * from './effects.js';

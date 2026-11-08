@@ -115,6 +115,32 @@ class LookLut(BaseModel):
     amount: float = Field(100, ge=0, le=100)
 
 
+class EffectControl(BaseModel):
+    """Per-effect enable / multiplier / opacity (mirror of packages/shared/src/effects.ts)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    multiplier: Literal[1, 2, 3] = 1
+    opacity: float = Field(100, ge=0, le=100)
+
+
+class EffectControls(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    skinSmoothing: EffectControl = EffectControl()
+    blemishRemoval: EffectControl = EffectControl()
+    skinToneUnify: EffectControl = EffectControl()
+    darkCircles: EffectControl = EffectControl()
+    eyeBrighten: EffectControl = EffectControl()
+    teethWhiten: EffectControl = EffectControl()
+    teethStainRemoval: EffectControl = EffectControl()
+    glareReduction: EffectControl = EffectControl()
+    sharpen: EffectControl = EffectControl()
+    strayHair: EffectControl = EffectControl()
+    clothingIron: EffectControl = EffectControl()
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -150,6 +176,9 @@ class Adjustments(BaseModel):
     teethStainRemoval: float = Field(0, ge=0, le=100)
     clothing: ClothingSettings = ClothingSettings()
     lut: LookLut | None = None
+    # v0.7 per-effect controls and master retouch strength (app/effects.py).
+    effects: EffectControls = EffectControls()
+    globalStrength: float = Field(100, ge=0, le=100)
 
 
 class StyleProfile(BaseModel):

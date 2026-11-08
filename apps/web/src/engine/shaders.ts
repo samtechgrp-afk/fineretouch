@@ -135,6 +135,7 @@ out vec4 outColor;
 uniform sampler2D uSrc, uLow0, uLow1, uLow2, uLow3, uMask, uHairRoi;
 uniform bool uHasFace;
 uniform float uMultiplier;      // 1..3 skin boost
+uniform float uSpotMultiplier;  // 1..3 spot detection reach (max of skin boost and spot healing multiplier)
 uniform bool uHair;             // stray hair cleanup enabled and a face ROI exists
 uniform float uHairStrength;    // 0..1
 uniform mat3 uMatchM;           // colour transfer matrix (L*a*b*), see matchMatrix() in color.ts
@@ -231,7 +232,7 @@ void main() {
   // gates it, because a red pimple fails the colour-based skin test. 2x/3x widen detection;
   // very dark, neutral spots (beauty marks) are kept unless protection is off.
   if (uBlemish > 0.0) {
-    float sens = 1.0 + 0.45 * (uMultiplier - 1.0);
+    float sens = 1.0 + 0.45 * (uSpotMultiplier - 1.0);
     float d = luma(low2) - luma(low1);
     float r = crOf(low1) - crOf(low2);
     float spot = max(smoothstep(0.015 / sens, 0.05 / sens, d), smoothstep(0.012 / sens, 0.035 / sens, r));

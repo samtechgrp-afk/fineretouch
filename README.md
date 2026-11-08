@@ -10,6 +10,8 @@ AI-assisted batch retouching for photographers who deliver hundreds of portraits
 - **AI face analysis** (MediaPipe 478-point face mesh) drives face-aware masks for skin, eyes, under-eyes and mouth. Without the AI service, colour-based skin detection still works.
 - **Skin retouch:** frequency-separation smoothing with texture preservation, spot healing, and even skin tone.
 - **Spot healing:** acne, pimples and dark spots are found one by one (multi-scale LoG) and repaired locally (tone inpainting + texture cloned from healthy skin), with eyes, lips, nostrils and beauty marks protected; 1x / 2x / 3x set how far it reaches.
+- **Per-effect retouch controls:** every retouch effect (smoothing, spot healing, even tone, dark circles, eyes, teeth, stains, glasses glare, sharpening, stray hair, clothing iron) has its own on/off switch, 1x / 2x / 3x multiplier, opacity and reset, plus a global retouch strength over all of them. Multipliers run through per-effect safety curves and change the real render in both the preview and the export (see [docs/RETOUCH_CONTROLS.md](docs/RETOUCH_CONTROLS.md)).
+- **Edit autosave:** edits are saved as you work and restored when you re-import the same original after a reload or crash. Originals are never written to.
 - **1x / 2x / 3x skin & blemish boost:** recursive guided-filter clean-up of stubborn dark spots, acne and redness that keeps pore texture.
 - **Stray hair cleanup** around the face outline and forehead (landmark band + Gabor strand detector + inpainting).
 - **Depth-aware background bokeh:** MiDaS depth + person segmentation, 100-300 % blur multiplier, circular or hexagonal aperture, highlight bloom.

@@ -6,6 +6,7 @@ import { aiHealth, analyze, pool } from '@/lib/ai';
 import { proxyJpeg } from '@/lib/depth';
 import { bitmapPixels, clearCachedMask, fitSize, forgetImage, isImportable, loadImage, newId } from '@/lib/images';
 import { IMPORT_ACCEPT } from '@/lib/rawParser';
+import { fileFingerprint } from '@/lib/editPersistence';
 import { selectActivePhoto, useEditor, type CompareMode } from '@/lib/store';
 import { AdjustmentPanel } from './AdjustmentPanel';
 import { ExportModal } from './ExportModal';
@@ -83,7 +84,9 @@ export function Editor() {
       const id = ids[i];
       try {
         const img = await loadImage(id, file);
-        useEditor.getState().addPhotos([{ id, name: file.name, width: img.width, height: img.height, thumbUrl: img.thumbUrl, raw: img.raw }]);
+        useEditor.getState().addPhotos([
+          { id, name: file.name, width: img.width, height: img.height, thumbUrl: img.thumbUrl, raw: img.raw, fingerprint: fileFingerprint(file, img.width, img.height) },
+        ]);
         const [pw, ph] = fitSize(img.proxy.width, img.proxy.height, PROFILE_LONG_EDGE);
         const profile = profileFromRgba(bitmapPixels(img.proxy, PROFILE_LONG_EDGE), pw, ph);
         useEditor.getState().setLocalStats(id, profile.stats);
