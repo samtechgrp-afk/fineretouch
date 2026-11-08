@@ -28,7 +28,8 @@ CURVE_VECTORS = [
 ]
 
 TS_CURVES = {  # EFFECT_CURVES in packages/shared/src/effects.ts
-    "skinSmoothing": (0.8, 100), "blemishRemoval": (0.85, 100), "skinToneUnify": (0.75, 100),
+    "skinSmoothing": (0.8, 100), "blemishRemoval": (0.85, 100), "acneRemoval": (0.85, 100),
+    "darkSpotRemoval": (0.75, 100), "skinToneUnify": (0.75, 100),
     "darkCircles": (0.75, 100), "eyeBrighten": (0.6, 85), "teethWhiten": (0.6, 85),
     "teethStainRemoval": (0.8, 100), "glareReduction": (0.85, 100), "sharpen": (0.6, 90),
     "strayHair": (0.8, 100), "clothingIron": (0.8, 100),

@@ -23,6 +23,8 @@ class EffectCurve:
 EFFECT_CURVES: dict[str, EffectCurve] = {
     "skinSmoothing": EffectCurve(0.8, 100),
     "blemishRemoval": EffectCurve(0.85, 100),
+    "acneRemoval": EffectCurve(0.85, 100),
+    "darkSpotRemoval": EffectCurve(0.75, 100),
     "skinToneUnify": EffectCurve(0.75, 100),
     "darkCircles": EffectCurve(0.75, 100),
     "eyeBrighten": EffectCurve(0.6, 85),
@@ -38,6 +40,8 @@ EFFECT_CURVES: dict[str, EffectCurve] = {
 EFFECT_SOURCE: dict[str, tuple[str, ...]] = {
     "skinSmoothing": ("skinSmoothing",),
     "blemishRemoval": ("blemishRemoval",),
+    "acneRemoval": ("acneRemoval",),
+    "darkSpotRemoval": ("darkSpotRemoval",),
     "skinToneUnify": ("skinToneUnify",),
     "darkCircles": ("darkCircles",),
     "eyeBrighten": ("eyeBrighten",),
@@ -71,8 +75,18 @@ def effective_strength(value: float, control: EffectControl, curve: EffectCurve,
     return boost_strength(value, control.multiplier, curve.knee, curve.cap) * control.opacity * global_strength / 10000.0
 
 
+def detector_multiplier(adj: Adjustments, effect: str) -> int:
+    """Detection reach of a spot tool: max(skin boost, that tool's multiplier when it is on)."""
+    c = getattr(adj.effects, effect)
+    return max(int(adj.skinMultiplier), c.multiplier if c.enabled else 1)
+
+
 def resolve_adjustments(adj: Adjustments) -> tuple[Adjustments, int]:
-    """Return (adjustments with effective effect values, spot detector multiplier)."""
+    """Return (adjustments with effective effect values, spot detector multiplier).
+
+    Per-tool detector multipliers: detector_multiplier(adj, 'acneRemoval' | 'darkSpotRemoval');
+    call it on the *original* adjustments (the resolved copy has neutral controls).
+    """
     g = min(100.0, max(0.0, float(adj.globalStrength)))
     out = adj.model_copy(deep=True)
     for eid, src in EFFECT_SOURCE.items():
@@ -83,8 +97,7 @@ def resolve_adjustments(adj: Adjustments) -> tuple[Adjustments, int]:
         else:
             holder = getattr(out, src[0])
             setattr(holder, src[1], effective_strength(getattr(holder, src[1]), control, curve, g))
-    spot = adj.effects.blemishRemoval
-    spot_multiplier = max(int(adj.skinMultiplier), spot.multiplier if spot.enabled else 1)
+    spot_multiplier = detector_multiplier(adj, "blemishRemoval")
     out.effects = type(adj.effects)()
     out.globalStrength = 100.0
     return out, spot_multiplier

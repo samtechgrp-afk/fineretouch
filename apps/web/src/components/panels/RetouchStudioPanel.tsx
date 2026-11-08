@@ -85,11 +85,13 @@ function SkinSection({ photo }: { photo: Photo }) {
         <SliderFor
           photo={photo}
           k="skinTexture"
-          label="Skin texture retention"
+          label="Texture preservation"
           unit="%"
           hint="Share of the pore and fine-detail layer re-injected after smoothing. 100% keeps every pore."
         />
-        <SliderFor photo={photo} k="blemishRemoval" label="Spot healing strength" />
+        <SliderFor photo={photo} k="acneRemoval" label="Acne removal" hint="Red spots, pimples and raised bumps, then the redness around them." />
+        <SliderFor photo={photo} k="darkSpotRemoval" label="Dark spot removal" hint="Isolated dark marks and brownish pigmentation; shading, beauty marks and (optionally) freckles stay." />
+        <SliderFor photo={photo} k="blemishRemoval" label="Blemish removal" hint="General clean-up of every kind of small spot in one pass." />
       </div>
       {plastic && (
         <p className="mt-1.5 text-[11px] text-apricot-300">

@@ -203,6 +203,12 @@ export interface Adjustments {
   skinTexture: number; // 0..100 texture retention: share of the pore / detail layer re-injected after smoothing
   blemishRemoval: number; // 0..100
   skinToneUnify: number; // 0..100 pulls skin chroma toward the face average
+  /** v0.7 Acne removal: red spots, pimples, raised bumps, then post-acne redness. 0..100 */
+  acneRemoval: number;
+  /** v0.7 Dark spot removal: isolated dark marks, then uneven pigmentation on the tone layer. 0..100 */
+  darkSpotRemoval: number;
+  /** Dark spot and blemish removal leave small, faint freckles alone. */
+  keepFreckles: boolean;
   // Face (landmark driven)
   eyeBrighten: number; // 0..100
   darkCircles: number; // 0..100
@@ -247,6 +253,7 @@ export type AdjustmentKey = Exclude<
   | 'depthBokeh'
   | 'protectBeautyMarks'
   | 'skinToneGuard'
+  | 'keepFreckles'
   | 'hsl'
   | 'colorGrading'
   | 'clothing'
@@ -284,6 +291,9 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   skinTexture: 50,
   blemishRemoval: 0,
   skinToneUnify: 0,
+  acneRemoval: 0,
+  darkSpotRemoval: 0,
+  keepFreckles: false,
   eyeBrighten: 0,
   darkCircles: 0,
   teethWhiten: 0,
@@ -314,15 +324,35 @@ export const SLIDERS: readonly SliderSpec[] = [
   { key: 'tint', label: 'Tint', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'saturation', label: 'Saturation', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'vibrance', label: 'Vibrance', min: -100, max: 100, step: 1, group: 'color' },
-  { key: 'skinSmoothing', label: 'Smoothing', min: 0, max: 100, step: 1, group: 'skin' },
   {
-    key: 'skinTexture', label: 'Texture retention', min: 0, max: 100, step: 1, group: 'skin', unit: '%',
-    hint: 'Share of the pore and fine-detail layer put back after Smoothing evens the tone layer. 100% keeps every pore.',
+    key: 'skinSmoothing', label: 'Skin smoothing', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Evens blotches and roughness on the tone layer only (frequency separation); pores come back through Texture preservation.',
   },
-  { key: 'blemishRemoval', label: 'Spot healing', min: 0, max: 100, step: 1, group: 'skin' },
-  { key: 'skinToneUnify', label: 'Even skin tone', min: 0, max: 100, step: 1, group: 'skin' },
+  {
+    key: 'skinTexture', label: 'Texture preservation', min: 0, max: 100, step: 1, group: 'skin', unit: '%',
+    hint: 'Share of the pore and fine-detail layer put back after smoothing. 100% keeps every pore.',
+  },
+  {
+    key: 'acneRemoval', label: 'Acne removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Finds red spots, pimples and raised bumps one by one, heals them with real skin texture, then reduces the redness around them. Unaffected skin is untouched.',
+  },
+  {
+    key: 'darkSpotRemoval', label: 'Dark spot removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Heals isolated dark marks and evens brownish pigmentation patches. Facial shadows, beauty marks and (optionally) freckles are kept.',
+  },
+  {
+    key: 'blemishRemoval', label: 'Blemish removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'General clean-up: every kind of small spot or mark (acne, dark spots, minor imperfections) in one pass.',
+  },
+  {
+    key: 'skinToneUnify', label: 'Skin tone correction', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Evens uneven colour and redness toward the person\'s own local skin tone (never a preset complexion).',
+  },
+  {
+    key: 'darkCircles', label: 'Under-eye correction', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
+    hint: 'Lifts dark circles and under-eye discoloration toward the cheek tone, without enlarging or reshaping the eyes.',
+  },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
-  { key: 'darkCircles', label: 'Reduce dark circles', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   {
     key: 'teethStainRemoval', label: 'Teeth stains', min: 0, max: 100, step: 1, group: 'face', needsFace: true,
@@ -385,6 +415,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   };
   if (typeof src.protectBeautyMarks === 'boolean') out.protectBeautyMarks = src.protectBeautyMarks;
   if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
+  if (typeof src.keepFreckles === 'boolean') out.keepFreckles = src.keepFreckles;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
   const cl = asRecord(src.clothing);

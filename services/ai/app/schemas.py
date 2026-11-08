@@ -130,6 +130,8 @@ class EffectControls(BaseModel):
 
     skinSmoothing: EffectControl = EffectControl()
     blemishRemoval: EffectControl = EffectControl()
+    acneRemoval: EffectControl = EffectControl()
+    darkSpotRemoval: EffectControl = EffectControl()
     skinToneUnify: EffectControl = EffectControl()
     darkCircles: EffectControl = EffectControl()
     eyeBrighten: EffectControl = EffectControl()
@@ -156,6 +158,11 @@ class Adjustments(BaseModel):
     skinTexture: float = Field(50, ge=0, le=100)
     blemishRemoval: float = Field(0, ge=0, le=100)
     skinToneUnify: float = Field(0, ge=0, le=100)
+    # v0.7 separate skin tools: acne (red spots, bumps, post-acne redness) and dark spots
+    # (isolated dark marks + uneven pigmentation). blemishRemoval stays as general blemish removal.
+    acneRemoval: float = Field(0, ge=0, le=100)
+    darkSpotRemoval: float = Field(0, ge=0, le=100)
+    keepFreckles: bool = False
     eyeBrighten: float = Field(0, ge=0, le=100)
     darkCircles: float = Field(0, ge=0, le=100)
     teethWhiten: float = Field(0, ge=0, le=100)

@@ -31,6 +31,8 @@ export const EFFECT_MULTIPLIERS: readonly EffectMultiplier[] = [1, 2, 3];
 export const EFFECT_IDS = [
   'skinSmoothing',
   'blemishRemoval',
+  'acneRemoval',
+  'darkSpotRemoval',
   'skinToneUnify',
   'darkCircles',
   'eyeBrighten',
@@ -65,10 +67,12 @@ export interface EffectCurve {
 
 /** Keep in sync with EFFECT_CURVES in services/ai/app/effects.py (pinned by tests). */
 export const EFFECT_CURVES: Readonly<Record<EffectId, EffectCurve>> = Object.freeze({
-  skinSmoothing: { label: 'Smoothing', knee: 0.8, cap: 100, note: 'Evens the tone layer harder; pores come back through Texture retention.' },
-  blemishRemoval: { label: 'Spot healing', knee: 0.85, cap: 100, note: '2x / 3x also widen detection to fainter and larger spots.' },
-  skinToneUnify: { label: 'Even skin tone', knee: 0.75, cap: 100, note: 'Pulls more chroma toward the local skin average; the tone guard keeps the undertone.' },
-  darkCircles: { label: 'Dark circles', knee: 0.75, cap: 100, note: 'Lifts more of the under-eye shadow, never above the cheek.' },
+  skinSmoothing: { label: 'Skin smoothing', knee: 0.8, cap: 100, note: 'Evens the tone layer harder; pores come back through Texture retention.' },
+  blemishRemoval: { label: 'Blemish removal', knee: 0.85, cap: 100, note: '2x / 3x also widen detection to fainter and larger spots.' },
+  acneRemoval: { label: 'Acne removal', knee: 0.85, cap: 100, note: '2x / 3x find fainter and larger acne and clear more redness around it; clear skin is not touched.' },
+  darkSpotRemoval: { label: 'Dark spot removal', knee: 0.75, cap: 100, note: '2x / 3x find fainter marks and even more pigmentation; shading edges stay excluded.' },
+  skinToneUnify: { label: 'Skin tone correction', knee: 0.75, cap: 100, note: 'Pulls more chroma toward the local skin average; the tone guard keeps the undertone.' },
+  darkCircles: { label: 'Under-eye correction', knee: 0.75, cap: 100, note: 'Lifts more of the under-eye shadow, never above the cheek.' },
   eyeBrighten: { label: 'Brighten eyes', knee: 0.6, cap: 85, note: 'Capped at 85 so eyes never glow.' },
   teethWhiten: { label: 'Whiten teeth', knee: 0.6, cap: 85, note: 'Capped at 85 so teeth keep their enamel colour.' },
   teethStainRemoval: { label: 'Teeth stains', knee: 0.8, cap: 100, note: 'Evens more stains toward the teeth\'s own colour.' },
@@ -87,6 +91,8 @@ export const DEFAULT_EFFECTS: Readonly<EffectControls> = Object.freeze(
 export const EFFECT_SOURCE: Readonly<Record<EffectId, readonly [keyof Adjustments] | readonly [keyof Adjustments, string]>> = Object.freeze({
   skinSmoothing: ['skinSmoothing'],
   blemishRemoval: ['blemishRemoval'],
+  acneRemoval: ['acneRemoval'],
+  darkSpotRemoval: ['darkSpotRemoval'],
   skinToneUnify: ['skinToneUnify'],
   darkCircles: ['darkCircles'],
   eyeBrighten: ['eyeBrighten'],
@@ -146,6 +152,9 @@ export function effectsAreDefault(e: EffectControls): boolean {
 export interface ResolvedAdjustments extends Adjustments {
   /** Spot detector reach: max(skin boost, spot healing multiplier) when spot healing is on. */
   spotMultiplier: EffectMultiplier;
+  /** Same for the acne and dark spot detectors. */
+  acneMultiplier: EffectMultiplier;
+  darkSpotMultiplier: EffectMultiplier;
 }
 
 /**
@@ -168,8 +177,13 @@ export function resolveAdjustments(adj: Adjustments): ResolvedAdjustments {
       holder[field] = effectiveStrength(holder[field], control, EFFECT_CURVES[id], global);
     }
   }
-  const spot = effects.blemishRemoval ?? DEFAULT_EFFECT_CONTROL;
-  out.spotMultiplier = Math.max(adj.skinMultiplier, spot.enabled ? spot.multiplier : 1) as EffectMultiplier;
+  const reach = (id: EffectId) => {
+    const c = effects[id] ?? DEFAULT_EFFECT_CONTROL;
+    return Math.max(adj.skinMultiplier, c.enabled ? c.multiplier : 1) as EffectMultiplier;
+  };
+  out.spotMultiplier = reach('blemishRemoval');
+  out.acneMultiplier = reach('acneRemoval');
+  out.darkSpotMultiplier = reach('darkSpotRemoval');
   out.effects = DEFAULT_EFFECTS;
   out.globalStrength = 100;
   return out;

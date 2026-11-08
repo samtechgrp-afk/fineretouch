@@ -49,6 +49,22 @@ portrait-retouching specification, and the Phase 2 deliverable (per-effect stren
 3. **Phase 4:** split the skin engine; dedicated dark-spot (pigmentation) and redness tools, noise reduction, under-eye texture.
 4. **Later phases:** brushes (heal, clone, dodge and burn), project files, presets per style, the NL plan engine, tiled rendering, optional DirectML after testing on the target hardware.
 
+## Part 1b: separate skin tools
+
+| Tool | Slider | Engine | What it touches |
+| :--- | :--- | :--- | :--- |
+| Skin smoothing | `skinSmoothing` | `natural_skin_retouch` (tone layer) | Blotches and roughness on the tone layer |
+| Texture preservation | `skinTexture` | same | Share of the pore layer put back |
+| Acne removal | `acneRemoval` | `remove_acne`: `detect_spots(kind="acne")` + `heal_spots` + `reduce_acne_redness` | Spots whose redness carries ≥35% of their contrast, raised bumps, then excess Cr in a halo around them |
+| Dark spot removal | `darkSpotRemoval` | `remove_dark_spots`: `detect_spots(kind="dark")` + `heal_spots` + `correct_pigmentation` | Dark, non-red marks; then patches darker **and** yellower (lower Cb) than the skin 2.5× wider; strong dark edges excluded so shading stays |
+| Blemish removal | `blemishRemoval` | `heal_spots` (all kinds) | Every spot type in one pass (the former Spot healing) |
+| Skin tone correction | `skinToneUnify` | chroma toward local skin average + tone guard | Uneven colour and redness |
+| Under-eye correction | `darkCircles` | under-eye landmark mask | Dark circles, lifted toward the cheek |
+
+Beauty marks stay protected in every spot tool. **Keep freckles** (`keepFreckles`) leaves dark spots smaller than 2% of the face width and fainter than 0.09 luma, and softens pigmentation correction to 60%. Each tool's multiplier also sets its own detector's reach. The WebGL preview approximates acne, dark spots and pigmentation with the same signals on its fixed bands. Export runs the full detectors.
+
+Tests: `services/ai/tests/test_skin_tools.py` checks that acne removal changes red spots more than 4× as much as dark ones (and the reverse for dark spot removal), that blemish removal heals both, that clear skin is unchanged, that freckles are kept, that a brown patch is evened while an equal neutral shadow is mostly kept, and the multiplier and switch.
+
 ## Part 2: the control system
 
 ### Data model
