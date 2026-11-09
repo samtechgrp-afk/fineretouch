@@ -89,7 +89,13 @@ export function ExportModal({ onClose }: { onClose(): void }) {
   /** Render one photo to an encoded blob, watermark included. */
   const renderOne = async (id: string, gpuCtx?: { renderer: Renderer; load(id: string): Promise<ImageBitmap> }): Promise<Blob> => {
     const p = useEditor.getState().photos[id];
-    if (engine === 'server') {
+    // Skin Perfection runs only in the local AI engine (full-resolution detection, correction
+    // and verification); the GPU chain has no equivalent, so those photos always go there.
+    const perfection = p.adjustments.skinPerfection.enabled;
+    if (perfection && engine === 'browser' && !aiOnline) {
+      throw new Error(`${p.name}: Skin Perfection needs the local AI engine, which is not running.`);
+    }
+    if (engine === 'server' || (perfection && engine === 'browser')) {
       // Lossless from the engine when stamping, so the file is encoded only once more.
       const fmt = wmOn ? 'png' : opts.format;
       const blob = await renderOnServer(getFile(id)!, p.adjustments, { format: fmt, quality: opts.quality, maxLongEdge: opts.maxLongEdge });
@@ -259,6 +265,11 @@ export function ExportModal({ onClose }: { onClose(): void }) {
                 disabled={{ server: !aiOnline, cloud: !cloud }}
               />
             </Field>
+            {engine === 'browser' && ids.some((id) => useEditor.getState().photos[id]?.adjustments.skinPerfection.enabled) && (
+              <p className="text-xs text-ink-400" data-testid="perfection-engine-note">
+                Photos with Skin Perfection on are rendered by the local AI engine (full-resolution detection and verification), the rest on the GPU.
+              </p>
+            )}
             {engine === 'browser' && ids.some(isRawPhoto) && (
               <p className="text-xs text-ink-400">
                 {desktop

@@ -18,6 +18,8 @@ function strokeSig(s: { mode: string; size: number; points: number[] } & Record<
 interface HealEntry {
   sigs: string[];
   pixels: Uint8ClampedArray;
+  /** The pixels the strokes were replayed on (a new base, such as a Skin Perfection result, starts over). */
+  base: Uint8ClampedArray;
 }
 const healed = new Map<string, HealEntry>();
 const basePixels = new Map<string, Uint8ClampedArray>();
@@ -46,16 +48,16 @@ export function healedPixels(key: string, base: Uint8ClampedArray, w: number, h:
   }
   const sigs = strokes.map((s) => strokeSig(s as never));
   const hit = healed.get(key);
-  if (hit && hit.sigs.length <= sigs.length && hit.sigs.every((v, i) => v === sigs[i])) {
+  if (hit && hit.base === base && hit.sigs.length <= sigs.length && hit.sigs.every((v, i) => v === sigs[i])) {
     if (hit.sigs.length === sigs.length) return hit.pixels;
     const px = new Uint8ClampedArray(hit.pixels);
     for (const s of strokes.slice(hit.sigs.length)) applyHealStroke(px, w, h, s);
-    healed.set(key, { sigs, pixels: px });
+    healed.set(key, { sigs, pixels: px, base });
     return px;
   }
   const px = new Uint8ClampedArray(base);
   for (const s of strokes) applyHealStroke(px, w, h, s);
-  healed.set(key, { sigs, pixels: px });
+  healed.set(key, { sigs, pixels: px, base });
   return px;
 }
 

@@ -11,6 +11,7 @@ import { BatchSyncPanel } from './panels/BatchSyncPanel';
 import { EffectControlsRow, EffectSwitch, GlobalStrength } from './panels/EffectControls';
 import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
 import { AssistantPanel } from './panels/AssistantPanel';
+import { SkinPerfectionPanel } from './panels/SkinPerfectionPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
 
@@ -38,6 +39,10 @@ export function AdjustmentPanel() {
       <Section title="Retouch strength" open={open.strength ?? true} onToggle={() => setOpen((o) => ({ ...o, strength: !(o.strength ?? true) }))}
         note={photo.restored ? 'Edits restored from your last session.' : undefined}>
         <GlobalStrength adj={photo.adjustments} />
+      </Section>
+      <Section title="Skin Perfection Studio" open={open.perfection ?? true} onToggle={() => setOpen((o) => ({ ...o, perfection: !(o.perfection ?? true) }))}
+        note={photo.adjustments.skinPerfection.enabled ? 'Full-resolution blemish engine (AI engine)' : undefined}>
+        <SkinPerfectionPanel photo={photo} />
       </Section>
       <Section title="Retouch assistant" open={open.assistant ?? true} onToggle={() => setOpen((o) => ({ ...o, assistant: !(o.assistant ?? true) }))}
         note="Runs on this computer: nothing is uploaded">

@@ -79,11 +79,14 @@ export function skinMaskIsDefault(m: SkinMaskSettings): boolean {
  * (healing, clone and local retouch layers, localRetouch.ts) are all pixel-specific, so the
  * target keeps its own localRetouch whole.
  */
-export function withOwnStrokes<T extends { skinMask: SkinMaskSettings; localRetouch?: unknown }>(
-  next: T,
-  target: { skinMask: SkinMaskSettings; localRetouch?: unknown },
-): T {
+export function withOwnStrokes<
+  T extends { skinMask: SkinMaskSettings; localRetouch?: unknown; skinPerfection?: { overrides: unknown[] } },
+>(next: T, target: { skinMask: SkinMaskSettings; localRetouch?: unknown; skinPerfection?: { overrides: unknown[] } }): T {
   const out = { ...next, skinMask: { ...next.skinMask, strokes: target.skinMask.strokes } };
   if (target.localRetouch !== undefined) out.localRetouch = target.localRetouch as T['localRetouch'];
+  // Skin Perfection "ignore" / "correct" decisions point at marks on this photo's pixels.
+  if (next.skinPerfection && target.skinPerfection) {
+    out.skinPerfection = { ...next.skinPerfection, overrides: target.skinPerfection.overrides } as T['skinPerfection'];
+  }
   return out;
 }

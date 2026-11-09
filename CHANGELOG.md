@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.13.0 (unreleased): Skin Perfection Studio
+
+- **New full-resolution blemish engine** (`services/ai/app/engines/perfection.py`). It replaces the detection behind spot healing for photos that use it, and fixes why small marks were left behind:
+  - It works at a 1100 px face width or more, in overlapping tiles. The old detector worked at 420 px, with a median blur that erased blackheads.
+  - Detection runs at 8 scales with a per-scale robust threshold, so dense acne no longer hides itself.
+  - Marks are classified into 8 repairable kinds plus protected freckles, moles, birthmarks and follicles. Shine is rejected.
+  - Each mark gets a targeted heal or pigment correction with donor skin texture and pores restored.
+- **Verified, not assumed.** After each pass every mark is measured again. A mark counts as corrected only when its contrast fell below 40%, and a residual scan looks for anything left. Each mark gets at most 2 attempts and there are at most 4 passes.
+- **Face and body.** Neck, chest, shoulders, arms, hands, back and legs are covered, with clothing, hair and background excluded. The skin-mask brush adds or removes areas. Pixels outside skin are copied back unchanged.
+- **Skin Perfection Studio panel.** The panel has:
+  - acne, blackhead, dark spot and small blemish sliders
+  - body blemish correction
+  - texture preservation, pore preservation and residual scan
+  - 1× Natural, 2× Strong and 3× Maximum chips, plus overall strength
+  - advanced settings: radius, edge protection, confidence threshold, passes, preserve freckles/moles/birthmarks, and sensitivity and strength for each of 13 categories
+  Every control is an engine input, and a test checks that each one changes the result.
+- **Final quality check.** Detected, Corrected and Needs-review counts come from the engine's report. A colour-coded overlay shows each mark. Click or Shift-click marks to **correct** or **ignore** them. **Correct all remaining** and **Run another pass** are also available. Every action is undoable, and earlier results come back instantly from the cache.
+- **Export.** Photos using Skin Perfection always render in the AI engine at full resolution. The GPU export path only approximated spot healing, and it was the default on integrated GPUs.
+- **Benchmark.** `python -m scripts.perfection_benchmark --old` scores 10 synthetic scenes (tones I–VI, normal and dense acne). Precision 0.97, recall 0.95, removal 0.94. The old tools at 2× removed 0.52. Details and limits are in `docs/SKIN_PERFECTION.md`.
+- No new dependencies or models.
+
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)
 
 - **High-resolution GPU export in tiles.** Photos larger than the GPU's texture limit or the chosen GPU memory budget (Low 512 MB / Balanced 1.5 GB / High 3 GB) render in overlapping tiles instead of being scaled down.
