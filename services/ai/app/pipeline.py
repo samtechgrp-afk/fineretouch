@@ -328,8 +328,13 @@ def render(
     h, w = src.shape[:2]
     L = float(max(h, w))
     low0 = blur(src, S0 * L)
-    low1 = blur(src, S1 * L)
-    low2 = blur(src, S2 * L)
+    # The coarser bands are only built when a stage reads them (each is a full float copy).
+    bands: dict[float, np.ndarray] = {}
+
+    def band(sigma_share: float) -> np.ndarray:
+        if sigma_share not in bands:
+            bands[sigma_share] = blur(src, sigma_share * L)
+        return bands[sigma_share]
     sm = adj.skinMask
     masks = build_masks(faces, h, w, parse if sm.useSegmentation else None, sm.includeBodySkin)
 
@@ -374,7 +379,7 @@ def render(
             c[y0:y1, x0:x1] = _skin_stages(
                 c[y0:y1, x0:x1], src[y0:y1, x0:x1], skin_w[y0:y1, x0:x1], local, adj,
                 sigma_tone, sigma_base,
-                (low1[y0:y1, x0:x1], low2[y0:y1, x0:x1]) if same_bands else None,
+                (band(S1)[y0:y1, x0:x1], band(S2)[y0:y1, x0:x1]) if same_bands else None,
                 spot_multiplier, tool_multipliers,
             )
     if adj.strayHairRemoval.enabled and adj.strayHairRemoval.strength > 0 and faces:
@@ -402,6 +407,7 @@ def render(
             d = (adj.darkCircles / 100.0) * masks.under_eye
             y = luma(c)
             cb, cr = cbcr(c)
+            low2 = band(S2)
             cb2, cr2 = cbcr(low2)
             y = y + np.maximum(0.0, luma(low2) * 1.06 - y) * d
             c = from_ycbcr(y, cb + (cb2 - cb) * 0.5 * d, cr + (cr2 - cr) * 0.5 * d)
@@ -418,9 +424,47 @@ def render(
 
     c = np.clip(c, 0.0, 1.0)
 
-    # 7. Colour match.
+    bands.clear()
+    # 7-9 are per-pixel, so they run in horizontal strips (v0.12): the temporaries of the tone,
+    # colour and LUT maths then cost a strip's worth of memory instead of several full-frame
+    # float copies, with the same result.
+    stats = None
     if adj.colorMatch is not None and adj.colorMatch.amount > 0:
         stats = source_stats or color_stats(src)
+    lut = decode_lut(adj.lut.data, adj.lut.size) if adj.lut is not None and adj.lut.amount > 0 else None
+    for y0 in range(0, h, STRIP_ROWS):
+        y1 = min(h, y0 + STRIP_ROWS)
+        c[y0:y1] = _finish_strip(c[y0:y1], src[y0:y1], low0[y0:y1], skin[y0:y1], y0, h, w, adj, smooth, stats, lut)
+
+    # 10. Local retouch layers (v0.10): frequency separation, dodge & burn and correction
+    #     brushes, each through its own mask (applied before the lens blur, as in the preview).
+    if adj.localRetouch.layers:
+        c = apply_local_layers(np.clip(c, 0.0, 1.0).astype(np.float32), adj.localRetouch, skin_w)
+
+    # 9. Depth-of-field.
+    b = adj.depthBokeh
+    if b.enabled and depth is not None and b.blurRadius > 0:
+        c = apply_depth_bokeh(
+            np.clip(c, 0.0, 1.0).astype(np.float32), depth, b.bokehMultiplier / 100.0, b.blurRadius,
+            b.apertureShape, b.highlightBoost,
+        )
+
+    return (np.clip(c, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+
+
+STRIP_ROWS = 256
+
+
+def _finish_strip(
+    c: np.ndarray, src: np.ndarray, low0: np.ndarray, skin: np.ndarray, y0: int, h: int, w: int,
+    adj: Adjustments, smooth: float, stats: ColorStats | None, lut: np.ndarray | None,
+) -> np.ndarray:
+    """Stages 7-9 (colour match, global tone, colour engine, LUT, sharpening, vignette) on rows
+    y0.. of the frame. Every operation is per pixel, so strips give the full-frame result."""
+    c = np.clip(c, 0.0, 1.0)
+
+    # 7. Colour match.
+    if stats is not None:
         c = transfer_lab(c, stats, adj.colorMatch.reference, adj.colorMatch.amount / 100.0)
 
     # 8. Global tone. Exposure and white balance in linear light.
@@ -443,33 +487,19 @@ def render(
     # 8b. HSL colour mixer and 3-way colour grading (app/color_engine.py).
     c = apply_color_engine(np.clip(c, 0.0, 1.0).astype(np.float32), adj.hsl, adj.colorGrading)
     # 8c. Look LUT (a reference grade fitted by batch_engine.fit_lut, or an imported .cube).
-    if adj.lut is not None and adj.lut.amount > 0:
-        c = apply_lut(c, decode_lut(adj.lut.data, adj.lut.size), adj.lut.amount / 100.0)
+    if lut is not None:
+        c = apply_lut(c, lut, adj.lut.amount / 100.0)
 
     if adj.sharpen > 0:
         c = c + (adj.sharpen / 100.0) * 1.2 * (src - low0) * (1.0 - 0.8 * skin * smooth)
 
     if adj.vignette != 0:
-        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        yy, xx = np.mgrid[y0:y0 + c.shape[0], 0:w].astype(np.float32)
         dx = (xx + 0.5) / w - 0.5
         dy = (yy + 0.5) / h - 0.5
         d = np.sqrt(dx * dx + dy * dy) / np.sqrt(0.5)
         c = c * (1.0 + (adj.vignette / 100.0) * 0.6 * smoothstep(0.35, 1.0, d))[..., None]
-
-    # 10. Local retouch layers (v0.10): frequency separation, dodge & burn and correction
-    #     brushes, each through its own mask (applied before the lens blur, as in the preview).
-    if adj.localRetouch.layers:
-        c = apply_local_layers(np.clip(c, 0.0, 1.0).astype(np.float32), adj.localRetouch, skin_w)
-
-    # 9. Depth-of-field.
-    b = adj.depthBokeh
-    if b.enabled and depth is not None and b.blurRadius > 0:
-        c = apply_depth_bokeh(
-            np.clip(c, 0.0, 1.0).astype(np.float32), depth, b.bokehMultiplier / 100.0, b.blurRadius,
-            b.apertureShape, b.highlightBoost,
-        )
-
-    return (np.clip(c, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8)
+    return c
 
 
 def sharpness(rgb8: np.ndarray) -> float:

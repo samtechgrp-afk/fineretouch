@@ -5,7 +5,9 @@ import * as Switch from '@radix-ui/react-switch';
 import { useEffect, useRef, useState } from 'react';
 import { pool, renderOnServer } from '@/lib/ai';
 import { cloudAvailable, runCloudBatch } from '@/lib/cloud';
-import { MIME, downloadBlob, exportName, renderFullRes, zipBlobs, type ExportOptions } from '@/lib/export';
+import { GPU_BUDGETS, MIME, downloadBlob, exportName, renderFullRes, zipBlobs, type ExportOptions, type ExportPlan, type GpuBudget } from '@/lib/export';
+import { Renderer } from '@/engine/renderer';
+import { detectGpu, loadProcessingPrefs, resolveEngine, saveProcessingPrefs, type EnginePref, type ProcessingPrefs } from '@/lib/processing';
 import {
   ExportWriter,
   activeExportFolder,
@@ -44,7 +46,14 @@ export function ExportModal({ onClose }: { onClose(): void }) {
   const aiOnline = useEditor((s) => s.aiOnline);
   const activePhoto = useEditor((s) => (s.activeId ? s.photos[s.activeId] : null));
   const [scope, setScope] = useState<Scope>(state.selected.length > 1 ? 'selected' : 'all');
-  const [engine, setEngine] = useState<Engine>('browser');
+  const [proc, setProc] = useState<ProcessingPrefs>(loadProcessingPrefs);
+  const gpu = detectGpu();
+  const auto = resolveEngine(proc.engine, gpu, Boolean(aiOnline));
+  const [manualEngine, setEngine] = useState<Engine | null>(null);
+  // The default comes from Processing (Auto picks CPU on a software-only GPU); a choice made
+  // in this dialog applies to this export only.
+  const engine: Engine = manualEngine ?? auto.engine;
+  const [tileNote, setTileNote] = useState<string | null>(null);
   const [prefs, setPrefs] = useState<ExportPrefs>(loadExportPrefs);
   const [cloud, setCloud] = useState(false);
   const [status, setStatus] = useState<{ label: string; done: number; total: number } | null>(null);
@@ -62,6 +71,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
     return () => abortRef.current?.abort();
   }, []);
   useEffect(() => saveExportPrefs(prefs), [prefs]);
+  useEffect(() => saveProcessingPrefs(proc), [proc]);
 
   const patch = (p: Partial<ExportPrefs>) => setPrefs((cur) => ({ ...cur, ...p }));
   const patchWm = (p: Partial<WatermarkSettings>) => setPrefs((cur) => ({ ...cur, watermark: { ...cur.watermark, ...p } }));
@@ -77,7 +87,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
   })();
 
   /** Render one photo to an encoded blob, watermark included. */
-  const renderOne = async (id: string): Promise<Blob> => {
+  const renderOne = async (id: string, gpuCtx?: { renderer: Renderer; load(id: string): Promise<ImageBitmap> }): Promise<Blob> => {
     const p = useEditor.getState().photos[id];
     if (engine === 'server') {
       // Lossless from the engine when stamping, so the file is encoded only once more.
@@ -85,13 +95,50 @@ export function ExportModal({ onClose }: { onClose(): void }) {
       const blob = await renderOnServer(getFile(id)!, p.adjustments, { format: fmt, quality: opts.quality, maxLongEdge: opts.maxLongEdge });
       return wmOn ? stampBlob(blob, prefs.watermark, MIME[opts.format], opts.quality) : blob;
     }
-    return renderFullRes(() => decodeOriginal(id), p.adjustments, { id, analysis: p.analysis, sourceStats: p.analysis?.colorStats ?? p.localStats }, opts);
+    const onPlan = (plan: ExportPlan) => {
+      if (plan.scaled) setTileNote(`Scaled to ${plan.width} x ${plan.height}: the GPU cannot render this photo larger. Choose the CPU engine for the full size.`);
+      else if (plan.tiles.length > 1) setTileNote(`Large photo rendered in ${plan.tiles.length} tiles (${plan.width} x ${plan.height}).`);
+    };
+    return renderFullRes(
+      () => (gpuCtx ? gpuCtx.load(id) : decodeOriginal(id)),
+      p.adjustments,
+      { id, analysis: p.analysis, sourceStats: p.analysis?.colorStats ?? p.localStats },
+      opts,
+      { renderer: gpuCtx?.renderer, gpuBudgetMb: GPU_BUDGETS[proc.gpuBudget], onPlan },
+    );
+  };
+
+  /**
+   * GPU batch context: one WebGL context for the whole export (shaders compile once), and the
+   * next photo decodes while this one renders.
+   */
+  const gpuBatch = (list: string[]) => {
+    const renderer = new Renderer(new OffscreenCanvas(1, 1));
+    const pending = new Map<string, Promise<ImageBitmap>>();
+    const load = (id: string) => {
+      const p = pending.get(id) ?? decodeOriginal(id);
+      pending.delete(id);
+      const next = list[list.indexOf(id) + 1];
+      if (next && !pending.has(next)) {
+        const pre = decodeOriginal(next);
+        pre.catch(() => undefined);
+        pending.set(next, pre);
+      }
+      return p;
+    };
+    const dispose = () => {
+      for (const p of pending.values()) void p.then((b) => b.close(), () => undefined);
+      renderer.dispose(true);
+    };
+    return { renderer, load, dispose };
   };
 
   const run = async () => {
     setError(null);
     setResult(null);
     setSavedTo(null);
+    setTileNote(null);
+    const gpuCtx = engine === 'browser' ? gpuBatch(ids) : undefined;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const photos = useEditor.getState().photos;
@@ -125,7 +172,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
         // The GPU path is serial (one big texture set at a time); the engine path runs a few in parallel.
         await pool(ids, engine === 'server' ? 3 : 1, async (id) => {
           if (ctrl.signal.aborted) return;
-          await writer.write({ name: names.get(id)!, blob: await renderOne(id) });
+          await writer.write({ name: names.get(id)!, blob: await renderOne(id, gpuCtx) });
           setStatus({ label: 'Rendering and saving', done: ++done, total: ids.length });
         });
         const where = chosen.target.kind === 'file' ? chosen.target.path : chosen.target.folder;
@@ -141,7 +188,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
       setStatus({ label: 'Rendering full resolution', done: 0, total: ids.length });
       await pool(ids, engine === 'server' ? 3 : 1, async (id) => {
         if (ctrl.signal.aborted) return;
-        out.push({ name: names.get(id)!, blob: await renderOne(id) });
+        out.push({ name: names.get(id)!, blob: await renderOne(id, gpuCtx) });
         setStatus({ label: 'Rendering full resolution', done: ++done, total: ids.length });
       });
       if (ctrl.signal.aborted) return;
@@ -154,6 +201,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
     } catch (e) {
       if ((e as Error).name !== 'AbortError') setError(String((e as Error)?.message ?? e));
     } finally {
+      gpuCtx?.dispose();
       setStatus(null);
       abortRef.current = null;
     }
@@ -217,6 +265,38 @@ export function ExportModal({ onClose }: { onClose(): void }) {
                   ? 'RAW files export from the camera’s embedded JPEG with the GPU engine. Choose the local AI engine to develop them from the full 16-bit sensor data.'
                   : 'RAW files export from the camera’s embedded JPEG on this device. Choose the AI service or Cloud batch to develop them from the full 16-bit sensor data.'}
               </p>
+            )}
+            <Field label="Default engine">
+              <div className="space-y-1.5">
+                <Seg<EnginePref>
+                  value={proc.engine}
+                  onChange={(v) => {
+                    setProc((c) => ({ ...c, engine: v }));
+                    setEngine(null);
+                  }}
+                  options={[
+                    ['auto', 'Auto'],
+                    ['gpu', 'GPU'],
+                    ['cpu', 'CPU engine'],
+                  ]}
+                />
+                <p className="text-[11px] text-ink-500" data-testid="engine-reason">
+                  {proc.engine === 'auto' ? `Auto: ${auto.reason}` : auto.reason} {gpu.available ? `Max texture ${gpu.maxTexture} px.` : ''}
+                </p>
+              </div>
+            </Field>
+            {engine === 'browser' && (
+              <Field label="GPU memory">
+                <Seg<GpuBudget>
+                  value={proc.gpuBudget}
+                  onChange={(v) => setProc((c) => ({ ...c, gpuBudget: v }))}
+                  options={[
+                    ['low', `Low (${GPU_BUDGETS.low} MB)`],
+                    ['balanced', `Balanced (${GPU_BUDGETS.balanced / 1024} GB)`],
+                    ['high', `High (${GPU_BUDGETS.high / 1024} GB)`],
+                  ]}
+                />
+              </Field>
             )}
             {engine !== 'browser' && (
               <p className="text-xs text-ink-400">Spot healing, stray hair and bokeh run at full strength on the {desktop ? 'local AI engine' : 'AI service'}; the GPU engine uses the faster preview versions.</p>
@@ -288,6 +368,7 @@ export function ExportModal({ onClose }: { onClose(): void }) {
             </div>
           )}
           {result && <p className="break-all text-xs text-mint-400">{result}</p>}
+          {tileNote && <p className="text-xs text-ink-400" data-testid="tile-note">{tileNote}</p>}
           {links.length > 0 && (
             <ul className="max-h-32 space-y-0.5 overflow-y-auto text-xs">
               {links.map((l) => (

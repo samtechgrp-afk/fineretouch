@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.12.0 (unreleased): rendering and performance (Phase 7)
+
+- **High-resolution GPU export in tiles.** Photos larger than the GPU's texture limit or the chosen GPU memory budget (Low 512 MB / Balanced 1.5 GB / High 3 GB) render in overlapping tiles instead of being scaled down.
+  - Each tile's margin covers the widest blur, frequency-separation and bokeh reach.
+  - Measured against a single pass: within 1/255. With background bokeh, mean 0.09/255. No seams.
+- **Preview caching.** The renderer's four stages (retouch, studio, layers, bokeh) re-run only when their own inputs change.
+  - Pan and zoom no longer re-render. A bokeh change re-runs only bokeh.
+  - The viewport shows "cached" or "n/4 stages".
+- **CPU/GPU selection.** A saved default engine (Auto / GPU / CPU engine) with GPU detection. Auto picks the CPU engine when only a software GPU is available, and the dialog says why.
+- **Memory management.**
+  - The editor keeps decoded previews for the 12 most recent photos and decodes others again when opened.
+  - The engine admits full-resolution renders against a RAM budget (60% of memory or `FINERETOUCH_RENDER_MEMORY_MB`), so parallel exports can't push a 16 GB laptop into swap. `/health` reports the budget.
+- **Faster, leaner CPU engine.** The per-pixel stages run in 256-row strips, and coarse blur bands are built only when used.
+  - 20 MP plain render: 15 s / 3.0 GB → 7.5 s / 1.8 GB.
+  - 20 MP with skin tools: peak 3.6 GB → 2.7 GB.
+- **Export optimisation.** One WebGL context for a whole GPU export, and the next photo decodes while the current one renders.
+- Details, measurements and status: `docs/PERFORMANCE.md`.
+
 ## v0.11.0 (unreleased): retouch assistant (Phase 6)
 
 - **Retouch assistant** panel: every suggestion is an **edit plan**. The plan lists each change with its value and the reason for it. You can untick a step, change any value, and scale everything with plan strength. The plan is previewed live and applied only when you **approve**, as one undo step. **Reject** discards it.

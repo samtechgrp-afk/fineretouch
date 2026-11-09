@@ -49,6 +49,16 @@ export interface DisplayView {
   background: [number, number, number];
 }
 
+/** Where a tile sits in the whole photo (tiled export, v0.12). */
+export interface TileFrame {
+  /** Tile origin in whole-photo pixels. */
+  x: number;
+  y: number;
+  /** Whole-photo size in pixels. */
+  fullW: number;
+  fullH: number;
+}
+
 export interface RenderInfo {
   hasFace: boolean;
   /** L*a*b* stats of the unedited image; needed for colour matching. */
@@ -64,6 +74,17 @@ export interface RenderInfo {
  */
 export class Renderer {
   readonly gl: GL;
+  /** The whole photo this source belongs to (itself unless it is an export tile). */
+  private frame: TileFrame = { x: 0, y: 0, fullW: 1, fullH: 1 };
+  /**
+   * Bumped when a stage's input textures change (source and masks: retouch; lens and garment
+   * masks: studio; layer masks: local; depth: bokeh). Invalidates that stage and the ones after it.
+   */
+  private versions = { retouch: 0, studio: 0, local: 0, bokeh: 0 };
+  /** Stage cache keys of the last render (v0.12 preview caching). */
+  private stageKeys = { retouch: '', studio: '', local: '', bokeh: '' };
+  /** Stages the last render() actually ran (for the viewport's timing readout and tests). */
+  lastStages: Array<'retouch' | 'studio' | 'local' | 'bokeh'> = [];
   private blurProg: WebGLProgram;
   private retouchProg: WebGLProgram;
   private displayProg: WebGLProgram;
@@ -91,6 +112,8 @@ export class Renderer {
   private overlayTarget: Target | null = null;
   /** Retouch output after the studio pass: what bokeh and export read. */
   private base: Target | null = null;
+  /** Output of the local layers (the base when there are none); bokeh input. */
+  private local: Target | null = null;
   private hairRoi: WebGLTexture | null = null;
   private depth: WebGLTexture | null = null;
   /** Bokeh working targets at reduced size: [downsampled, pass 1, pass 2]. */
@@ -140,6 +163,23 @@ export class Renderer {
     gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
   }
 
+  /**
+   * Long edge of the whole photo: every radius that scales with the photo (blur bands,
+   * frequency separation, bokeh) uses it, so an export tile gets the same radii as the whole.
+   */
+  get longEdge(): number {
+    return Math.max(this.frame.fullW, this.frame.fullH);
+  }
+
+  /** useProgram plus the tile frame uniform (programs without it ignore it). */
+  private use(p: WebGLProgram): void {
+    const gl = this.gl;
+    gl.useProgram(p);
+    const f = this.frame;
+    const loc = this.loc(p, 'uFrame');
+    if (loc) gl.uniform4f(loc, f.x / f.fullW, f.y / f.fullH, this.width / f.fullW, this.height / f.fullH);
+  }
+
   get maxTextureSize(): number {
     return this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE) as number;
   }
@@ -149,11 +189,11 @@ export class Renderer {
   }
 
   /** Upload a new photo and precompute its four Gaussian bands. */
-  setSource(image: TexSource, width: number, height: number): void {
-    const gl = this.gl;
+  setSource(image: TexSource, width: number, height: number, frame?: TileFrame): void {
     this.disposeImageResources();
     this.width = width;
     this.height = height;
+    this.frame = frame ?? { x: 0, y: 0, fullW: width, fullH: height };
     this.src = this.orig = this.texture(width, height, image);
     this.tmp = this.target(width, height);
     this.bands = [0, 1, 2, 3].map(() => this.target(width, height));
@@ -161,7 +201,7 @@ export class Renderer {
     this.final = this.target(width, height);
     this.studio = this.target(width, height);
     this.overlayTarget = null;
-    this.shown = this.base = this.out;
+    this.shown = this.base = this.local = this.out;
     this.setMask(null);
     this.setEdit(null);
     this.setHairRoi(null);
@@ -169,6 +209,7 @@ export class Renderer {
     this.setLensRoi(null);
     this.setSegmentation(null);
     this.computeBands();
+    this.versions.retouch++;
   }
 
   /**
@@ -178,6 +219,7 @@ export class Renderer {
   setHealedSource(pixels: Uint8Array | Uint8ClampedArray | null): void {
     if (!this.orig) return;
     if (this.src && this.src !== this.orig) this.gl.deleteTexture(this.src);
+    this.versions.retouch++;
     this.src = pixels ? this.texture(this.width, this.height, null, new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength)) : this.orig;
     this.computeBands();
   }
@@ -185,9 +227,9 @@ export class Renderer {
   private computeBands(): void {
     const gl = this.gl;
     const { width, height } = this;
-    const L = Math.max(width, height);
+    const L = this.longEdge;
     const sigmas = [BLUR_SIGMAS.s0, BLUR_SIGMAS.s1, BLUR_SIGMAS.s2, BLUR_SIGMAS.s3].map((s) => Math.max(s * L, 0.6));
-    gl.useProgram(this.blurProg);
+    this.use(this.blurProg);
     gl.viewport(0, 0, width, height);
     sigmas.forEach((sigma, i) => {
       this.blurPass(this.src!, this.tmp!, [1 / width, 0], sigma);
@@ -201,12 +243,14 @@ export class Renderer {
     if (hit?.data === data) return;
     if (hit) this.gl.deleteTexture(hit.tex);
     this.layerTex.set(id, { tex: this.texture(width, height, null, data), data });
+    this.versions.local++;
   }
 
   /** Drop the masks of layers that are gone or inactive. */
   pruneLayerMasks(keep: Set<string>): void {
     for (const [id, t] of this.layerTex) {
       if (!keep.has(id)) {
+        this.versions.local++;
         this.gl.deleteTexture(t.tex);
         this.layerTex.delete(id);
       }
@@ -219,24 +263,28 @@ export class Renderer {
    */
   setMask(data: Uint8Array | null, width = 1, height = 1): void {
     const gl = this.gl;
+    this.versions.retouch++;
     if (this.mask) gl.deleteTexture(this.mask);
     this.mask = data ? this.texture(width, height, null, data) : this.texture(1, 1, null, new Uint8Array(4));
   }
 
   /** User mask strokes as RGBA (r = add, g = erase), sampled by UV; null when there are none. */
   setEdit(data: Uint8Array | null, width = 1, height = 1): void {
+    this.versions.retouch++;
     if (this.edit) this.gl.deleteTexture(this.edit);
     this.edit = data ? this.texture(width, height, null, data) : null;
   }
 
   /** Single-channel (0..255) stray-hair region, or null to disable the hair pass. */
   setHairRoi(data: Uint8Array | null, width = 1, height = 1): void {
+    this.versions.retouch++;
     if (this.hairRoi) this.gl.deleteTexture(this.hairRoi);
     this.hairRoi = data ? this.texture(width, height, null, expandGrey(data)) : null;
   }
 
   /** Depth map (0 = subject, 255 = far): a decoded image (red channel used) or single-channel bytes. */
   setDepth(source: TexSource | Uint8Array | null, width = 1, height = 1): void {
+    this.versions.bokeh++;
     if (this.depth) this.gl.deleteTexture(this.depth);
     if (!source) this.depth = null;
     else if (source instanceof Uint8Array) this.depth = this.texture(width, height, null, expandGrey(source));
@@ -245,12 +293,14 @@ export class Renderer {
 
   /** Single-channel (0..255) eyeglass lens region, or null (glare reduction off). */
   setLensRoi(data: Uint8Array | null, width = 1, height = 1): void {
+    this.versions.studio++;
     if (this.lens) this.gl.deleteTexture(this.lens);
     this.lens = data ? this.texture(width, height, null, expandGrey(data)) : null;
   }
 
   /** Segmentation from the engine (PNG: r clothes, g hair, b person), or null. */
   setSegmentation(source: TexSource | null, width = 1, height = 1): void {
+    this.versions.studio++;
     if (this.seg) this.gl.deleteTexture(this.seg);
     this.seg = source ? this.texture(width, height, source) : null;
   }
@@ -301,9 +351,41 @@ export class Renderer {
     // Per-effect enable / 1x-2x-3x / opacity and global strength -> effective engine values
     // (same function as services/ai/app/effects.py, so preview and export agree).
     const adj = resolveAdjustments(edit);
+    // Preview caching (v0.12): each stage re-runs only when its own settings or anything
+    // before it changed. Panning, zooming or a bokeh / layer change reuse the earlier stages.
+    const k = stageKeys(adj, info, this.versions);
+    this.lastStages = [];
+    if (k.retouch !== this.stageKeys.retouch) {
+      this.retouchPass(adj, info);
+      this.lastStages.push('retouch');
+    }
+    if (k.studio !== this.stageKeys.studio) {
+      this.base = this.studioPass(adj, info.hasFace) ? this.studio! : this.out;
+      this.lastStages.push('studio');
+    }
+    if (k.local !== this.stageKeys.local) {
+      this.local = this.localPass(adj, this.base!);
+      this.lastStages.push('local');
+    }
+    if (k.bokeh !== this.stageKeys.bokeh) {
+      const b = adj.depthBokeh;
+      const maxCoc = (b.blurRadius / 100) * BOKEH_RADIUS_SHARE * this.longEdge * (b.bokehMultiplier / 100);
+      this.shown = b.enabled && this.depth && maxCoc >= 0.75 ? this.bokeh(maxCoc, b.apertureShape, b.highlightBoost / 100, this.local!) : this.local;
+      this.lastStages.push('bokeh');
+    }
+    this.stageKeys = k;
+  }
+
+  /** Forget the stage cache (the next render runs every stage). */
+  invalidate(): void {
+    this.versions.retouch++;
+  }
+
+  private retouchPass(adj: ReturnType<typeof resolveAdjustments>, info: RenderInfo): void {
+    if (!this.src || !this.out) return;
     const gl = this.gl;
     const p = this.retouchProg;
-    gl.useProgram(p);
+    this.use(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.out.fbo);
     gl.viewport(0, 0, this.width, this.height);
     this.bindTex(p, 'uSrc', this.src, 0);
@@ -378,12 +460,6 @@ export class Renderer {
       }
     }
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-    this.base = this.studioPass(adj, info.hasFace) ? this.studio! : this.out;
-    this.base = this.localPass(adj, this.base);
-    const b = adj.depthBokeh;
-    const maxCoc = (b.blurRadius / 100) * BOKEH_RADIUS_SHARE * Math.max(this.width, this.height) * (b.bokehMultiplier / 100);
-    this.shown = b.enabled && this.depth && maxCoc >= 0.75 ? this.bokeh(maxCoc, b.apertureShape, b.highlightBoost / 100) : this.base;
   }
 
   /** Glasses glare, clothing iron / recolour and the look LUT. Returns false when nothing is on. */
@@ -396,7 +472,7 @@ export class Renderer {
     const lut = adj.lut !== null && adj.lut.amount > 0 && this.ensureLut(adj.lut);
     if (!glare && !iron && !recolour && !lut) return false;
     const p = this.studioProg;
-    gl.useProgram(p);
+    this.use(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.studio!.fbo);
     gl.viewport(0, 0, this.width, this.height);
     this.bindTex(p, 'uImg', this.out!.tex, 0);
@@ -441,8 +517,8 @@ export class Renderer {
       const fs = !dodgeBurn && (l.toneSmoothing > 0 || l.texture !== 100);
       const corr = !dodgeBurn && (l.exposure !== 0 || l.contrast !== 0 || l.saturation !== 0 || l.temperature !== 0 || l.tint !== 0);
       if (fs) {
-        const sigma = splitSigma(l.splitRadius, Math.max(width, height));
-        gl.useProgram(this.blurProg);
+        const sigma = splitSigma(l.splitRadius, this.longEdge);
+        this.use(this.blurProg);
         gl.viewport(0, 0, width, height);
         this.blurPass(cur.tex, this.tmp!, [1 / width, 0], sigma);
         this.blurPass(this.tmp!.tex, lowA, [0, 1 / height], sigma);
@@ -451,7 +527,7 @@ export class Renderer {
       }
       const out = cur === a ? b : a;
       const p = this.localProg;
-      gl.useProgram(p);
+      this.use(p);
       gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
       gl.viewport(0, 0, width, height);
       this.bindTex(p, 'uImg', cur.tex, 0);
@@ -486,11 +562,11 @@ export class Renderer {
     const gl = this.gl;
     this.overlayTarget ??= this.target(this.width, this.height);
     const p = this.overlayProg;
-    gl.useProgram(p);
+    this.use(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.overlayTarget.fbo);
     gl.viewport(0, 0, this.width, this.height);
     this.bindTex(p, 'uSrc', this.src, 0);
-    this.bindTex(p, 'uEdited', (this.base ?? this.out)!.tex, 1);
+    this.bindTex(p, 'uEdited', (this.local ?? this.base ?? this.out)!.tex, 1);
     this.bindTex(p, 'uLow1', this.bands[1].tex, 2);
     this.bindTex(p, 'uLow3', this.bands[3].tex, 3);
     this.bindTex(p, 'uLens', this.lens ?? this.mask!, 4);
@@ -498,14 +574,14 @@ export class Renderer {
     this.bindTex(p, 'uMask', this.mask!, 6);
     gl.uniform1i(this.loc(p, 'uMode'), OVERLAY_MODES[mode]);
     gl.uniform1f(this.loc(p, 'uGlareStrength'), glareStrength);
-    const ring = Math.max(1.5, BLUR_SIGMAS.s0 * Math.max(this.width, this.height));
+    const ring = Math.max(1.5, BLUR_SIGMAS.s0 * this.longEdge);
     gl.uniform2f(this.loc(p, 'uRing'), ring / this.width, ring / this.height);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     return this.overlayTarget.tex;
   }
 
   /** Downsample, two gather passes, composite. Returns the target holding the result. */
-  private bokeh(maxCoc: number, shape: 'circle' | 'hex', gain: number): Target {
+  private bokeh(maxCoc: number, shape: 'circle' | 'hex', gain: number, input: Target): Target {
     const gl = this.gl;
     const s = Math.min(1, BOKEH_MAX_WORKING_COC / maxCoc);
     const bw = Math.max(1, Math.round(this.width * s));
@@ -518,14 +594,14 @@ export class Renderer {
     const [small, a, bt] = this.bokehTargets;
     gl.viewport(0, 0, bw, bh);
 
-    gl.useProgram(this.downProg);
+    this.use(this.downProg);
     gl.bindFramebuffer(gl.FRAMEBUFFER, small.fbo);
-    this.bindTex(this.downProg, 'uTex', this.base!.tex, 0);
+    this.bindTex(this.downProg, 'uTex', input.tex, 0);
     gl.uniform2f(this.loc(this.downProg, 'uFootprint'), 1 / bw, 1 / bh);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     const p = this.bokehProg;
-    gl.useProgram(p);
+    this.use(p);
     this.bindTex(p, 'uDepth', this.depth!, 1);
     gl.uniform2f(this.loc(p, 'uTexel'), 1 / bw, 1 / bh);
     gl.uniform1f(this.loc(p, 'uMaxCoc'), maxCoc * s);
@@ -541,10 +617,10 @@ export class Renderer {
     pass(a, bt, 0.45, 0);
 
     const c = this.compositeProg;
-    gl.useProgram(c);
+    this.use(c);
     gl.viewport(0, 0, this.width, this.height);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.final!.fbo);
-    this.bindTex(c, 'uSharp', this.base!.tex, 0);
+    this.bindTex(c, 'uSharp', input.tex, 0);
     this.bindTex(c, 'uBlur', bt.tex, 1);
     this.bindTex(c, 'uDepth', this.depth!, 2);
     gl.uniform1f(this.loc(c, 'uMaxCocFull'), maxCoc);
@@ -560,7 +636,7 @@ export class Renderer {
     const p = this.displayProg;
     const cw = gl.drawingBufferWidth;
     const ch = gl.drawingBufferHeight;
-    gl.useProgram(p);
+    this.use(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, cw, ch);
     this.bindTex(p, 'uProcessed', (this.shown ?? this.out).tex, 0);
@@ -586,12 +662,14 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
-  /** Read the retouched image back (top row first), e.g. for export. */
-  readPixels(): Uint8ClampedArray<ArrayBuffer> {
+  /** Read the retouched image back (top row first), e.g. for export; `rect` reads part of it. */
+  readPixels(rect?: { x: number; y: number; width: number; height: number }): Uint8ClampedArray<ArrayBuffer> {
     const gl = this.gl;
-    const px = new Uint8ClampedArray(new ArrayBuffer(this.width * this.height * 4));
+    const r = rect ?? { x: 0, y: 0, width: this.width, height: this.height };
+    const px = new Uint8ClampedArray(new ArrayBuffer(r.width * r.height * 4));
     gl.bindFramebuffer(gl.FRAMEBUFFER, (this.shown ?? this.out)!.fbo);
-    gl.readPixels(0, 0, this.width, this.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    // Texture row 0 is the top image row, so y counts from the top here too.
+    gl.readPixels(r.x, r.y, r.width, r.height, gl.RGBA, gl.UNSIGNED_BYTE, px);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     return px;
   }
@@ -640,7 +718,7 @@ export class Renderer {
     this.localTargets = [];
     this.orig = null;
     this.src = this.mask = this.edit = this.hairRoi = this.depth = this.lens = this.seg = null;
-    this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = null;
+    this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = this.local = null;
     this.bands = [];
     this.bokehTargets = [];
     this.bokehSize = [0, 0];
@@ -648,6 +726,7 @@ export class Renderer {
 
   private texture(w: number, h: number, image: TexSource | null, pixels?: Uint8Array): WebGLTexture {
     const gl = this.gl;
+
     const tex = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
@@ -703,6 +782,36 @@ export class Renderer {
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(`Program link failed: ${gl.getProgramInfoLog(p)}`);
     return p;
   }
+}
+
+/** Cheap string hash (FNV-1a) for big values in cache keys, e.g. LUT data. */
+function hash(str: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return `${str.length}:${(h >>> 0).toString(36)}`;
+}
+
+/**
+ * Cache keys of the four render stages. Each key includes the one before it, so a change
+ * re-runs its stage and every stage after it. Strokes are left out: they reach the GPU as
+ * textures, whose uploads bump that stage's version.
+ */
+export function stageKeys(
+  adj: ReturnType<typeof resolveAdjustments>,
+  info: RenderInfo,
+  v: { retouch: number; studio: number; local: number; bokeh: number },
+) {
+  const { localRetouch, depthBokeh, glareReduction, clothing, lut, skinMask: _skinMask, ...rest } = adj;
+  void _skinMask;
+  const retouch = `${v.retouch}|${JSON.stringify(rest)}|${info.hasFace}|${info.noiseLevel ?? ''}|${JSON.stringify(info.sourceStats)}`;
+  const studio = `${retouch}|${v.studio}|${glareReduction}|${JSON.stringify(clothing)}|${lut ? `${lut.size}:${lut.amount}:${hash(lut.data)}` : ''}`;
+  const layers = localRetouch.layers.map((l) => ({ ...l, mask: { ...l.mask, strokes: l.mask.strokes.length } }));
+  const local = `${studio}|${v.local}|${JSON.stringify(layers)}`;
+  const bokeh = `${local}|${v.bokeh}|${JSON.stringify(depthBokeh)}`;
+  return { retouch, studio, local, bokeh };
 }
 
 /** Single channel -> RGBA (grey in every channel) for upload as an RGBA8 texture. */

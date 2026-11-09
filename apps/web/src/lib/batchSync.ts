@@ -8,7 +8,7 @@ import type { Adjustments, ColorStats } from '@fineretouch/shared';
 import { colorStatsFromRgba } from '@/engine/color';
 import { engineJson } from './ai';
 import { renderFullRes } from './export';
-import { bitmapPixels, getProxy } from './images';
+import { bitmapPixels, ensureProxy, getProxy } from './images';
 import type { Photo } from './store';
 
 const LOOK_LONG_EDGE = 1024;
@@ -24,7 +24,7 @@ export interface ReferenceLook {
 
 /** Render the reference at a small size with its edits, on the GPU, and measure it. */
 export async function captureReferenceLook(photo: Photo): Promise<ReferenceLook> {
-  const proxy = getProxy(photo.id);
+  const proxy = getProxy(photo.id) ?? (await ensureProxy(photo.id));
   if (!proxy) throw new Error('The reference photo is not loaded yet');
   const load = () => createImageBitmap(proxy);
   const before = await renderFullRes(load, { ...photo.adjustments, ...NEUTRAL }, ctxFor(photo), { format: 'jpeg', quality: 95, maxLongEdge: LOOK_LONG_EDGE });
