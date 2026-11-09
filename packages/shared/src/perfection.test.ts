@@ -57,6 +57,19 @@ describe('skin perfection settings', () => {
     expect(s.overrides[0]).toMatchObject({ x: 0.5, y: 0.5, action: 'correct' });
   });
 
+  it('marks bulk corrections so the engine holds them to the quality gate (B1)', () => {
+    const r = report([{ confidence: 0.9 }, { confidence: 0.8, x: 0.2 }]);
+    const s = correctRemaining(DEFAULT_SKIN_PERFECTION, r, 0.5);
+    expect(s.overrides.every((o) => o.bulk === true && o.action === 'correct')).toBe(true);
+    // The flag survives a save / load round trip; a hand-picked choice carries none.
+    expect(sanitizeSkinPerfection(JSON.parse(JSON.stringify(s))).overrides.map((o) => o.bulk)).toEqual([true, true]);
+    const own = overrideMark(s, r.marks[0], 'correct');
+    expect(own.overrides).toHaveLength(2);
+    expect(own.overrides[1]).toMatchObject({ x: 0.5, action: 'correct' });
+    expect(own.overrides[1].bulk).toBeUndefined();
+    expect(sanitizeSkinPerfection({ ...s, overrides: [{ x: 0.1, y: 0.1, radius: 0.01, action: 'ignore', bulk: true }] }).overrides[0].bulk).toBeUndefined();
+  });
+
   it('correct-remaining never corrects a mark that may be a natural feature', () => {
     const r = report([
       { status: 'review', reason: 'lowConfidence', confidence: 0.6 },

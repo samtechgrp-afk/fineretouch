@@ -63,6 +63,10 @@
   On a 4-vCPU container: 30 MP 63 → 37 s and 6.5 → 4.1 GB; 25 MP 55 → 40 s and 6.3 → 4.5 GB. The 25 s / 4 GB target for the Ryzen 3 7330U is not yet confirmed; `--perf` measures it there.
 - **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
+- **Review fixes (B1, B3).**
+  - **Correct all remaining respects the quality gate.** A bulk correction is kept only if its repair passes every check. Otherwise the original pixels come back and the mark is listed as a failed repair. On a 25 MP full-body photo this removes the smudge the button left on knuckles and nail edges. Choosing Correct on a single mark still keeps its repair.
+  - **Preview and export apply heal strokes in the same order**: right after Skin Perfection. Export used to heal first, so it could differ from the preview where a stroke crossed a repair.
+
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)
 
 - **High-resolution GPU export in tiles.** Photos larger than the GPU's texture limit or the chosen GPU memory budget (Low 512 MB / Balanced 1.5 GB / High 3 GB) render in overlapping tiles instead of being scaled down.

@@ -194,6 +194,13 @@ must change the output on a control scene.
   A correct override forces the mark at its centre (the one chosen) and other ordinary marks
   whose centre is inside its circle, but never a protected feature or a "may be a feature" mark
   next to it: those need their own decision.
+  **Bulk corrections must pass the quality gate.** The overrides it adds carry `bulk: true`. Such
+  a repair is kept only if it passes every check, "still visible" included. Otherwise the
+  original pixels come back (exactly, inside the mark's radius, even beside a corrected
+  neighbour) and the mark goes to Needs review as a failed repair. A bulk override never forces
+  a protected or "may be a feature" mark, and adds no manual mark where nothing is detected.
+  A mark you choose Correct on yourself still keeps its repair when it fails a check (and your
+  choice replaces an earlier bulk one on that mark).
 - **The reason** for a review mark is shown when the mark is selected, and the panel counts the
   marks that may be a natural feature and the repairs that failed the quality checks. A failed
   repair shows which checks it failed and that the original skin was restored.
@@ -214,6 +221,11 @@ The original file is never changed. Everything is stored as settings in the edit
 - **Export.** A photo with Skin Perfection on always renders in the AI engine at full
   resolution, even when the browser/GPU engine is selected. The export dialog says so. This
   removes root cause 1.
+- **Same order in both.** Heal and clone strokes run right after the engine, in the preview
+  (the browser replays them on the perfected pixels) and in the export (`pipeline.render`
+  applies them after stage 0c when Skin Perfection is on; without it they stay at stage 0b).
+  The strokes were painted on the perfected photo, so that is what they apply to.
+  `tests/test_perfection_bulk.py` compares the two where a stroke crosses a repair.
 
 ## 5. Measured results
 

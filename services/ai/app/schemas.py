@@ -284,6 +284,9 @@ class PerfectionOverride(BaseModel):
     y: float = Field(..., ge=0, le=1)
     radius: float = Field(0.004, ge=0.0003, le=0.05)  # share of the long edge
     action: Literal["ignore", "correct"] = "ignore"
+    # Set by "Correct all remaining": the correction must pass every quality check, or it is undone
+    # (original pixels) and the mark becomes a failed repair. A hand-picked correction is kept.
+    bulk: bool = False
 
 
 class SkinPerfectionSettings(BaseModel):

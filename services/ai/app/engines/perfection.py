@@ -199,7 +199,8 @@ class Mark:
     reason: str | None = None  # why a "review" mark needs a decision (REVIEW_REASONS)
     quality: dict | None = None  # the correction quality checks of its last repair (perfection_quality)
     fine0: float | None = None  # contrast at the finer residual scale, before any repair
-    forced: bool = False  # the user chose Correct for it
+    forced: bool = False  # the user chose Correct for it (its repair is kept even if it fails a check)
+    bulk: bool = False  # "Correct all remaining" chose it: its repair must pass every check, or it is undone
 
 
 @dataclass
@@ -244,7 +245,7 @@ class PerfectionReport:
             "areas": {k: round(v, 3) for k, v in self.areas.items()},
             "quality": dict(self.quality),
             "marks": [
-                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast", "r0", "fine0", "forced")},
+                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast", "r0", "fine0", "forced", "bulk")},
                  "x": round(m.x / self.width, 5), "y": round(m.y / self.height, 5), "r": round(m.r / L, 5),
                  "contrast": round(m.contrast, 3), "after": None if m.after is None else round(m.after, 3),
                  "confidence": round(m.confidence, 3)}
@@ -1455,6 +1456,24 @@ def _restore(image: np.ndarray, out: np.ndarray, failed: list[Mark], kept: list[
     return res
 
 
+def _restore_core(image: np.ndarray, out: np.ndarray, marks: list[Mark], feather: float = 1.5) -> np.ndarray:
+    """Original pixels inside each mark's radius (exactly), blended back over `feather` px outside."""
+    h, w = out.shape[:2]
+    res = out if out is not image else out.copy()
+    for m in marks:
+        R = m.r + feather
+        x0, x1 = max(0, int(math.floor(m.x - R))), min(w, int(math.ceil(m.x + R)) + 1)
+        y0, y1 = max(0, int(math.floor(m.y - R))), min(h, int(math.ceil(m.y + R)) + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+        d = np.sqrt((xx - m.x) ** 2 + (yy - m.y) ** 2)
+        wgt = np.clip((R - d) / feather, 0.0, 1.0)[..., None]
+        o = res[y0:y1, x0:x1]
+        res[y0:y1, x0:x1] = np.where(wgt >= 1.0, image[y0:y1, x0:x1], o + (image[y0:y1, x0:x1] - o) * wgt)
+    return res
+
+
 def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: int, h: int, next_id: int) -> tuple[list[Mark], int]:
     L = float(max(w, h))
     for o in overrides:
@@ -1463,8 +1482,21 @@ def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: 
         if o.action == "ignore":
             for m in hit:
                 m.status = "ignored"
+        elif o.bulk:
+            # "Correct all remaining" (B1): it retries ordinary marks only, and its repairs go
+            # through the quality gate like any automatic repair (undone if one check fails).
+            # Never a protected feature or a mark that needs its own decision, even the nearest
+            # one; never a mark whose centre lies outside the circle; and no "manual" spot where
+            # nothing is detected any more (a bulk choice is not a hand-placed correction).
+            for m in hit:
+                if _needs_own_decision(m) or m.forced or (m.x - ox) ** 2 + (m.y - oy) ** 2 > orad * orad:
+                    continue
+                if m.status != "corrected":
+                    m.status, m.reason, m.bulk = "forced", None, True
         else:
             if hit:
+                for m in hit:
+                    m.bulk = False  # the user's own choice wins over an earlier bulk one
                 # The mark nearest the override's centre is the one the user chose, so it is forced
                 # whatever it is. A neighbour inside the circle is forced only if it is an ordinary
                 # mark: a protected feature, or one waiting for review because it may be one, needs
@@ -1646,7 +1678,12 @@ def perfect_skin(
     # A repair that still fails a naturalness check after its last attempt is not "corrected": it
     # is undone (the original skin comes back) and the mark waits for review with the failed
     # checks. A mark the user chose to correct keeps its repair and shows the checks it failed.
-    failed = [m for m in marks if m.status == "remaining" and _natural_failures(m)]
+    # A mark "Correct all remaining" chose must pass every check, "still visible" included: a
+    # bulk repair that is only partly right is undone too (B1).
+    failed = [m for m in marks if m.status == "remaining" and (_natural_failures(m) or (m.bulk and m.attempts > 0))]
+    for m in failed:
+        if m.bulk and m.quality is not None and not m.quality["failed"]:
+            m.quality["failed"] = ["residual"]  # it passed the checks, then the rescan still found some of it
     undo = [m for m in failed if not m.forced]
     if undo:
         out = _restore(image, out, undo, [m for m in marks if m.status == "corrected" or (m.forced and m in failed)], settings)
@@ -1689,6 +1726,12 @@ def perfect_skin(
     waiting = [m for m in marks if m.status == "review"]
     if waiting:
         out = _restore(image, out, waiting, [m for m in marks if m.status == "corrected"], settings)
+    # A failed bulk repair is undone completely (B1): the restore above gives way to a corrected
+    # neighbour's feathered edge, which can leave part of that neighbour's repair over this mark.
+    # Its own disc gets the original pixels back exactly, with a 1.5 px feather outside it.
+    bulk_failed = [m for m in marks if m.bulk and m.reason == "repairFailed"]
+    if bulk_failed:
+        out = _restore_core(image, out, bulk_failed)
     # A repair left "remaining" only because some of the mark's colour was left is measured again
     # once the redness and tone tools have run: they often finish it.
     unfinished = [m for m in marks if m.status == "remaining" and m.attempts > 0 and m.quality

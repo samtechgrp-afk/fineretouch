@@ -33,7 +33,7 @@ Stages (all on float32 sRGB in [0, 1]):
      8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
   Pro tools (v0.10, engines/local.py): 0b. healing and clone strokes on the original pixels
-  before stage 1; 10. local retouch layers (frequency separation, dodge & burn, correction
+  before stage 1 (right after the Skin Perfection engine, 0c, when that is on: the preview's order); 10. local retouch layers (frequency separation, dodge & burn, correction
   brushes with their own masks) after stage 8 and before the bokeh of stage 9.
 """
 
@@ -358,8 +358,11 @@ def render(
     adj, spot_multiplier = resolve_adjustments(adj)
     src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
     # 0b. Healing and clone strokes (v0.10) on the original pixels: every later stage, and the
-    #     sharpening detail, work from the cleaned photo.
-    if adj.localRetouch.heal:
+    #     sharpening detail, work from the cleaned photo. With Skin Perfection on they run right
+    #     after it instead (stage 0c): the strokes were painted on the perfected photo the preview
+    #     shows (POST /v1/perfection, then the browser's heal), so the export uses that order too.
+    perfection_on = adj.skinPerfection.enabled and adj.skinPerfection.strength > 0
+    if adj.localRetouch.heal and not perfection_on:
         src = apply_heal_strokes(src, adj.localRetouch.heal)
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -394,7 +397,7 @@ def render(
     #     full resolution on face and body skin. It edits the photo the rest of the chain starts
     #     from (like the healing brush), so every later stage sees the cleaned skin.
     sp = adj.skinPerfection
-    if sp.enabled and sp.strength > 0:
+    if perfection_on:
         # Without a face the colour-only skin box would take in wood, sand and warm walls, so only
         # semantic body skin and the user's own Add-skin strokes count then.
         face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
@@ -405,6 +408,8 @@ def render(
         src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
         if report is not None:
             report.append(rep)
+        if adj.localRetouch.heal:  # 0b, after the engine (see above): the order the preview uses
+            src = apply_heal_strokes(src, adj.localRetouch.heal)
         low0 = blur(src, S0 * L)
         bands.clear()
     skin = skin[..., None]

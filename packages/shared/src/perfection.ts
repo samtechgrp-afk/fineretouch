@@ -84,6 +84,12 @@ export interface PerfectionOverride {
   radius: number;
   /** ignore: leave this mark alone. correct: correct this spot even if it was not detected. */
   action: 'ignore' | 'correct';
+  /**
+   * Set by "Correct all remaining". A bulk correction must pass every quality check: a repair
+   * that fails one is undone (the original pixels come back) and the mark is listed as a failed
+   * repair. Without it (a mark the user chose by hand) a correction is kept even if it fails.
+   */
+  bulk?: boolean;
 }
 
 export interface SkinPerfectionSettings {
@@ -170,6 +176,7 @@ export function sanitizeSkinPerfection(input: unknown): SkinPerfectionSettings {
             y: clamp(v.y, 0, 1),
             radius: num(v.radius, 0.0003, 0.05, 0.004),
             action: v.action === 'correct' ? 'correct' : 'ignore',
+            ...(v.bulk === true && v.action === 'correct' ? { bulk: true } : {}),
           };
         })
         .filter((o): o is PerfectionOverride => o !== null)
@@ -328,7 +335,7 @@ export function isBulkCorrectable(m: PerfectionMark, minConfidence: number): boo
 export function correctRemaining(s: SkinPerfectionSettings, report: PerfectionReport, minConfidence: number): SkinPerfectionSettings {
   const add = report.marks
     .filter((m) => isBulkCorrectable(m, minConfidence))
-    .map((m): PerfectionOverride => ({ x: m.x, y: m.y, radius: Math.max(0.0005, m.r * 1.3), action: 'correct' }));
+    .map((m): PerfectionOverride => ({ x: m.x, y: m.y, radius: Math.max(0.0005, m.r * 1.3), action: 'correct', bulk: true }));
   return { ...s, overrides: [...s.overrides, ...add].slice(-MAX_PERFECTION_OVERRIDES) };
 }
 
