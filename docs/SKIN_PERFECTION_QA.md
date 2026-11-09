@@ -1,4 +1,4 @@
-# Skin Perfection quality assurance (phases 2A–2B)
+# Skin Perfection quality assurance (phases 2A–2C)
 
 This is how Skin Perfection is measured. Each phase of the v0.13 upgrade (2B–2E) has to beat
 the baseline below without a regression.
@@ -11,7 +11,7 @@ accuracy on real photographs. Any general claim waits for the real-photo test sp
 
 ```
 cd services/ai
-python -m scripts.perfection_benchmark --html report.html --json report.json --baseline qa/baselines/synthetic-2B.json
+python -m scripts.perfection_benchmark --html report.html --json report.json --baseline qa/baselines/synthetic-2C.json
 python -m scripts.perfection_benchmark --quick                       # 4 scenes, ~25 s (CI runs this as a test)
 python -m scripts.perfection_benchmark --dev                         # tuning scenes (other seeds)
 python -m scripts.perfection_benchmark --suite real --dataset D:\qa-photos --split validation --html real.html
@@ -241,3 +241,63 @@ Phase 2E owns the ≤ 25 s / ≤ 4 GB target.
 - **Colourless blemishes on real photos.** The retouched photos still show about 540 "blemish" detections in both PR #13 and 2B. These are likely skin relief. Phase 2C (review state) and 2D (quality checks) address them, and the real validation labels will settle it.
 - **Real-photo evidence.** The native-resolution pass has not run on a real photo yet: none of the available photos has a face wider than 1100 px.
 
+
+## 7. Phase 2C results: dense clusters, stubble and Needs Review
+
+### What changed
+
+- Review marks carry a reason (`lowConfidence`, `mayBeFollicle`, `mayBeFreckle`). A mark that
+  may be a natural feature is never corrected unless the user chooses it.
+- Stubble-field and freckle-group outlier tests, a lone-dot and a hair-direction (coherence)
+  follicle test, and the cluster split. Rules and thresholds: `SKIN_PERFECTION.md`, stage E.
+- Thresholds were tuned on the `--dev` scenes only. The held-out scenes were run once for
+  confirmation.
+- The report gains **False flags left for review** (`falseReviews`): false positives that were
+  only asked about, pixels untouched. False corrections are the ones that changed pixels.
+
+### Synthetic benchmark (held-out scenes) against phase 2B
+
+| Metric | 2B | 2C |
+|---|---|---|
+| Precision | 0.984 | 0.979 |
+| Recall | 0.967 | **0.985** |
+| F1 | 0.975 | 0.982 |
+| Removal rate | 0.958 | 0.960 |
+| False positives | 12 | 16 |
+| … of which corrected (false corrections) | 11 | **7** |
+| … of which left for review, untouched | 1 (12 − 11; not split out in 2B) | 9 |
+| Natural features damaged | 4 | **0** |
+| Type VI dark spots found | 33 / 36 | **36 / 36** |
+| Type VI blackheads found | 48 / 54 | **51 / 54** |
+
+**The gate flags one regression: false positives 12 → 16** (tolerance 2). All four extra are
+freckles flagged `mayBeFreckle`. They were left untouched, which is the intended trade: the
+engine asks instead of correcting. Over the same scenes the marks that changed natural skin
+fell from 11 to 7, and natural features damaged fell from 4 to 0 (stubble follicles on type II
+are no longer corrected). The newly found type VI dark spots and blackheads are review marks,
+so removal stays the same until the user decides. `qa/baselines/synthetic-2C.json` is the new
+reference. The quick CI baseline (4 scenes) is ratcheted to 2C: recall 0.948 → 0.976,
+false corrections 5 → 5, and false positives 6 → 8, the two extra being review flags only.
+
+### Real-photo check (no labels yet)
+
+On the five retouched portraits, first-pass detections are 989 → 1,001. Of these, 23 marks now
+carry a feature reason (15 `mayBeFollicle`, 8 `mayBeFreckle`) and are left untouched.
+
+### In the app
+
+On a real 30 MP portrait (CRPixels-5), the panel reports 13 marks that may be a freckle or a
+follicle. Selecting one shows its reason. **Correct all remaining** left all 13 untouched and
+still waiting for review. This check found a bug: an override placed for one blemish also
+forced a "may be a follicle" mark or a protected feature inside its circle. After the fix,
+the bulk action corrected 346 marks instead of 358; the 12 it no longer forces were those
+neighbours. An engine test covers this case.
+
+### Remaining limitations
+
+- Each extra freckle asked about costs the user a click. The real validation photos will show
+  whether 1.4× / 1.8× asks too often.
+- Coherence (hair direction) changed no count on the synthetic scenes, which have no hair
+  shafts. Its effect is unmeasured until real stubble photos are labelled.
+- Colourless "blemish" detections on the retouched photos (about 540) are unchanged. Phase 2D's
+  correction checks and the real labels address them.

@@ -56,6 +56,19 @@ describe('skin perfection settings', () => {
     expect(s.overrides[0]).toMatchObject({ x: 0.5, y: 0.5, action: 'correct' });
   });
 
+  it('correct-remaining never corrects a mark that may be a natural feature', () => {
+    const r = report([
+      { status: 'review', reason: 'lowConfidence', confidence: 0.6 },
+      { status: 'review', reason: 'mayBeFreckle', confidence: 0.95, x: 0.2 },
+      { status: 'review', reason: 'mayBeFollicle', confidence: 0.95, x: 0.8 },
+    ]);
+    const s = correctRemaining(DEFAULT_SKIN_PERFECTION, r, 0.5);
+    expect(s.overrides).toHaveLength(1);
+    expect(s.overrides[0]).toMatchObject({ x: 0.5 });
+    // A per-mark decision still can.
+    expect(overrideMark(DEFAULT_SKIN_PERFECTION, r.marks[1], 'correct').overrides).toHaveLength(1);
+  });
+
   it('override at a mark replaces an earlier decision there', () => {
     const a = overrideMark(DEFAULT_SKIN_PERFECTION, { x: 0.5, y: 0.5, r: 0.01 }, 'ignore');
     const b = overrideMark(a, { x: 0.5, y: 0.5, r: 0.01 }, 'correct');

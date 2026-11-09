@@ -85,6 +85,24 @@ new dependencies or models).
   - **Pimple fusion.** A light, red head at the centre of a red dome makes the dome a pimple,
     and its roundness is judged with the head counted in.
   - **Rims.** A faint light dot right beside a much darker mark is that mark's rim, not a whitehead.
+  Phase 2C rules (dense clusters, stubble, Needs Review):
+  - **Needs Review with a reason.** A review mark carries `reason`: `lowConfidence` (below the
+    confidence threshold), `mayBeFollicle` or `mayBeFreckle`. A mark that may be a natural
+    feature is never corrected automatically, never included in **Correct all remaining**, and
+    is kept out of every repair window and area correction until the user chooses Correct or
+    Ignore for it.
+  - **Stubble field.** Follicles in a field are alike. A strong dot at least 1.5× the size and
+    1.3× the darkness of the median of its follicle neighbours (3 or more within 2 × follicle
+    reach) is likely a blackhead in the beard, but could be a thicker hair: `mayBeFollicle`.
+    A lone pore-sized dark dot in the hair zone that looks like a nearby field's dots, and a
+    pore-sized dot where the skin runs one way (structure-tensor coherence ≥ 0.5, hair
+    shafts), are `mayBeFollicle` too.
+  - **Freckle group.** A strong spot read as a freckle but at least 1.4× the size and 1.8× the
+    darkness of its group's median is `mayBeFreckle`. A spot far darker than any freckle is
+    still a dark spot and is corrected, as before.
+  - **Cluster split.** A broad birthmark or blemish candidate that holds 2 or more clearly
+    stronger, smaller accepted marks is the coarse-scale merge of those marks: it is dropped,
+    and the marks inside are corrected one by one.
 - **F. Targeted correction.** Heal-type marks get a push-pull membrane fill from the
   surrounding ring. It is capped so it is never lighter than the ring's median, which prevents
   pale blobs. Pigment-type marks get a pigment-only correction above the pore scale. Acne also
@@ -138,8 +156,13 @@ must change the output on a control scene.
 - **Click** a mark in the overlay to select it. **Shift-click** adds to the selection.
 - **Correct** / **Ignore** the selected marks. Each becomes an override (`overrides`: x, y,
   radius, action). Correct also works where nothing was detected and adds a manual mark.
-- **Correct all remaining** adds a correct override for every remaining or review mark at or
-  above the confidence threshold, as one undo step.
+- **Correct all remaining** adds a correct override for every remaining or low-confidence
+  review mark at or above the confidence threshold, as one undo step. Marks that may be a
+  freckle or a follicle are never included. A correct override forces the mark at its centre
+  (the one chosen) and other ordinary marks inside its circle, but never a protected feature or
+  a "may be a feature" mark next to it: those need their own decision.
+- **The reason** for a review mark is shown when the mark is selected, and the panel counts the
+  marks that may be a natural feature.
 - **Run another pass** adds one pass (up to 4).
 - **Rescan** runs the engine again with the same settings.
 - **Undo / redo**: overrides and settings are ordinary edit history. Earlier results are cached

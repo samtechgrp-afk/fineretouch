@@ -29,7 +29,7 @@ TOLERANCE = {
     "textureRetention": 0.03,
 }
 LOWER_IS_BETTER = {"falsePositives": 2, "falseCorrections": 1, "naturalDamaged": 0, "claimedButVisible": 1}
-METRICS = ("precision", "recall", "f1", "removalRate", "residualRate", "falsePositives", "falseCorrections",
+METRICS = ("precision", "recall", "f1", "removalRate", "residualRate", "falsePositives", "falseCorrections", "falseReviews",
            "falsePositivesPerMP", "naturalPreserved", "naturalDamaged", "claimedButVisible", "textureRetention",
            "cleanSkinChangeL", "msMean", "msMax", "peakMB")
 
@@ -53,6 +53,7 @@ def aggregate(rows: list[dict]) -> dict:
         "removalRate": s("removed") / imps if imps else 1.0,
         "residualRate": 1 - (s("removed") / imps if imps else 1.0),
         "falsePositives": s("falsePositives"), "falseCorrections": s("falseCorrections"),
+        "falseReviews": sum(x.get("falseReviews", 0) for x in sc),
         "falsePositivesOnNatural": s("falsePositivesOnNatural"),
         "falsePositivesPerMP": s("falsePositives") / max(s("skinMP"), 1e-6),
         "naturalPreserved": (nat - s("naturalDamaged")) / nat if nat else 1.0,
@@ -136,7 +137,8 @@ def _fmt(v, k: str = "") -> str:
 
 LABELS = {
     "precision": "Precision", "recall": "Recall", "f1": "F1", "removalRate": "Removal rate", "residualRate": "Residual rate",
-    "falsePositives": "False positives", "falseCorrections": "False corrections", "falsePositivesPerMP": "False positives / MP",
+    "falsePositives": "False positives", "falseCorrections": "False corrections", "falseReviews": "False flags left for review (untouched)",
+    "falsePositivesPerMP": "False positives / MP",
     "naturalPreserved": "Natural features preserved", "naturalDamaged": "Natural features damaged",
     "claimedButVisible": "Reported corrected but still visible", "textureRetention": "Texture retention",
     "cleanSkinChangeL": "Clean-skin change (ΔL*)", "msMean": "Time (mean)", "msMax": "Time (max)", "peakMB": "Peak memory",

@@ -222,6 +222,19 @@ export function perfectionKey(s: SkinPerfectionSettings): string {
 
 export type MarkStatus = 'corrected' | 'remaining' | 'review' | 'protected' | 'ignored';
 
+/**
+ * Why a mark is waiting for a decision (status "review"). lowConfidence: below the confidence
+ * threshold. mayBeFreckle / mayBeFollicle: it could be a natural feature (a freckle among
+ * freckles, a hair follicle in stubble), so it is never corrected unless you choose it.
+ */
+export type ReviewReason = 'lowConfidence' | 'mayBeFreckle' | 'mayBeFollicle';
+
+export const REVIEW_REASON_TEXT: Record<ReviewReason, string> = {
+  lowConfidence: 'Low confidence: below the confidence threshold.',
+  mayBeFreckle: 'May be a freckle: clearly darker and larger than the freckles around it, but kept until you choose.',
+  mayBeFollicle: 'May be a hair follicle: it sits where hair grows, so it is kept until you choose.',
+};
+
 export interface PerfectionMark {
   id: number;
   /** Normalised centre; r is a share of the long edge. */
@@ -236,6 +249,8 @@ export interface PerfectionMark {
   residual: boolean;
   contrast: number;
   after: number | null;
+  /** Set when status is "review" (older engines: absent). */
+  reason?: ReviewReason | null;
 }
 
 export interface PerfectionReport {
@@ -255,10 +270,21 @@ export interface PerfectionReport {
   marks: PerfectionMark[];
 }
 
+/**
+ * Marks "Correct all remaining" may correct: remaining marks and low-confidence review marks at
+ * or above `minConfidence`. A mark that may be a natural feature is never corrected in bulk;
+ * it needs its own decision.
+ */
+export function isBulkCorrectable(m: PerfectionMark, minConfidence: number): boolean {
+  if (m.confidence < minConfidence) return false;
+  if (m.status === 'remaining') return true;
+  return m.status === 'review' && (m.reason == null || m.reason === 'lowConfidence');
+}
+
 /** Overrides that correct every remaining mark at or above `minConfidence` (one undo step). */
 export function correctRemaining(s: SkinPerfectionSettings, report: PerfectionReport, minConfidence: number): SkinPerfectionSettings {
   const add = report.marks
-    .filter((m) => (m.status === 'remaining' || m.status === 'review') && m.confidence >= minConfidence)
+    .filter((m) => isBulkCorrectable(m, minConfidence))
     .map((m): PerfectionOverride => ({ x: m.x, y: m.y, radius: Math.max(0.0005, m.r * 1.3), action: 'correct' }));
   return { ...s, overrides: [...s.overrides, ...add].slice(-MAX_PERFECTION_OVERRIDES) };
 }

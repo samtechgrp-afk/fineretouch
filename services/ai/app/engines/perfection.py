@@ -108,6 +108,15 @@ FAIR_MARGIN = 2.0  # ... and only for a mark at least this many times over its d
 FIELD_REACH, FIELD_DOTS = 0.1, 20  # this many light dots within this reach (share of F) = lit texture or shimmer
 RIM_MAX_PORE = 3.0  # ... unless it clearly beats the bright texture (a rim is faint; a whitehead beside a spot is not)
 
+# Ambiguity (v0.13 phase 2C). A mark that could be either a natural feature or an imperfection is
+# never corrected automatically: it is reported for review with the reason.
+FIELD_OUTLIER_SIZE, FIELD_OUTLIER_DARK = 1.5, 1.3  # a dot this much bigger AND darker than its stubble field
+FRECKLE_OUTLIER_SIZE, FRECKLE_OUTLIER_DARK = 1.4, 1.8  # a spot this much bigger AND darker than its freckle group
+HAIR_COHERENCE = 0.5  # orientation coherence around a beard-area dot that says "hair runs here"
+FIELD_LIKE = 1.3  # a lone dot within this factor of a nearby stubble field's dots looks like one of them
+CLUSTER_PEAK_RATIO = 1.5  # a large flat mark with 2+ marks inside this much stronger is a cluster, not one patch
+REVIEW_REASONS = ("lowConfidence", "mayBeFreckle", "mayBeFollicle")
+
 # --- F/G. correction ------------------------------------------------------------------------
 HEAL_KINDS = ("acne", "pimple", "blackhead", "whitehead", "blemish", "manual")
 PIGMENT_KINDS = ("darkSpot", "postAcne", "smallDot")
@@ -175,6 +184,7 @@ class Mark:
     residual: bool = False  # first found by a residual scan
     after: float | None = None  # relative contrast after the last correction
     r0: float | None = None  # radius when first found (residue may widen r up to RESIDUE_GROW x this)
+    reason: str | None = None  # why a "review" mark needs a decision (REVIEW_REASONS)
 
 
 @dataclass
@@ -217,7 +227,7 @@ class PerfectionReport:
             "textureRetention": None if self.texture_retention is None else round(self.texture_retention, 3),
             "areas": {k: round(v, 3) for k, v in self.areas.items()},
             "marks": [
-                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast")},
+                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast", "r0")},
                  "x": round(m.x / self.width, 5), "y": round(m.y / self.height, 5), "r": round(m.r / L, 5),
                  "contrast": round(m.contrast, 3), "after": None if m.after is None else round(m.after, 3),
                  "confidence": round(m.confidence, 3)}
@@ -254,6 +264,7 @@ class _Cand:
     inskin: np.ndarray  # share of the context ring that lies on skin
     cpore: np.ndarray  # redness / typical a* texture peak on the tile (colour contrast against this person's skin)
     tpore: np.ndarray  # contrast / typical texture peak of the same polarity (bright marks: bright texture)
+    coh: np.ndarray  # 0..1 orientation coherence of the skin around the mark (hair shafts run one way)
 
 
 _BOOL_FIELDS, _INT_FIELDS = ("bright", "body"), ("kidx",)
@@ -372,6 +383,13 @@ def _detect_tile(
     # Local, not global: a key light makes one side of the face brighter, a highlight is a
     # bright patch against the skin right around it.
     shine = _smoothstep(1.06, 1.2, _fast_gauss(y, max(2.0, 0.008 * Fw)) / np.maximum(_fast_gauss(base_y, max(4.0, 0.06 * Fw)), 1e-3)).astype(np.float32)
+    # Hair direction: structure-tensor coherence at hair-shaft scale. Stubble and body hair make
+    # the skin around a dot run one way; acne fields and pores do not.
+    gy_ = _gauss(y, max(0.7, 0.0015 * Fw))
+    ix, iy = cv2.Sobel(gy_, cv2.CV_32F, 1, 0), cv2.Sobel(gy_, cv2.CV_32F, 0, 1)
+    si = max(1.5, 0.012 * Fw)
+    jxx, jyy, jxy = _fast_gauss(ix * ix, si), _fast_gauss(iy * iy, si), _fast_gauss(ix * iy, si)
+    coh = (np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy * jxy) / np.maximum(jxx + jyy, 1e-9)).astype(np.float32)
     # Structure edges (nose side, jaw, hairline): gradient of the baseline-scale luma.
     ys = _gauss(y, max(1.0, 0.006 * Fw))
     edge = np.hypot(cv2.Sobel(ys, cv2.CV_32F, 1, 0), cv2.Sobel(ys, cv2.CV_32F, 0, 1)) / 8.0 * rel * max(1.0, 0.006 * Fw)
@@ -453,6 +471,7 @@ def _detect_tile(
                 np.full(yy.size, kidx, np.int32), shine[yy, xx], inside / 12.0,
                 (np.maximum(c_red, 0.0) / red_ref).astype(np.float32),
                 (np.abs(c_dark) / (bright_ref if is_bright else pore_ref)).astype(np.float32),
+                coh[yy, xx],
             ))
     return _cat(parts), stats
 
@@ -477,6 +496,28 @@ def _neighbour_counts(x: np.ndarray, y: np.ndarray, sel: np.ndarray, reach: floa
     dens = cv2.filter2D(grid, -1, k, borderType=cv2.BORDER_CONSTANT)
     out = np.round(dens[gy, gx]).astype(np.int32) - sel.astype(np.int32)
     return np.maximum(out, 0)
+
+
+def _neighbour_medians(
+    x: np.ndarray, y: np.ndarray, query: np.ndarray, pool: np.ndarray, reach: float, *vals: np.ndarray,
+) -> tuple[np.ndarray, list[np.ndarray]]:
+    """For each index in query: how many pool points lie within reach (excluding itself), and
+    the median of each of vals over them (NaN when none)."""
+    cnt = np.zeros(query.size, np.int32)
+    meds = [np.full(query.size, np.nan, np.float32) for _ in vals]
+    if query.size == 0 or pool.size == 0:
+        return cnt, meds
+    order = pool[np.argsort(x[pool])]
+    px = x[order]
+    for q, i in enumerate(query):
+        a, b = np.searchsorted(px, x[i] - reach), np.searchsorted(px, x[i] + reach)
+        w = order[a:b]
+        w = w[(w != i) & ((x[w] - x[i]) ** 2 + (y[w] - y[i]) ** 2 <= reach * reach)]
+        cnt[q] = w.size
+        if w.size:
+            for v, m in zip(vals, meds):
+                m[q] = float(np.median(v[w]))
+    return cnt, meds
 
 
 def _nms(c: _Cand, order: np.ndarray, share: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
@@ -534,8 +575,9 @@ def _k_for(sens: float, multiplier: int) -> float:
 
 def _classify(
     c: _Cand, Fw: float, settings: SkinPerfectionSettings, sens_boost: float = 0.0, zones: np.ndarray | None = None,
-) -> tuple[list[str], np.ndarray, np.ndarray]:
-    """(kind, confidence, accepted) per candidate. accepted = passes its category's threshold."""
+) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """(kind, confidence, accepted, review reason) per candidate. accepted = passes its category's
+    threshold; a reason (not None) means the mark is ambiguous and must not be corrected unasked."""
     n = c.x.size
     diam = 2.0 * c.sigma * math.sqrt(2.0) / max(Fw, 1.0)
     rel = np.abs(c.dark)
@@ -588,6 +630,41 @@ def _classify(
     edge_dots = tiny_dark & ~fol & can_hair & ~on_nose & (_neighbour_counts(c.x, c.y, fol, FOLLICLE_REACH * Fw) >= 1)
     kinds[fol | edge_dots] = "follicle"
     kinds[darkish & tiny & (c.aniso < 0.25)] = "follicle"  # a short hair stub
+
+    # Ambiguity (2C): natural feature or imperfection? Judged against the mark's own group, and
+    # only for a clearly significant mark (faint relief on body skin is left as it was).
+    strong = c.score >= FAIR_MARGIN * _k_for(70, 1)
+    reason = np.full(n, None, dtype=object)
+    was_feature = np.zeros(n, bool)  # classified as a natural feature, now in doubt
+    diam_v, rel_v = diam.astype(np.float32), rel.astype(np.float32)
+    # Stubble field: follicles are alike. A dot much bigger and darker than the field's dots is
+    # likely a blackhead in the beard, but could be a thicker hair: review, never automatic.
+    field = np.nonzero((kinds == "follicle") & (c.aniso >= 0.25))[0]
+    if field.size >= FOLLICLE_NEIGHBOURS:
+        cnt, (md, mr) = _neighbour_medians(c.x, c.y, field, field, 2.0 * FOLLICLE_REACH * Fw, diam_v, rel_v)
+        out = (cnt >= 3) & strong[field] & (diam_v[field] >= FIELD_OUTLIER_SIZE * md) & (rel_v[field] >= FIELD_OUTLIER_DARK * mr)
+        kinds[field[out]] = "blackhead"
+        reason[field[out]] = "mayBeFollicle"
+        was_feature[field[out]] = True
+        # A lone pore-sized dark dot in the hair zone next to a stubble field, and like its
+        # dots, could be a stray follicle: review instead of correcting it as a blackhead.
+        lone = np.nonzero(np.isin(kinds, ("blackhead", "smallDot")) & tiny & can_hair & (reason == None))[0]  # noqa: E711
+        cnt2, (md2, mr2) = _neighbour_medians(c.x, c.y, lone, field, 3.0 * FOLLICLE_REACH * Fw, diam_v, rel_v)
+        alike = (cnt2 >= 1) & (diam_v[lone] <= FIELD_LIKE * md2) & (rel_v[lone] <= FIELD_LIKE * mr2)
+        reason[lone[alike]] = "mayBeFollicle"
+    # A pore-sized dark dot where hair grows and the skin around it runs one way (hair shafts)
+    # may be a follicle, however few dots are near it: review, not a blackhead correction.
+    haired = np.isin(kinds, ("blackhead", "smallDot")) & tiny & can_hair & (c.coh >= HAIR_COHERENCE) & (reason == None)  # noqa: E711
+    reason[haired] = "mayBeFollicle"
+    # Freckle group: freckles are alike. One clearly bigger or darker than its group is likely a
+    # dark spot among freckles, but could be a larger freckle: review, never automatic.
+    frk = np.nonzero(kinds == "freckle")[0]
+    if frk.size >= FRECKLE_NEIGHBOURS:
+        cnt, (md, mr) = _neighbour_medians(c.x, c.y, frk, frk, FRECKLE_REACH * Fw, diam_v, rel_v)
+        out = (cnt >= 3) & strong[frk] & (diam_v[frk] >= FRECKLE_OUTLIER_SIZE * md) & (rel_v[frk] >= FRECKLE_OUTLIER_DARK * mr)
+        kinds[frk[out]] = "darkSpot"
+        reason[frk[out]] = "mayBeFreckle"
+        was_feature[frk[out]] = True
 
     rad = c.sigma * math.sqrt(2.0)
     # Rims: a mark darker than the skin baseline leaves a faint light ring where the baseline meets
@@ -685,7 +762,10 @@ def _classify(
         edge_pen = 1.0 - ep * float(_smoothstep(0.15, 0.45, np.array(c.edge[i])))
         conf[i] = float(np.clip((1.0 - math.exp(-1.2 * max(margin, 0.0))) * shape * (0.4 + 0.6 * edge_pen), 0.0, 1.0))
         accepted[i] = bool(ok)
-    return list(kinds), conf, accepted
+    # A feature in doubt is reported (for review) whenever it would have been kept as a feature;
+    # any other ambiguous mark only when it passed its own category's threshold.
+    accepted |= was_feature & (c.score >= _k_for(70, 1)) & ((diam >= 1.6 * TINY) | (c.pore >= PORE_RATIO))
+    return list(kinds), conf, accepted, reason
 
 
 @dataclass
@@ -701,8 +781,8 @@ def _analyse(
     image: np.ndarray, skin: np.ndarray, body: np.ndarray, faces: list[FaceAnalysis], F: float,
     settings: SkinPerfectionSettings, sens_boost: float = 0.0,
 ) -> tuple[list[tuple], _Analysis | None]:
-    """Run A-E on the skin's bounding box. Returns raw marks (x, y, r, kind, conf, body, contrast)
-    in full-resolution px, accepted or protected only."""
+    """Run A-E on the skin's bounding box. Returns raw marks (x, y, r, kind, conf, body, contrast,
+    review reason or None) in full-resolution px, accepted or protected only."""
     h, w = image.shape[:2]
     ys, xs = np.nonzero(skin > 0.3)
     if ys.size < 64:
@@ -803,11 +883,25 @@ def _analyse(
             cv2.fillPoly(nz, [nose_pts], 1)
             nz = cv2.dilate(nz, _ellipse(max(3, int(0.08 * Fw) | 1)))
             zones[nz > 0] = 1
-    kinds, conf, ok = _classify(c, Fw, settings, sens_boost, zones)
+    kinds, conf, ok, reason = _classify(c, Fw, settings, sens_boost, zones)
     kinds_a = np.array(kinds, dtype=object)
     diam = 2.0 * c.sigma * math.sqrt(2.0) / max(Fw, 1.0)
     prot = np.isin(kinds_a, PROTECTED_KINDS) & (c.score >= _k_for(70, 1)) & ((diam >= 1.6 * TINY) | (c.pore >= PORE_RATIO))
     keep_any = ok | prot
+    # Clusters (2C): a large flat mark (a "birthmark" or broad blemish) holding two or more
+    # clearly stronger marks is those marks side by side, merged at a coarse scale. The large
+    # one is dropped so the marks inside are judged (and corrected or kept) one by one.
+    rad_all = c.sigma * math.sqrt(2.0)
+    small = np.nonzero(ok & ~np.isin(kinds_a, PROTECTED_KINDS))[0]
+    for j in np.nonzero(keep_any & np.isin(kinds_a, ("birthmark", "blemish")) & (diam >= 0.02))[0]:
+        if not small.size:
+            break
+        inside = small[((c.x[small] - c.x[j]) ** 2 + (c.y[small] - c.y[j]) ** 2 < (0.9 * rad_all[j]) ** 2)
+                       & (rad_all[small] < 0.5 * rad_all[j])
+                       & (np.abs(c.dark[small]) + 0.012 * np.maximum(c.red[small], 0.0)
+                          >= CLUSTER_PEAK_RATIO * (abs(c.dark[j]) + 0.012 * max(c.red[j], 0.0)))]
+        if inside.size >= 2:
+            keep_any[j] = False
     # Non-maximum suppression across scales and signals, strongest first.
     order = np.argsort(-(c.score / np.maximum(np.array([_k_for(70, 1)] * c.x.size), 1e-6)))
     order = order[keep_any[order]]
@@ -817,6 +911,7 @@ def _analyse(
         out.append((
             float(c.x[i] / s + x0), float(c.y[i] / s + y0), float(extent[i] / s),
             str(kinds_a[i]), float(conf[i]), bool(c.body[i]), float(abs(c.dark[i]) + 0.012 * max(c.red[i], 0.0)),
+            reason[i],
         ))
     return out, ana
 
@@ -1054,6 +1149,11 @@ def _fine_energy(image: np.ndarray, marks: list[Mark], F: float) -> float:
 # =============================================================================================
 
 
+def _needs_own_decision(m: Mark) -> bool:
+    """A protected natural feature, or a mark under review because it may be one."""
+    return m.status == "protected" or (m.status == "review" and m.reason not in (None, "lowConfidence"))
+
+
 def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: int, h: int, next_id: int) -> tuple[list[Mark], int]:
     L = float(max(w, h))
     for o in overrides:
@@ -1064,8 +1164,16 @@ def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: 
                 m.status = "ignored"
         else:
             if hit:
+                # The mark nearest the override's centre is the one the user chose, so it is forced
+                # whatever it is. A neighbour inside the circle is forced only if it is an ordinary
+                # mark: a protected feature, or one waiting for review because it may be one, needs
+                # its own decision (one "Correct all remaining" override per blemish must not
+                # correct the follicle next to it).
+                target = min(hit, key=lambda m: (m.x - ox) ** 2 + (m.y - oy) ** 2)
                 for m in hit:
-                    m.status = "forced"
+                    if m is not target and _needs_own_decision(m):
+                        continue
+                    m.status, m.reason = "forced", None
             else:
                 marks.append(Mark(next_id, ox, oy, orad, "manual", 1.0, "face", 0.0, status="forced"))
                 next_id += 1
@@ -1127,7 +1235,7 @@ def perfect_skin(
         rep.tiles, rep.work_scale = ana.tiles, ana.scale
     marks: list[Mark] = []
     thr = settings.confidenceThreshold / 100.0
-    for i, (x, y, r, kind, conf, is_body, contrast) in enumerate(raw):
+    for i, (x, y, r, kind, conf, is_body, contrast, why) in enumerate(raw):
         status = "detected"
         if kind in PROTECTED_KINDS:
             keep = {"mole": settings.preserveMoles, "freckle": settings.preserveFreckles,
@@ -1136,18 +1244,23 @@ def perfect_skin(
                 status = "protected"
             else:
                 kind = {"mole": "darkSpot", "freckle": "darkSpot", "birthmark": "darkSpot"}[kind]
-        if status == "detected" and conf < thr:
-            # Low confidence: preserved by default, shown for review.
+        if status == "detected" and why:
+            # Ambiguous (could be a natural feature): kept, shown for review with the reason.
             status = "review"
-        marks.append(Mark(i, x, y, r, kind, conf, "body" if is_body else "face", contrast, status=status))
+        elif status == "detected" and conf < thr:
+            # Low confidence: preserved by default, shown for review.
+            status, why = "review", "lowConfidence"
+        marks.append(Mark(i, x, y, r, kind, conf, "body" if is_body else "face", contrast, status=status,
+                          reason=why if status == "review" else None))
     next_id = len(marks)
     marks, next_id = _apply_overrides(marks, settings.overrides, w, h, next_id)
 
-    # Protected natural features (moles, freckles, birthmarks, follicles) are kept out of every
-    # repair window and every area correction, so nothing nearby can wash them out.
+    # Protected natural features (moles, freckles, birthmarks, follicles), and marks waiting for a
+    # decision because they may be one, are kept out of every repair window and every area
+    # correction, so nothing nearby can wash them out.
     keep = np.zeros((h, w), np.float32)
     for m in marks:
-        if m.status == "protected":
+        if _needs_own_decision(m):
             cv2.circle(keep, (int(round(m.x)), int(round(m.y))), int(math.ceil(1.6 * m.r + 1)), 1.0, -1, lineType=cv2.LINE_AA)
     if keep.any():
         keep = _gauss(keep, max(0.8, 0.002 * F))
@@ -1173,7 +1286,7 @@ def perfect_skin(
         # H. Residual scan of the corrected image (more sensitive), new marks join the next pass.
         boost = 20.0 * settings.residualIntensity / 100.0
         res, _ = _analyse(out, region, body, faces, F, settings, sens_boost=boost)
-        for (x, y, r, kind, conf, is_body, contrast) in res:
+        for (x, y, r, kind, conf, is_body, contrast, why) in res:
             if kind in PROTECTED_KINDS:
                 continue
             near = [m for m in marks if (m.x - x) ** 2 + (m.y - y) ** 2 <= (max(m.r, r) * 1.2) ** 2]
@@ -1193,10 +1306,11 @@ def perfect_skin(
                 if m.status == "corrected":
                     m.status = "remaining"
                 continue
-            st = "detected" if conf >= thr else "review"
+            st = "review" if why or conf < thr else "detected"
             if p + 1 >= settings.passes and st == "detected":
                 st = "remaining"  # no pass left to correct it
-            marks.append(Mark(next_id, x, y, r, kind, conf, "body" if is_body else "face", contrast, status=st, residual=True))
+            marks.append(Mark(next_id, x, y, r, kind, conf, "body" if is_body else "face", contrast, status=st, residual=True,
+                              reason=(why or "lowConfidence") if st == "review" else None))
             next_id += 1
         marks, _ = _apply_overrides(marks, [o for o in settings.overrides if o.action == "ignore"], w, h, next_id)
     for m in marks:

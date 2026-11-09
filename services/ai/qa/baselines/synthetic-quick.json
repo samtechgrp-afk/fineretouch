@@ -1,8 +1,8 @@
 {
  "suite": "synthetic",
  "note": "Synthetic skin with exact ground truth. Measures the engine on generated scenes only; it is not evidence of accuracy on real photographs.",
- "label": "phase 2B engine",
- "created": "2026-11-09 15:29:48",
+ "label": "Phase 2C quick",
+ "created": "2026-11-09 16:43:57",
  "machine": {
   "platform": "Linux-6.18.44-fc-v310-x86_64-with-glibc2.39",
   "processor": "x86_64",
@@ -12,23 +12,24 @@
   "photos": 4,
   "imperfections": 252,
   "natural": 279,
-  "precision": 0.9760956175298805,
-  "recall": 0.9484126984126984,
-  "f1": 0.9620550567243632,
+  "precision": 0.9692307692307692,
+  "recall": 0.9761904761904762,
+  "f1": 0.9726981736019582,
   "removalRate": 0.9365079365079365,
   "residualRate": 0.06349206349206349,
-  "falsePositives": 6,
+  "falsePositives": 8,
   "falseCorrections": 5,
-  "falsePositivesOnNatural": 3,
-  "falsePositivesPerMP": 1.0433701132891269,
+  "falseReviews": 3,
+  "falsePositivesOnNatural": 5,
+  "falsePositivesPerMP": 1.3911601510521692,
   "naturalPreserved": 1.0,
   "naturalDamaged": 0,
   "claimedButVisible": 2,
-  "textureRetention": 0.9999800324440002,
+  "textureRetention": 0.9999800026416779,
   "cleanSkinChangeL": 7.416151856887154e-05,
-  "msMean": 5894.511599749876,
-  "msMax": 9281.83138300028,
-  "peakMB": 590.4
+  "msMean": 6829.0253174996,
+  "msMax": 11045.42977499841,
+  "peakMB": 633.3
  },
  "byTone": {
   "fitz-I": {
@@ -36,12 +37,13 @@
    "imperfections": 46,
    "natural": 76,
    "precision": 1.0,
-   "recall": 0.9782608695652174,
-   "f1": 0.989010989010989,
+   "recall": 1.0,
+   "f1": 1.0,
    "removalRate": 0.9565217391304348,
    "residualRate": 0.04347826086956519,
    "falsePositives": 0,
    "falseCorrections": 0,
+   "falseReviews": 0,
    "falsePositivesOnNatural": 0,
    "falsePositivesPerMP": 0.0,
    "naturalPreserved": 1.0,
@@ -49,31 +51,32 @@
    "claimedButVisible": 1,
    "textureRetention": 0.9999105930328369,
    "cleanSkinChangeL": 0.00018190333503298461,
-   "msMean": 4964.504646999558,
-   "msMax": 4964.504646999558,
-   "peakMB": 482.5
+   "msMean": 5552.853867000522,
+   "msMax": 5552.853867000522,
+   "peakMB": 519.3
   },
   "fitz-VI": {
    "photos": 3,
    "imperfections": 206,
    "natural": 203,
-   "precision": 0.97,
-   "recall": 0.941747572815534,
-   "f1": 0.9556650246305418,
+   "precision": 0.9615384615384616,
+   "recall": 0.970873786407767,
+   "f1": 0.966183574879227,
    "removalRate": 0.9320388349514563,
    "residualRate": 0.06796116504854366,
-   "falsePositives": 6,
+   "falsePositives": 8,
    "falseCorrections": 5,
-   "falsePositivesOnNatural": 3,
-   "falsePositivesPerMP": 1.3194970868803064,
+   "falseReviews": 3,
+   "falsePositivesOnNatural": 5,
+   "falsePositivesPerMP": 1.759329449173742,
    "naturalPreserved": 1.0,
    "naturalDamaged": 0,
    "claimedButVisible": 1,
-   "textureRetention": 1.000003178914388,
+   "textureRetention": 1.0000031391779582,
    "cleanSkinChangeL": 3.824757974750052e-05,
-   "msMean": 6204.5139173333155,
-   "msMax": 9281.83138300028,
-   "peakMB": 590.4
+   "msMean": 7254.4158009992925,
+   "msMax": 11045.42977499841,
+   "peakMB": 633.3
   }
  },
  "byCategory": {
@@ -87,18 +90,18 @@
   },
   "blackhead": {
    "n": 66,
-   "found": 59,
+   "found": 63,
    "removed": 59,
    "claimedButVisible": 0,
-   "recall": 0.8939393939393939,
+   "recall": 0.9545454545454546,
    "removal": 0.8939393939393939
   },
   "darkSpot": {
    "n": 44,
-   "found": 41,
+   "found": 44,
    "removed": 41,
    "claimedButVisible": 0,
-   "recall": 0.9318181818181818,
+   "recall": 1.0,
    "removal": 0.9318181818181818
   },
   "follicle": {
@@ -112,7 +115,7 @@
    "n": 44,
    "kept": 44,
    "damaged": 0,
-   "wronglyFlagged": 1,
+   "wronglyFlagged": 3,
    "preserved": 1.0
   },
   "mole": {
@@ -159,10 +162,10 @@
    },
    "blackhead": {
     "n": 12,
-    "found": 11,
+    "found": 12,
     "removed": 11,
     "claimedButVisible": 0,
-    "recall": 0.9166666666666666,
+    "recall": 1.0,
     "removal": 0.9166666666666666
    },
    "darkSpot": {
@@ -230,18 +233,18 @@
    },
    "blackhead": {
     "n": 54,
-    "found": 48,
+    "found": 51,
     "removed": 48,
     "claimedButVisible": 0,
-    "recall": 0.8888888888888888,
+    "recall": 0.9444444444444444,
     "removal": 0.8888888888888888
    },
    "darkSpot": {
     "n": 36,
-    "found": 33,
+    "found": 36,
     "removed": 33,
     "claimedButVisible": 0,
-    "recall": 0.9166666666666666,
+    "recall": 1.0,
     "removal": 0.9166666666666666
    },
    "follicle": {
@@ -255,7 +258,7 @@
     "n": 36,
     "kept": 36,
     "damaged": 0,
-    "wronglyFlagged": 1,
+    "wronglyFlagged": 3,
     "preserved": 1.0
    },
    "mole": {
@@ -301,27 +304,28 @@
    "score": {
     "imperfections": 46,
     "natural": 76,
-    "flagged": 51,
-    "truePositives": 51,
-    "found": 45,
+    "flagged": 52,
+    "truePositives": 52,
+    "found": 46,
     "removed": 44,
     "skinMP": 1.203409,
     "precision": 1.0,
-    "recall": 0.9782608695652174,
-    "f1": 0.989010989010989,
+    "recall": 1.0,
+    "f1": 1.0,
     "removalRate": 0.9565217391304348,
     "residualRate": 0.04347826086956519,
     "claimedButVisible": 1,
     "falsePositives": 0,
     "falsePositivesOnNatural": 0,
     "falseCorrections": 0,
+    "falseReviews": 0,
     "falsePositivesPerMP": 0.0,
     "naturalPreserved": 1.0,
     "naturalDamaged": 0,
     "textureRetention": 0.9999105930328369,
     "cleanSkinChangeL": 0.00018190333503298461,
-    "ms": 4964.504646999558,
-    "peakMB": 482.5,
+    "ms": 5552.853867000522,
+    "peakMB": 519.3,
     "categories": {
      "acne": {
       "n": 10,
@@ -337,7 +341,7 @@
      },
      "blackhead": {
       "n": 12,
-      "found": 11,
+      "found": 12,
       "removed": 11,
       "claimedButVisible": 0
      },
@@ -378,7 +382,7 @@
       "wronglyFlagged": 0
      }
     },
-    "addedMB": 280.3
+    "addedMB": 316.9
    }
   },
   {
@@ -390,27 +394,28 @@
    "score": {
     "imperfections": 46,
     "natural": 73,
-    "flagged": 46,
+    "flagged": 47,
     "truePositives": 43,
     "found": 43,
     "removed": 42,
     "skinMP": 1.203409,
-    "precision": 0.9347826086956522,
+    "precision": 0.9148936170212766,
     "recall": 0.9347826086956522,
-    "f1": 0.9347826086956522,
+    "f1": 0.924731182795699,
     "removalRate": 0.9130434782608695,
     "residualRate": 0.08695652173913049,
     "claimedButVisible": 1,
-    "falsePositives": 3,
-    "falsePositivesOnNatural": 1,
+    "falsePositives": 4,
+    "falsePositivesOnNatural": 2,
     "falseCorrections": 2,
-    "falsePositivesPerMP": 2.492918035347916,
+    "falseReviews": 2,
+    "falsePositivesPerMP": 3.3238907137972213,
     "naturalPreserved": 1.0,
     "naturalDamaged": 0,
-    "textureRetention": 1.0000066757202148,
+    "textureRetention": 1.0000065565109253,
     "cleanSkinChangeL": 3.0987786885816604e-05,
-    "ms": 4661.854717000097,
-    "peakMB": 500.0,
+    "ms": 5434.797711999636,
+    "peakMB": 541.4,
     "categories": {
      "acne": {
       "n": 10,
@@ -458,7 +463,7 @@
       "n": 14,
       "kept": 14,
       "damaged": 0,
-      "wronglyFlagged": 0
+      "wronglyFlagged": 1
      },
      "follicle": {
       "n": 57,
@@ -467,7 +472,7 @@
       "wronglyFlagged": 1
      }
     },
-    "addedMB": 221.3
+    "addedMB": 278.7
    }
   },
   {
@@ -479,27 +484,28 @@
    "score": {
     "imperfections": 114,
     "natural": 64,
-    "flagged": 110,
-    "truePositives": 107,
-    "found": 107,
+    "flagged": 114,
+    "truePositives": 111,
+    "found": 111,
     "removed": 107,
     "skinMP": 2.140369,
-    "precision": 0.9727272727272728,
-    "recall": 0.9385964912280702,
-    "f1": 0.955357142857143,
+    "precision": 0.9736842105263158,
+    "recall": 0.9736842105263158,
+    "f1": 0.9736842105263158,
     "removalRate": 0.9385964912280702,
     "residualRate": 0.06140350877192979,
     "claimedButVisible": 0,
     "falsePositives": 3,
     "falsePositivesOnNatural": 2,
     "falseCorrections": 3,
+    "falseReviews": 0,
     "falsePositivesPerMP": 1.4016274763837449,
     "naturalPreserved": 1.0,
     "naturalDamaged": 0,
     "textureRetention": 1.0000007152557373,
     "cleanSkinChangeL": 5.263305502012372e-05,
-    "ms": 9281.83138300028,
-    "peakMB": 590.4,
+    "ms": 11045.42977499841,
+    "peakMB": 633.3,
     "categories": {
      "acne": {
       "n": 25,
@@ -515,7 +521,7 @@
      },
      "blackhead": {
       "n": 30,
-      "found": 26,
+      "found": 28,
       "removed": 26,
       "claimedButVisible": 0
      },
@@ -527,7 +533,7 @@
      },
      "darkSpot": {
       "n": 20,
-      "found": 18,
+      "found": 20,
       "removed": 18,
       "claimedButVisible": 0
      },
@@ -556,7 +562,7 @@
       "wronglyFlagged": 3
      }
     },
-    "addedMB": 215.5
+    "addedMB": 274.5
    }
   },
   {
@@ -568,27 +574,28 @@
    "score": {
     "imperfections": 46,
     "natural": 66,
-    "flagged": 44,
-    "truePositives": 44,
-    "found": 44,
+    "flagged": 47,
+    "truePositives": 46,
+    "found": 46,
     "removed": 43,
     "skinMP": 1.203409,
-    "precision": 1.0,
-    "recall": 0.9565217391304348,
-    "f1": 0.9777777777777777,
+    "precision": 0.9787234042553191,
+    "recall": 1.0,
+    "f1": 0.989247311827957,
     "removalRate": 0.9347826086956522,
     "residualRate": 0.06521739130434778,
     "claimedButVisible": 0,
-    "falsePositives": 0,
-    "falsePositivesOnNatural": 0,
+    "falsePositives": 1,
+    "falsePositivesOnNatural": 1,
     "falseCorrections": 0,
-    "falsePositivesPerMP": 0.0,
+    "falseReviews": 1,
+    "falsePositivesPerMP": 0.8309726784493053,
     "naturalPreserved": 1.0,
     "naturalDamaged": 0,
     "textureRetention": 1.000002145767212,
     "cleanSkinChangeL": 3.112189733656123e-05,
-    "ms": 4669.855651999569,
-    "peakMB": 529.0,
+    "ms": 5283.01991599983,
+    "peakMB": 571.0,
     "categories": {
      "acne": {
       "n": 10,
@@ -604,7 +611,7 @@
      },
      "blackhead": {
       "n": 12,
-      "found": 11,
+      "found": 12,
       "removed": 11,
       "claimedButVisible": 0
      },
@@ -616,7 +623,7 @@
      },
      "darkSpot": {
       "n": 8,
-      "found": 7,
+      "found": 8,
       "removed": 7,
       "claimedButVisible": 0
      },
@@ -636,7 +643,7 @@
       "n": 13,
       "kept": 13,
       "damaged": 0,
-      "wronglyFlagged": 0
+      "wronglyFlagged": 1
      },
      "follicle": {
       "n": 51,
@@ -645,7 +652,7 @@
       "wronglyFlagged": 0
      }
     },
-    "addedMB": 153.3
+    "addedMB": 273.0
    }
   }
  ]

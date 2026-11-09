@@ -125,6 +125,7 @@ def score_photo(
     fp = [m for m in flagged if not any(matches(t, m) for t in imps)]
     fp_nat = sum(any(matches(t, m) for t in nats) for m in fp)
     fp_corrected = sum(m["status"] == "corrected" for m in fp)
+    fp_review = sum(m["status"] == "review" for m in fp)  # asked about, pixels left alone
     ys, xs = np.nonzero(region)
     mp = max(1e-6, ((ys.max() - ys.min() + 1) * (xs.max() - xs.min() + 1)) / 1e6) if ys.size else 1.0
 
@@ -159,6 +160,7 @@ def score_photo(
         "falsePositives": len(fp),
         "falsePositivesOnNatural": fp_nat,
         "falseCorrections": fp_corrected,
+        "falseReviews": fp_review,
         "falsePositivesPerMP": len(fp) / mp,
         "naturalPreserved": (n_nat - damaged) / n_nat if n_nat else 1.0,
         "naturalDamaged": damaged,

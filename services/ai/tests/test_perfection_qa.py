@@ -72,6 +72,7 @@ def test_false_positives_and_claims_are_counted(scene):
     ]
     s = score_photo(img, img, labels, marks, region, F)
     assert s["falsePositives"] == 2 and s["falsePositivesOnNatural"] == 1 and s["falseCorrections"] == 1
+    assert s["falseReviews"] == 1  # the review mark on plain skin: a false flag, but nothing was changed
     assert s["claimedButVisible"] == 1  # reported corrected, still visible on the output
     assert s["categories"]["mole"]["wronglyFlagged"] == 1
 

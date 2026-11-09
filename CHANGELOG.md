@@ -38,6 +38,14 @@
   - **Overall false positives:** 30 → 12, with no regression on any tone.
 
   On five already-retouched real photos, detections changed by +1.3%. Thresholds are tuned on separate `--dev` scenes. The 30 MP render is +8% slower (51 s), and phase 2E addresses that.
+- **Phase 2C: dense clusters, stubble and Needs Review.**
+  - **Review marks carry a reason:** low confidence, may be a follicle, or may be a freckle. The panel shows it for the selected mark and counts the marks that may be a natural feature.
+  - **Never corrected unasked.** A mark that may be a natural feature is never corrected automatically or by **Correct all remaining**, and it is kept out of repair windows and area corrections.
+  - **Stubble and freckle groups.** A dot unlike its stubble field, or a spot unlike its freckle group, goes to review. So do lone or hair-aligned dots in the hair zone.
+  - **Cluster split.** Marks that merge into one broad patch at a coarse scale are corrected one by one.
+  - **Fix:** a correct override no longer forces a protected feature, or a mark under review as a possible feature, that sits next to the mark it was placed for.
+
+  Results on the synthetic benchmark (held-out scenes): recall 0.967 → 0.985, false corrections 11 → 7, natural features damaged 4 → 0, and type VI dark spots 36 of 36. False positives rose 12 → 16; all four extra are freckles left for review, untouched. The report now counts these separately.
 - **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)

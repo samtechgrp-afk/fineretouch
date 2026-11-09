@@ -5,6 +5,8 @@ import {
   PERFECTION_CATEGORY_LABELS,
   PERFECTION_GROUPS,
   correctRemaining,
+  isBulkCorrectable,
+  REVIEW_REASON_TEXT,
   groupSensitivity,
   overrideMark,
   setGroupSensitivity,
@@ -61,7 +63,8 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
   const marksById = new Map(report?.marks.map((m) => [m.id, m]) ?? []);
   const chosen = selected.map((id) => marksById.get(id)).filter((m): m is NonNullable<typeof m> => Boolean(m));
   const minConf = sp.confidenceThreshold / 100;
-  const fixable = report?.marks.filter((m) => (m.status === 'remaining' || m.status === 'review') && m.confidence >= minConf).length ?? 0;
+  const fixable = report?.marks.filter((m) => isBulkCorrectable(m, minConf)).length ?? 0;
+  const undecided = report?.marks.filter((m) => m.status === 'review' && m.reason && m.reason !== 'lowConfidence').length ?? 0;
   const status = !on
     ? 'Off'
     : !aiOnline
@@ -183,12 +186,17 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
             {report.textureRetention !== null && ` · texture kept ${Math.round(report.textureRetention * 100)}%`}
           </p>
         )}
+        {undecided > 0 && (
+          <p className="mt-1 text-[11px] text-rose-300" data-testid="perfection-undecided">
+            {undecided} mark{undecided > 1 ? 's' : ''} may be a freckle or a hair follicle. They are left untouched until you select them and choose Correct or Ignore.
+          </p>
+        )}
         {report && (
           <ul className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-ink-400" aria-label="Overlay legend">
             {(['corrected', 'remaining', 'review', 'protected', 'ignored'] as const).map((k) => (
               <li key={k} className="flex items-center gap-1">
                 <span className="inline-block h-2 w-2 rounded-full border-2" style={{ borderColor: MARK_COLOURS[k] }} />
-                {k === 'review' ? 'low confidence' : k}
+                {k === 'review' ? 'needs review' : k}
               </li>
             ))}
           </ul>
@@ -198,7 +206,7 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
             className="btn-primary"
             disabled={!on || !report || fixable === 0}
             onClick={() => commit(correctRemaining(sp, report!, minConf))}
-            title="Correct every remaining mark at or above the confidence threshold (one undo step)"
+            title="Correct every remaining mark at or above the confidence threshold (one undo step). Marks that may be a freckle or a follicle are never included."
           >
             Correct all remaining {fixable ? `(${fixable})` : ''}
           </button>
@@ -218,6 +226,9 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
                 ? `${kindLabel(chosen[0].kind)} · ${chosen[0].region} · ${Math.round(chosen[0].confidence * 100)}% · ${chosen[0].status}`
                 : `${chosen.length} marks selected`}
             </p>
+            {chosen.length === 1 && chosen[0].status === 'review' && chosen[0].reason && (
+              <p className="mt-1 text-ink-300" data-testid="perfection-reason">{REVIEW_REASON_TEXT[chosen[0].reason]}</p>
+            )}
             <div className="mt-1.5 flex gap-2">
               <button className="btn flex-1" onClick={() => { commit(chosen.reduce((s, m) => overrideMark(s, m, 'correct'), sp)); select([]); }}>Correct</button>
               <button className="btn flex-1" onClick={() => { commit(chosen.reduce((s, m) => overrideMark(s, m, 'ignore'), sp)); select([]); }}>Ignore</button>
