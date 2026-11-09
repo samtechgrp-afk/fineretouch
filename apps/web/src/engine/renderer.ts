@@ -90,6 +90,7 @@ export class Renderer {
   private vao: WebGLVertexArrayObject;
   private src: WebGLTexture | null = null;
   private mask: WebGLTexture | null = null;
+  private edit: WebGLTexture | null = null;
   private tmp: Target | null = null;
   private bands: Target[] = [];
   private out: Target | null = null;
@@ -148,6 +149,7 @@ export class Renderer {
     this.overlayTarget = null;
     this.shown = this.base = this.out;
     this.setMask(null);
+    this.setEdit(null);
     this.setHairRoi(null);
     this.setDepth(null);
     this.setLensRoi(null);
@@ -171,6 +173,12 @@ export class Renderer {
     const gl = this.gl;
     if (this.mask) gl.deleteTexture(this.mask);
     this.mask = data ? this.texture(width, height, null, data) : this.texture(1, 1, null, new Uint8Array(4));
+  }
+
+  /** User mask strokes as RGBA (r = add, g = erase), sampled by UV; null when there are none. */
+  setEdit(data: Uint8Array | null, width = 1, height = 1): void {
+    if (this.edit) this.gl.deleteTexture(this.edit);
+    this.edit = data ? this.texture(width, height, null, data) : null;
   }
 
   /** Single-channel (0..255) stray-hair region, or null to disable the hair pass. */
@@ -257,6 +265,8 @@ export class Renderer {
     this.bindTex(p, 'uMask', this.mask!, 4);
     this.bindTex(p, 'uLow3', this.bands[3].tex, 5);
     this.bindTex(p, 'uHairRoi', this.hairRoi ?? this.mask!, 6);
+    this.bindTex(p, 'uEdit', this.edit ?? this.mask!, 7);
+    gl.uniform1i(this.loc(p, 'uHasEdit'), this.edit ? 1 : 0);
     const u = (name: string, v: number) => gl.uniform1f(this.loc(p, name), v);
     gl.uniform1i(this.loc(p, 'uHasFace'), info.hasFace ? 1 : 0);
     u('uExposure', adj.exposure / 100);
@@ -459,6 +469,8 @@ export class Renderer {
     gl.uniform1i(this.loc(p, 'uShowMask'), view.showMask ? 1 : 0);
     gl.uniform1i(this.loc(p, 'uOverlayOn'), overlay ? 1 : 0);
     this.bindTex(p, 'uOverlay', overlay ?? this.mask!, 3);
+    this.bindTex(p, 'uEdit', this.edit ?? this.mask!, 4);
+    gl.uniform1i(this.loc(p, 'uHasEdit'), this.edit ? 1 : 0);
     gl.uniform3fv(this.loc(p, 'uBg'), view.background);
     gl.uniform1f(this.loc(p, 'uDpr'), view.dpr);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -510,9 +522,9 @@ export class Renderer {
 
   private disposeImageResources() {
     const gl = this.gl;
-    for (const t of [this.src, this.mask, this.hairRoi, this.depth, this.lens, this.seg]) if (t) gl.deleteTexture(t);
+    for (const t of [this.src, this.mask, this.edit, this.hairRoi, this.depth, this.lens, this.seg]) if (t) gl.deleteTexture(t);
     this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.bokehTargets]);
-    this.src = this.mask = this.hairRoi = this.depth = this.lens = this.seg = null;
+    this.src = this.mask = this.edit = this.hairRoi = this.depth = this.lens = this.seg = null;
     this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = null;
     this.bands = [];
     this.bokehTargets = [];

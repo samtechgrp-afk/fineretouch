@@ -1,12 +1,12 @@
 'use client';
 
-import type { Adjustments, ColorStats, ImageAnalysis } from '@fineretouch/shared';
+import type { Adjustments, ColorStats, ImageAnalysis, SkinMaskSettings } from '@fineretouch/shared';
 import JSZip from 'jszip';
 import { Renderer } from '@/engine/renderer';
-import { buildFaceMask } from '@/engine/masks';
+import { buildEditMask, buildFaceMask } from '@/engine/masks';
 import { ensureDepth, hairRoiFor } from './depth';
-import { ensureSegmentation, lensRoiFor } from './studio';
-import { fitSize, getCachedMask, setCachedMask } from './images';
+import { ensureParse, ensureSegmentation, lensRoiFor } from './studio';
+import { fitSize, getCachedEdit, getCachedMask, getParse, setCachedEdit, setCachedMask } from './images';
 import { drawWatermark, watermarkActive, type WatermarkSettings } from './watermark';
 
 export const MASK_LONG_EDGE = 1536;
@@ -17,16 +17,51 @@ export interface MaskData {
   height: number;
 }
 
-/** Face mask for a photo at a fixed working size (cached; masks are soft and sampled by UV). */
-export function faceMaskFor(id: string, analysis: ImageAnalysis | null, aspectW: number, aspectH: number): MaskData | null {
+/** Brush strokes are drawn at this size (they are soft, and sampled by UV like the face mask). */
+export const EDIT_LONG_EDGE = 1536;
+
+function parsePixels(bmp: ImageBitmap, w: number, h: number): Uint8ClampedArray {
+  const c = new OffscreenCanvas(w, h);
+  const ctx = c.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(bmp, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h).data;
+}
+
+/**
+ * Face mask for a photo at a fixed working size (cached; masks are soft and sampled by UV).
+ * With the engine's face parsing (and skinMask.useSegmentation) the skin channel is the
+ * semantic mask of pipeline.build_masks; otherwise landmarks only.
+ */
+export function faceMaskFor(
+  id: string,
+  analysis: ImageAnalysis | null,
+  aspectW: number,
+  aspectH: number,
+  skinMask?: SkinMaskSettings,
+): MaskData | null {
   if (!analysis?.faces.length) return null;
   const [w, h] = fitSize(aspectW, aspectH, MASK_LONG_EDGE);
-  let data = getCachedMask(id);
-  if (!data || data.length !== w * h * 4) {
-    data = buildFaceMask(analysis.faces, w, h);
-    setCachedMask(id, data);
+  const parse = skinMask?.useSegmentation ? getParse(id) : undefined;
+  const key = `${w}x${h}:${parse ? (skinMask!.includeBodySkin ? 'parse+body' : 'parse') : 'landmarks'}:${analysis.faces.length}`;
+  let data = getCachedMask(id, key);
+  if (!data) {
+    data = buildFaceMask(analysis.faces, w, h, parse ? { data: parsePixels(parse, w, h), includeBody: skinMask!.includeBodySkin } : null);
+    setCachedMask(id, key, data);
   }
   return { data, width: w, height: h };
+}
+
+/** The user's brush strokes as a texture (r add, g erase), or null without strokes. Cached. */
+export function editMaskFor(id: string, skinMask: SkinMaskSettings, aspectW: number, aspectH: number): MaskData | null {
+  if (!skinMask.strokes.length) return null;
+  const [w, h] = fitSize(aspectW, aspectH, EDIT_LONG_EDGE);
+  const key = [skinMask.strokes, skinMask.feather, w, h];
+  let entry = getCachedEdit(id, key);
+  if (!entry) {
+    setCachedEdit(id, key, buildEditMask(skinMask.strokes, w, h, skinMask.feather));
+    entry = getCachedEdit(id, key)!;
+  }
+  return entry.data ? { data: entry.data, width: w, height: h } : null;
 }
 
 export interface ExportOptions {
@@ -60,8 +95,11 @@ export async function renderFullRes(
     const source = w === bmp.width && h === bmp.height ? bmp : await createImageBitmap(bmp, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
     renderer.setSource(source, w, h);
     if (source !== bmp) source.close();
-    const mask = faceMaskFor(ctx.id, ctx.analysis, w, h);
+    if (adjustments.skinMask.useSegmentation && ctx.analysis?.faces.length) await ensureParse(ctx.id);
+    const mask = faceMaskFor(ctx.id, ctx.analysis, w, h, adjustments.skinMask);
     if (mask) renderer.setMask(mask.data, mask.width, mask.height);
+    const edit = editMaskFor(ctx.id, adjustments.skinMask, w, h);
+    if (edit) renderer.setEdit(edit.data, edit.width, edit.height);
     if (adjustments.strayHairRemoval.enabled) {
       const roi = hairRoiFor(ctx.id, ctx.analysis, w, h);
       if (roi) renderer.setHairRoi(roi.data, roi.width, roi.height);

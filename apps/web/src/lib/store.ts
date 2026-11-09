@@ -9,6 +9,7 @@ import {
   mapStyleToAdjustments,
   sanitizeAdjustments,
   smartSyncAdjustments,
+  withOwnStrokes,
   type AdjustmentKey,
   type Adjustments,
   type ColorMatch,
@@ -17,6 +18,8 @@ import {
   type EffectControl,
   type EffectId,
   type ImageAnalysis,
+  type MaskStroke,
+  type SkinMaskSettings,
   type Preset,
   type SkinMultiplier,
   type StrayHairSettings,
@@ -76,6 +79,8 @@ export interface Photo {
   profile: StyleProfile | null;
   depthState: DepthState;
   segmentState: SegmentState;
+  /** AI face parsing for the semantic skin mask (same states as segmentation). */
+  parseState: SegmentState;
   rejected: boolean;
   /** Camera RAW original: format, badge label and EXIF (null for JPEG/PNG/...). */
   raw?: RawInfo | null;
@@ -93,6 +98,10 @@ export interface ViewState {
   panX: number; // CSS px
   panY: number;
   showMask: boolean;
+  /** Skin mask brush in the viewport (null = pan / compare as usual). */
+  maskBrush: 'add' | 'erase' | null;
+  /** Brush radius as a share of the photo's long edge. */
+  brushSize: number;
   /** Pro studio QA overlay in the viewport (never exported). */
   overlay: StudioOverlay;
 }
@@ -132,6 +141,12 @@ export interface EditorState {
   /** Master retouch strength (0..100). `live` skips history. */
   setGlobalStrength(value: number, opts?: { live?: boolean; ids?: string[] }): void;
   /** `live` skips history (slider drags); call beginEdit() at drag start. */
+  /** Skin mask options (parsing, body skin, feather); strokes go through addMaskStroke. */
+  setSkinMask(patch: Partial<Omit<SkinMaskSettings, 'strokes'>>, opts?: { live?: boolean; ids?: string[] }): void;
+  /** One brush stroke on the active photo's skin mask (one undo step). */
+  addMaskStroke(stroke: MaskStroke): void;
+  /** Remove the active photo's brush strokes (one undo step). */
+  clearMaskStrokes(): void;
   setStrayHairRemoval(patch: Partial<StrayHairSettings>, opts?: { live?: boolean; ids?: string[] }): void;
   setDepthBokeh(patch: Partial<DepthBokehSettings>, opts?: { live?: boolean; ids?: string[] }): void;
   setStyleReference(ref: Pick<StyleSyncState, 'referenceImageId' | 'referenceName' | 'referenceUrl' | 'profile' | 'matchedPalette'> | null): void;
@@ -145,6 +160,7 @@ export interface EditorState {
   setProfile(id: string, profile: StyleProfile): void;
   setDepthState(id: string, state: DepthState): void;
   setSegmentState(id: string, state: SegmentState): void;
+  setParseState(id: string, state: SegmentState): void;
   undo(id?: string): void;
   redo(id?: string): void;
   resetPhotos(ids?: string[]): void;
@@ -210,7 +226,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   order: [],
   activeId: null,
   selected: [],
-  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false, overlay: 'none' },
+  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false, maskBrush: null, brushSize: 0.03, overlay: 'none' },
   clipboard: null,
   customPresets: loadCustomPresets(),
   aiOnline: null,
@@ -244,6 +260,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
           profile: null,
           depthState: 'none',
           segmentState: 'none',
+          parseState: 'none',
           rejected: false,
         };
         order.push(p.id);
@@ -373,6 +390,32 @@ export const useEditor = create<EditorState>()((set, get) => ({
     else get().updateAdjustments({ globalStrength: value }, opts?.ids);
   },
 
+  setSkinMask(patch, opts) {
+    const s = get();
+    const apply = (a: Adjustments) => sanitizeAdjustments({ ...a, skinMask: { ...a.skinMask, ...patch } });
+    if (opts?.live) {
+      const p = selectActivePhoto(s);
+      if (p) set({ photos: mapPhotos(s, [p.id], (q) => ({ ...q, adjustments: apply(q.adjustments) })) });
+      return;
+    }
+    set({ photos: mapPhotos(s, targets(s, opts?.ids), (p) => withHistory(p, apply(p.adjustments))) });
+  },
+
+  addMaskStroke(stroke) {
+    const s = get();
+    const p = selectActivePhoto(s);
+    if (!p || stroke.points.length < 2) return;
+    const next = sanitizeAdjustments({ ...p.adjustments, skinMask: { ...p.adjustments.skinMask, strokes: [...p.adjustments.skinMask.strokes, stroke] } });
+    set({ photos: mapPhotos(s, [p.id], (q) => withHistory(q, next)) });
+  },
+
+  clearMaskStrokes() {
+    const s = get();
+    const p = selectActivePhoto(s);
+    if (!p || !p.adjustments.skinMask.strokes.length) return;
+    set({ photos: mapPhotos(s, [p.id], (q) => withHistory(q, { ...q.adjustments, skinMask: { ...q.adjustments.skinMask, strokes: [] } })) });
+  },
+
   setStrayHairRemoval(patch, opts) {
     const s = get();
     if (opts?.live) {
@@ -442,7 +485,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
         const st = p.analysis?.colorStats ?? p.localStats;
         if (!st) return p;
         n++;
-        return withHistory(p, smartSyncAdjustments(hero.adjustments, heroStats, st));
+        return withHistory(p, withOwnStrokes(smartSyncAdjustments(hero.adjustments, heroStats, st), p.adjustments));
       }),
     });
     return n;
@@ -462,6 +505,11 @@ export const useEditor = create<EditorState>()((set, get) => ({
   setProfile(id, profile) {
     const s = get();
     if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], profile } } });
+  },
+
+  setParseState(id, state) {
+    const s = get();
+    if (s.photos[id]) set({ photos: { ...s.photos, [id]: { ...s.photos[id], parseState: state } } });
   },
 
   setSegmentState(id, state) {
@@ -510,7 +558,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
     const s = get();
     if (!s.clipboard) return;
     const clip = s.clipboard;
-    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, { ...clip })) });
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, withOwnStrokes({ ...clip }, p.adjustments))) });
   },
 
   syncToSelected() {
@@ -518,7 +566,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
     if (!s.activeId) return;
     const src = s.photos[s.activeId].adjustments;
     const ids = (s.selected.length > 1 ? s.selected : s.order).filter((id) => id !== s.activeId);
-    set({ photos: mapPhotos(s, ids, (p) => withHistory(p, { ...src })) });
+    set({ photos: mapPhotos(s, ids, (p) => withHistory(p, withOwnStrokes({ ...src }, p.adjustments))) });
   },
 
   applyPresetTo(preset, ids) {
@@ -533,7 +581,8 @@ export const useEditor = create<EditorState>()((set, get) => ({
       id: `custom-${Date.now().toString(36)}`,
       name: name.trim().slice(0, 60),
       description: 'Saved from your edits',
-      adjustments: { ...s.photos[s.activeId].adjustments },
+      // Brush strokes belong to this photo's pixels, not to a reusable preset.
+      adjustments: { ...s.photos[s.activeId].adjustments, skinMask: { ...s.photos[s.activeId].adjustments.skinMask, strokes: [] } },
     };
     const customPresets = [...s.customPresets, preset];
     persistCustomPresets(customPresets);

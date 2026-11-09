@@ -134,6 +134,7 @@ export function Editor() {
       else if (e.key === '\\') s.setView({ mode: s.view.mode === 'original' ? 'edited' : 'original' });
       else if (e.key.toLowerCase() === 'y') s.setView({ mode: s.view.mode === 'split' ? 'edited' : 'split' });
       else if (e.key.toLowerCase() === 'm') s.setView({ showMask: !s.view.showMask });
+      else if (e.key === 'Escape' && s.view.maskBrush) s.setView({ maskBrush: null });
       else if (e.key.toLowerCase() === 'd') s.setView({ mode: s.view.mode === 'diff' ? 'edited' : 'diff' });
       else if (e.key.toLowerCase() === 'x' && s.activeId) s.toggleRejected(s.activeId);
       else if (e.key === '0') requestZoom('fit');

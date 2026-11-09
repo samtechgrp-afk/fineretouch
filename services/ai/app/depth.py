@@ -24,6 +24,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from .masking import FaceParse
 from .schemas import FaceAnalysis
 
 log = logging.getLogger(__name__)
@@ -133,11 +134,10 @@ class DepthEstimator:
             self._midas_failed = True
             return None
 
-    def _person_mask(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        """(person, hair, clothes) probabilities, each HxW float32, or None.
+    def _class_masks(self, rgb: np.ndarray) -> list[np.ndarray] | None:
+        """Confidence masks of the selfie multiclass model at rgb's size, or None.
 
-        The selfie multiclass model's classes are 0 background, 1 hair, 2 body skin,
-        3 face skin, 4 clothes, 5 accessories."""
+        Classes: 0 background, 1 hair, 2 body skin, 3 face skin, 4 clothes, 5 accessories."""
         if not self.segmenter_path.exists() or self._segmenter_failed:
             return None
         try:
@@ -154,19 +154,36 @@ class DepthEstimator:
                     )
                     self._segmenter = vision.ImageSegmenter.create_from_options(opts)
                 result = self._segmenter.segment(mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb)))
-            masks = result.confidence_masks
-            background = masks[0].numpy_view().astype(np.float32)
-            hair = masks[1].numpy_view().astype(np.float32) if len(masks) > 1 else np.zeros_like(background)
             size = (rgb.shape[1], rgb.shape[0])
-            person = 1.0 - cv2.resize(background, size, interpolation=cv2.INTER_LINEAR)
-            hair = cv2.resize(hair, size, interpolation=cv2.INTER_LINEAR)
-            clothes = masks[4].numpy_view().astype(np.float32) if len(masks) > 4 else np.zeros_like(background)
-            clothes = cv2.resize(clothes, size, interpolation=cv2.INTER_LINEAR)
-            return np.clip(person, 0, 1), np.clip(hair, 0, 1), np.clip(clothes, 0, 1)
+            out = [
+                np.clip(cv2.resize(m.numpy_view().astype(np.float32), size, interpolation=cv2.INTER_LINEAR), 0, 1)
+                for m in result.confidence_masks
+            ]
+            while len(out) < 6:
+                out.append(np.zeros(rgb.shape[:2], np.float32))
+            return out
         except Exception as exc:
             log.error("Selfie segmenter unavailable: %s", exc)
             self._segmenter_failed = True
             return None
+
+    def _person_mask(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        """(person, hair, clothes) probabilities, each HxW float32, or None."""
+        m = self._class_masks(rgb)
+        if m is None:
+            return None
+        return 1.0 - m[0], m[1], m[4]
+
+    def parse(self, rgb: np.ndarray) -> FaceParse | None:
+        """Face skin, body skin and hair probabilities at the image's resolution (model run on a
+        <=512 px proxy). Used for the semantic skin mask (app/masking.py)."""
+        h, w = rgb.shape[:2]
+        s = min(1.0, WORK_LONG_EDGE / max(h, w))
+        small = cv2.resize(rgb, (max(1, round(w * s)), max(1, round(h * s))), interpolation=cv2.INTER_AREA) if s < 1 else rgb
+        m = self._class_masks(small)
+        if m is None:
+            return None
+        return FaceParse(face_skin=m[3], body_skin=m[2], hair=m[1]).resized(h, w)
 
     def segment(self, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
         """Person, hair and clothes probability at the image's resolution (computed on a <=512px proxy)."""

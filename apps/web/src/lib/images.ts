@@ -31,7 +31,9 @@ const files = new Map<string, File>();
 /** For RAW originals: the embedded camera JPEG (a lazy slice of the file) and its orientation. */
 const rawPreviews = new Map<string, { blob: Blob; orientation: number }>();
 const proxies = new Map<string, ImageBitmap>();
-const masks = new Map<string, Uint8Array>();
+const masks = new Map<string, { key: string; data: Uint8Array }>();
+const edits = new Map<string, { key: unknown[]; data: Uint8Array | null }>();
+const parses = new Map<string, ImageBitmap>();
 const hairRois = new Map<string, Uint8Array>();
 
 /** A depth map ready for Renderer.setDepth: a decoded image or single-channel bytes. */
@@ -136,10 +138,24 @@ export async function loadImage(id: string, file: File): Promise<LoadedImage> {
 
 export const getFile = (id: string) => files.get(id);
 export const getProxy = (id: string) => proxies.get(id);
-export const getCachedMask = (id: string) => masks.get(id);
-export const setCachedMask = (id: string, m: Uint8Array) => masks.set(id, m);
+/** Face mask cache; `key` names what it was built from (size, parsing, body skin). */
+export const getCachedMask = (id: string, key: string) => (masks.get(id)?.key === key ? masks.get(id)!.data : undefined);
+export const setCachedMask = (id: string, key: string, data: Uint8Array) => masks.set(id, { key, data });
+/** Brush-stroke texture cache, keyed by [strokes array, feather, width, height] identity. */
+export const getCachedEdit = (id: string, key: unknown[]) => {
+  const e = edits.get(id);
+  return e && e.key.length === key.length && e.key.every((k, i) => k === key[i]) ? e : undefined;
+};
+export const setCachedEdit = (id: string, key: unknown[], data: Uint8Array | null) => edits.set(id, { key, data });
+export const getParse = (id: string) => parses.get(id);
+export const setParse = (id: string, bmp: ImageBitmap) => {
+  parses.get(id)?.close();
+  parses.set(id, bmp);
+  masks.delete(id);
+};
 export const clearCachedMask = (id: string) => {
   masks.delete(id);
+  edits.delete(id);
   hairRois.delete(id);
   lensRois.delete(id);
 };
@@ -169,6 +185,9 @@ export function forgetImage(id: string) {
   files.delete(id);
   rawPreviews.delete(id);
   masks.delete(id);
+  edits.delete(id);
+  parses.get(id)?.close();
+  parses.delete(id);
   hairRois.delete(id);
   const d = depths.get(id);
   if (d && 'close' in d.source) d.source.close();

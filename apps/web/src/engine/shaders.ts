@@ -133,6 +133,8 @@ precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uSrc, uLow0, uLow1, uLow2, uLow3, uMask, uHairRoi;
+uniform sampler2D uEdit;        // user mask strokes: r = add, g = erase (masking.apply_mask_edits)
+uniform bool uHasEdit;
 uniform bool uHasFace;
 uniform float uMultiplier;      // 1..3 skin boost
 uniform float uSpotMultiplier;  // 1..3 spot detection reach (max of skin boost and spot healing multiplier)
@@ -216,12 +218,16 @@ void main() {
 
   float p = skinProb(low0);
   float skin = uHasFace ? m.r * (0.35 + 0.65 * p) : p * 0.8;
+  // Brush strokes are absolute: "add" paints skin in, "erase" protects it from every skin tool.
+  vec2 e = uHasEdit ? texture(uEdit, vUv).rg : vec2(0.0);
+  skin = max(skin, e.r) * (1.0 - e.g);
+  float faceArea = max(m.r, e.r) * (1.0 - e.g);
 
   vec3 c = src;
   vec3 fine = src - low1;
   vec3 mid = low1 - low2;
 
-  float face = uHasFace ? m.r : skin;
+  float face = uHasFace ? faceArea : skin;
   // Acne removal (preview of retouch_engine.remove_acne): red spots get the surrounding tone
   // plus their own grain, then excess redness around them is pulled back to the local skin.
   if (uAcne > 0.0) {
@@ -269,7 +275,7 @@ void main() {
     float r = crOf(low1) - crOf(low2);
     float spot = max(smoothstep(0.015 / sens, 0.05 / sens, d), smoothstep(0.012 / sens, 0.035 / sens, r));
     if (uProtectMoles) spot *= 1.0 - smoothstep(0.1, 0.16, luma(low2) - luma(low0)) * (1.0 - smoothstep(0.01, 0.025, r));
-    float area = uHasFace ? m.r : skin;
+    float area = uHasFace ? faceArea : skin;
     vec3 clean = low2 + fine * uTexture;
     c += (clean - c) * spot * area * min(1.0, uBlemish * (0.9 + 0.1 * sens));
   }
@@ -372,7 +378,8 @@ void main() {
 export const DISPLAY_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 out vec4 outColor;
-uniform sampler2D uProcessed, uOriginal, uMask, uOverlay;
+uniform sampler2D uProcessed, uOriginal, uMask, uOverlay, uEdit;
+uniform bool uHasEdit;
 uniform bool uOverlayOn;  // pro studio QA overlay (premultiplied by its own alpha below)
 uniform vec2 uCanvas;   // canvas size in device pixels
 uniform vec2 uImage;    // proxy size in pixels
@@ -421,7 +428,8 @@ void main() {
   }
   if (uShowMask) {
     vec4 m = texture(uMask, ip / uImage);
-    c = mix(c, vec3(1.0, 0.25, 0.35), m.r * 0.45);
+    vec2 e = uHasEdit ? texture(uEdit, ip / uImage).rg : vec2(0.0);
+    c = mix(c, vec3(1.0, 0.25, 0.35), max(m.r, e.r) * (1.0 - e.g) * 0.45);
     c = mix(c, vec3(0.2, 0.9, 0.4), m.g * 0.6);
     c = mix(c, vec3(0.3, 0.5, 1.0), m.b * 0.6);
     c = mix(c, vec3(1.0, 0.9, 0.2), m.a * 0.6);

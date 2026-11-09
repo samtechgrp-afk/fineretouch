@@ -44,6 +44,7 @@ import numpy as np
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .effects import detector_multiplier, resolve_adjustments
+from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep
 from .retouch_engine import (
     apply_boosted_skin_retouch,
     apply_depth_bokeh,
@@ -119,8 +120,15 @@ class FaceMasks:
     face_width: float = 0.0  # widest face, px
 
 
-def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
-    """Rasterise normalised landmark polygons into feathered float masks."""
+def build_masks(
+    faces: list[FaceAnalysis], h: int, w: int, parse: FaceParse | None = None, include_body: bool = False,
+) -> FaceMasks:
+    """Rasterise normalised landmark polygons into feathered float masks.
+
+    parse: optional face parsing (app/masking.py). Semantic face skin near a detected face
+    extends the skin mask to the hairline, ears and jaw; hair removes skin where it lies across
+    the face; include_body adds neck / chest / arm skin. Eyes, brows and lips stay cut out.
+    """
     skin = np.zeros((h, w), np.float32)
     eyes = np.zeros((h, w), np.float32)
     under = np.zeros((h, w), np.float32)
@@ -166,10 +174,22 @@ def build_masks(faces: list[FaceAnalysis], h: int, w: int) -> FaceMasks:
     inside = cv2.erode(inside, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.1) | 1,) * 2))
     features = cv2.dilate(features, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.03) | 1,) * 2))
     forehead[(inside > 0) | (features > 0)] = 0.0
+    skin = blur(skin, face_w * 0.025)
+    forehead = blur(forehead, face_w * 0.025)
+    if parse is not None:
+        p = parse.resized(h, w)
+        cut = 1.0 - blur(features.astype(np.float32), face_w * 0.006)
+        zone = face_zone([(f.box[0] * w, f.box[1] * h, f.box[2] * w, f.box[3] * h) for f in faces], h, w)
+        skin = np.maximum(skin, blur(p.face_skin * zone, face_w * 0.004) * cut)
+        if include_body:
+            skin = np.maximum(skin, blur(p.body_skin, face_w * 0.004) * cut)
+        keep = hair_keep(blur(p.hair, face_w * 0.004))
+        skin = skin * keep
+        forehead = forehead * keep
     return FaceMasks(
-        forehead=blur(forehead, face_w * 0.025),
+        forehead=forehead,
         face_width=face_w,
-        skin=blur(skin, face_w * 0.025),
+        skin=skin,
         eyes=blur(eyes, face_w * 0.006),
         under_eye=blur(under, face_w * 0.02),
         mouth=blur(mouth, face_w * 0.004),
@@ -269,11 +289,13 @@ def render(
     depth: np.ndarray | None = None,
     hair_prob: np.ndarray | None = None,
     clothes_prob: np.ndarray | None = None,
+    parse: FaceParse | None = None,
 ) -> np.ndarray:
     """rgb8: HxWx3 uint8 (or uint16, e.g. a demosaiced camera RAW) sRGB -> HxWx3 uint8 sRGB.
 
     depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
     hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
+    parse: optional face parsing (face skin, body skin, hair; app/masking.py) for the skin mask.
     clothes_prob: optional garment probability (HxW, the segmenter's clothes class) for the
     clothing iron and recolour; without it a portrait prior below the chin is used.
     """
@@ -286,7 +308,8 @@ def render(
     low0 = blur(src, S0 * L)
     low1 = blur(src, S1 * L)
     low2 = blur(src, S2 * L)
-    masks = build_masks(faces, h, w)
+    sm = adj.skinMask
+    masks = build_masks(faces, h, w, parse if sm.useSegmentation else None, sm.includeBodySkin)
 
     p = skin_probability(low0)
     if masks.has_face:
@@ -298,6 +321,8 @@ def render(
             skin = np.maximum(skin, masks.forehead * own)
     else:
         skin = p * 0.8
+    # User mask strokes: "add" paints skin in, "erase" protects an area from every skin tool.
+    skin = apply_mask_edits(skin.astype(np.float32), sm)
     skin = skin[..., None]
 
     c = src.copy()
