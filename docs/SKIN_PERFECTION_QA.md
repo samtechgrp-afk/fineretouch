@@ -432,7 +432,13 @@ Not met on this container. Time is 37 to 40 s against 25 s, and the 25 MP photo 
 - Repairs: 3.7 s.
 - Rest of the render: about 7 s.
 
-### Options that would change the output (not done; each needs a decision)
+### Decision (2026-11-09)
+
+Sam accepted about 37 s for a 30 MP photo. Quality comes first: full-resolution detection and
+every verification stage stay. Later performance work must leave the output unchanged, so the
+two options below are declined unless they are shown to cause no quality loss.
+
+### Options that would change the output (declined)
 
 - **Body-skin weight floor.** On CRPixels-1, weights between 0.1% and 5% (segmentation noise)
   cover 90% of the frame, so the area tools work on the whole photo, at about 1% strength in the
