@@ -1,0 +1,652 @@
+{
+ "suite": "synthetic",
+ "note": "Synthetic skin with exact ground truth. Measures the engine on generated scenes only; it is not evidence of accuracy on real photographs.",
+ "label": "PR #13 engine (6fd46d3)",
+ "created": "2026-11-09 14:08:01",
+ "machine": {
+  "platform": "Linux-6.18.44-fc-v310-x86_64-with-glibc2.39",
+  "processor": "x86_64",
+  "python": "3.13.18"
+ },
+ "overall": {
+  "photos": 4,
+  "imperfections": 252,
+  "natural": 279,
+  "precision": 0.9282868525896414,
+  "recall": 0.8928571428571429,
+  "f1": 0.9102273615126182,
+  "removalRate": 0.8888888888888888,
+  "residualRate": 0.11111111111111116,
+  "falsePositives": 18,
+  "falseCorrections": 16,
+  "falsePositivesOnNatural": 3,
+  "falsePositivesPerMP": 3.1301103398673806,
+  "naturalPreserved": 1.0,
+  "naturalDamaged": 0,
+  "claimedButVisible": 1,
+  "textureRetention": 0.9999857991933823,
+  "cleanSkinChangeL": 6.907746592332842e-05,
+  "msMean": 5241.134199999991,
+  "msMax": 6828.778288000023,
+  "peakMB": 603.9
+ },
+ "byTone": {
+  "fitz-I": {
+   "photos": 1,
+   "imperfections": 46,
+   "natural": 76,
+   "precision": 1.0,
+   "recall": 0.9782608695652174,
+   "f1": 0.989010989010989,
+   "removalRate": 0.9565217391304348,
+   "residualRate": 0.04347826086956519,
+   "falsePositives": 0,
+   "falseCorrections": 0,
+   "falsePositivesOnNatural": 0,
+   "falsePositivesPerMP": 0.0,
+   "naturalPreserved": 1.0,
+   "naturalDamaged": 0,
+   "claimedButVisible": 1,
+   "textureRetention": 0.9999164938926697,
+   "cleanSkinChangeL": 0.00018330632883589715,
+   "msMean": 4550.67653499998,
+   "msMax": 4550.67653499998,
+   "peakMB": 479.1
+  },
+  "fitz-VI": {
+   "photos": 3,
+   "imperfections": 206,
+   "natural": 203,
+   "precision": 0.9095477386934674,
+   "recall": 0.8737864077669902,
+   "f1": 0.8913085109293356,
+   "removalRate": 0.8737864077669902,
+   "residualRate": 0.12621359223300976,
+   "falsePositives": 18,
+   "falseCorrections": 16,
+   "falsePositivesOnNatural": 3,
+   "falsePositivesPerMP": 3.958491260640919,
+   "naturalPreserved": 1.0,
+   "naturalDamaged": 0,
+   "claimedButVisible": 0,
+   "textureRetention": 1.0000089009602864,
+   "cleanSkinChangeL": 3.100117828580551e-05,
+   "msMean": 5471.286754999994,
+   "msMax": 6828.778288000023,
+   "peakMB": 603.9
+  }
+ },
+ "byCategory": {
+  "acne": {
+   "n": 55,
+   "found": 54,
+   "removed": 54,
+   "claimedButVisible": 0,
+   "recall": 0.9818181818181818,
+   "removal": 0.9818181818181818
+  },
+  "blackhead": {
+   "n": 66,
+   "found": 59,
+   "removed": 59,
+   "claimedButVisible": 0,
+   "recall": 0.8939393939393939,
+   "removal": 0.8939393939393939
+  },
+  "darkSpot": {
+   "n": 44,
+   "found": 41,
+   "removed": 41,
+   "claimedButVisible": 0,
+   "recall": 0.9318181818181818,
+   "removal": 0.9318181818181818
+  },
+  "follicle": {
+   "n": 227,
+   "kept": 227,
+   "damaged": 0,
+   "wronglyFlagged": 5,
+   "preserved": 1.0
+  },
+  "freckle": {
+   "n": 44,
+   "kept": 44,
+   "damaged": 0,
+   "wronglyFlagged": 0,
+   "preserved": 1.0
+  },
+  "mole": {
+   "n": 8,
+   "kept": 8,
+   "damaged": 0,
+   "wronglyFlagged": 0,
+   "preserved": 1.0
+  },
+  "pimple": {
+   "n": 27,
+   "found": 23,
+   "removed": 23,
+   "claimedButVisible": 0,
+   "recall": 0.8518518518518519,
+   "removal": 0.8518518518518519
+  },
+  "postAcne": {
+   "n": 27,
+   "found": 27,
+   "removed": 27,
+   "claimedButVisible": 0,
+   "recall": 1.0,
+   "removal": 1.0
+  },
+  "whitehead": {
+   "n": 33,
+   "found": 21,
+   "removed": 20,
+   "claimedButVisible": 1,
+   "recall": 0.6363636363636364,
+   "removal": 0.6060606060606061
+  }
+ },
+ "byToneCategory": {
+  "fitz-I": {
+   "acne": {
+    "n": 10,
+    "found": 10,
+    "removed": 10,
+    "claimedButVisible": 0,
+    "recall": 1.0,
+    "removal": 1.0
+   },
+   "blackhead": {
+    "n": 12,
+    "found": 11,
+    "removed": 11,
+    "claimedButVisible": 0,
+    "recall": 0.9166666666666666,
+    "removal": 0.9166666666666666
+   },
+   "darkSpot": {
+    "n": 8,
+    "found": 8,
+    "removed": 8,
+    "claimedButVisible": 0,
+    "recall": 1.0,
+    "removal": 1.0
+   },
+   "follicle": {
+    "n": 66,
+    "kept": 66,
+    "damaged": 0,
+    "wronglyFlagged": 0,
+    "preserved": 1.0
+   },
+   "freckle": {
+    "n": 8,
+    "kept": 8,
+    "damaged": 0,
+    "wronglyFlagged": 0,
+    "preserved": 1.0
+   },
+   "mole": {
+    "n": 2,
+    "kept": 2,
+    "damaged": 0,
+    "wronglyFlagged": 0,
+    "preserved": 1.0
+   },
+   "pimple": {
+    "n": 5,
+    "found": 5,
+    "removed": 5,
+    "claimedButVisible": 0,
+    "recall": 1.0,
+    "removal": 1.0
+   },
+   "postAcne": {
+    "n": 5,
+    "found": 5,
+    "removed": 5,
+    "claimedButVisible": 0,
+    "recall": 1.0,
+    "removal": 1.0
+   },
+   "whitehead": {
+    "n": 6,
+    "found": 6,
+    "removed": 5,
+    "claimedButVisible": 1,
+    "recall": 1.0,
+    "removal": 0.8333333333333334
+   }
+  },
+  "fitz-VI": {
+   "acne": {
+    "n": 45,
+    "found": 44,
+    "removed": 44,
+    "claimedButVisible": 0,
+    "recall": 0.9777777777777777,
+    "removal": 0.9777777777777777
+   },
+   "blackhead": {
+    "n": 54,
+    "found": 48,
+    "removed": 48,
+    "claimedButVisible": 0,
+    "recall": 0.8888888888888888,
+    "removal": 0.8888888888888888
+   },
+   "darkSpot": {
+    "n": 36,
+    "found": 33,
+    "removed": 33,
+    "claimedButVisible": 0,
+    "recall": 0.9166666666666666,
+    "removal": 0.9166666666666666
+   },
+   "follicle": {
+    "n": 161,
+    "kept": 161,
+    "damaged": 0,
+    "wronglyFlagged": 5,
+    "preserved": 1.0
+   },
+   "freckle": {
+    "n": 36,
+    "kept": 36,
+    "damaged": 0,
+    "wronglyFlagged": 0,
+    "preserved": 1.0
+   },
+   "mole": {
+    "n": 6,
+    "kept": 6,
+    "damaged": 0,
+    "wronglyFlagged": 0,
+    "preserved": 1.0
+   },
+   "pimple": {
+    "n": 22,
+    "found": 18,
+    "removed": 18,
+    "claimedButVisible": 0,
+    "recall": 0.8181818181818182,
+    "removal": 0.8181818181818182
+   },
+   "postAcne": {
+    "n": 22,
+    "found": 22,
+    "removed": 22,
+    "claimedButVisible": 0,
+    "recall": 1.0,
+    "removal": 1.0
+   },
+   "whitehead": {
+    "n": 27,
+    "found": 15,
+    "removed": 15,
+    "claimedButVisible": 0,
+    "recall": 0.5555555555555556,
+    "removal": 0.5555555555555556
+   }
+  }
+ },
+ "rows": [
+  {
+   "id": "syn00-I-normal-soft-1200",
+   "tone": "fitz-I",
+   "density": "normal",
+   "lighting": "soft",
+   "size": 1200,
+   "score": {
+    "imperfections": 46,
+    "natural": 76,
+    "flagged": 52,
+    "truePositives": 52,
+    "found": 45,
+    "removed": 44,
+    "skinMP": 1.203409,
+    "precision": 1.0,
+    "recall": 0.9782608695652174,
+    "f1": 0.989010989010989,
+    "removalRate": 0.9565217391304348,
+    "residualRate": 0.04347826086956519,
+    "claimedButVisible": 1,
+    "falsePositives": 0,
+    "falsePositivesOnNatural": 0,
+    "falseCorrections": 0,
+    "falsePositivesPerMP": 0.0,
+    "naturalPreserved": 1.0,
+    "naturalDamaged": 0,
+    "textureRetention": 0.9999164938926697,
+    "cleanSkinChangeL": 0.00018330632883589715,
+    "ms": 4550.67653499998,
+    "peakMB": 479.1,
+    "categories": {
+     "acne": {
+      "n": 10,
+      "found": 10,
+      "removed": 10,
+      "claimedButVisible": 0
+     },
+     "pimple": {
+      "n": 5,
+      "found": 5,
+      "removed": 5,
+      "claimedButVisible": 0
+     },
+     "blackhead": {
+      "n": 12,
+      "found": 11,
+      "removed": 11,
+      "claimedButVisible": 0
+     },
+     "whitehead": {
+      "n": 6,
+      "found": 6,
+      "removed": 5,
+      "claimedButVisible": 1
+     },
+     "darkSpot": {
+      "n": 8,
+      "found": 8,
+      "removed": 8,
+      "claimedButVisible": 0
+     },
+     "postAcne": {
+      "n": 5,
+      "found": 5,
+      "removed": 5,
+      "claimedButVisible": 0
+     },
+     "mole": {
+      "n": 2,
+      "kept": 2,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "freckle": {
+      "n": 8,
+      "kept": 8,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "follicle": {
+      "n": 66,
+      "kept": 66,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     }
+    },
+    "addedMB": 272.2
+   }
+  },
+  {
+   "id": "syn05-VI-normal-soft-1200",
+   "tone": "fitz-VI",
+   "density": "normal",
+   "lighting": "soft",
+   "size": 1200,
+   "score": {
+    "imperfections": 46,
+    "natural": 73,
+    "flagged": 48,
+    "truePositives": 41,
+    "found": 41,
+    "removed": 41,
+    "skinMP": 1.203409,
+    "precision": 0.8541666666666666,
+    "recall": 0.8913043478260869,
+    "f1": 0.8723404255319149,
+    "removalRate": 0.8913043478260869,
+    "residualRate": 0.10869565217391308,
+    "claimedButVisible": 0,
+    "falsePositives": 7,
+    "falsePositivesOnNatural": 1,
+    "falseCorrections": 6,
+    "falsePositivesPerMP": 5.816808749145137,
+    "naturalPreserved": 1.0,
+    "naturalDamaged": 0,
+    "textureRetention": 1.0000059604644775,
+    "cleanSkinChangeL": 3.0288339985418133e-05,
+    "ms": 4816.334412999993,
+    "peakMB": 500.0,
+    "categories": {
+     "acne": {
+      "n": 10,
+      "found": 9,
+      "removed": 9,
+      "claimedButVisible": 0
+     },
+     "pimple": {
+      "n": 5,
+      "found": 4,
+      "removed": 4,
+      "claimedButVisible": 0
+     },
+     "blackhead": {
+      "n": 12,
+      "found": 11,
+      "removed": 11,
+      "claimedButVisible": 0
+     },
+     "whitehead": {
+      "n": 6,
+      "found": 4,
+      "removed": 4,
+      "claimedButVisible": 0
+     },
+     "darkSpot": {
+      "n": 8,
+      "found": 8,
+      "removed": 8,
+      "claimedButVisible": 0
+     },
+     "postAcne": {
+      "n": 5,
+      "found": 5,
+      "removed": 5,
+      "claimedButVisible": 0
+     },
+     "mole": {
+      "n": 2,
+      "kept": 2,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "freckle": {
+      "n": 14,
+      "kept": 14,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "follicle": {
+      "n": 57,
+      "kept": 57,
+      "damaged": 0,
+      "wronglyFlagged": 1
+     }
+    },
+    "addedMB": 221.3
+   }
+  },
+  {
+   "id": "syn08-VI-dense-soft-1600",
+   "tone": "fitz-VI",
+   "density": "dense",
+   "lighting": "soft",
+   "size": 1600,
+   "score": {
+    "imperfections": 114,
+    "natural": 64,
+    "flagged": 109,
+    "truePositives": 101,
+    "found": 101,
+    "removed": 101,
+    "skinMP": 2.140369,
+    "precision": 0.926605504587156,
+    "recall": 0.8859649122807017,
+    "f1": 0.9058295964125561,
+    "removalRate": 0.8859649122807017,
+    "residualRate": 0.11403508771929827,
+    "claimedButVisible": 0,
+    "falsePositives": 8,
+    "falsePositivesOnNatural": 2,
+    "falseCorrections": 7,
+    "falsePositivesPerMP": 3.737673270356653,
+    "naturalPreserved": 1.0,
+    "naturalDamaged": 0,
+    "textureRetention": 1.0000096559524536,
+    "cleanSkinChangeL": 4.363173138699494e-05,
+    "ms": 6828.778288000023,
+    "peakMB": 603.9,
+    "categories": {
+     "acne": {
+      "n": 25,
+      "found": 25,
+      "removed": 25,
+      "claimedButVisible": 0
+     },
+     "pimple": {
+      "n": 12,
+      "found": 11,
+      "removed": 11,
+      "claimedButVisible": 0
+     },
+     "blackhead": {
+      "n": 30,
+      "found": 26,
+      "removed": 26,
+      "claimedButVisible": 0
+     },
+     "whitehead": {
+      "n": 15,
+      "found": 9,
+      "removed": 9,
+      "claimedButVisible": 0
+     },
+     "darkSpot": {
+      "n": 20,
+      "found": 18,
+      "removed": 18,
+      "claimedButVisible": 0
+     },
+     "postAcne": {
+      "n": 12,
+      "found": 12,
+      "removed": 12,
+      "claimedButVisible": 0
+     },
+     "mole": {
+      "n": 2,
+      "kept": 2,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "freckle": {
+      "n": 9,
+      "kept": 9,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "follicle": {
+      "n": 53,
+      "kept": 53,
+      "damaged": 0,
+      "wronglyFlagged": 4
+     }
+    },
+    "addedMB": 229.0
+   }
+  },
+  {
+   "id": "syn10-VI-normal-hard-1200",
+   "tone": "fitz-VI",
+   "density": "normal",
+   "lighting": "hard",
+   "size": 1200,
+   "score": {
+    "imperfections": 46,
+    "natural": 66,
+    "flagged": 42,
+    "truePositives": 39,
+    "found": 38,
+    "removed": 38,
+    "skinMP": 1.203409,
+    "precision": 0.9285714285714286,
+    "recall": 0.8260869565217391,
+    "f1": 0.8743362831858408,
+    "removalRate": 0.8260869565217391,
+    "residualRate": 0.17391304347826086,
+    "claimedButVisible": 0,
+    "falsePositives": 3,
+    "falsePositivesOnNatural": 0,
+    "falseCorrections": 3,
+    "falsePositivesPerMP": 2.492918035347916,
+    "naturalPreserved": 1.0,
+    "naturalDamaged": 0,
+    "textureRetention": 1.0000110864639282,
+    "cleanSkinChangeL": 1.908346348500345e-05,
+    "ms": 4768.747563999967,
+    "peakMB": 521.8,
+    "categories": {
+     "acne": {
+      "n": 10,
+      "found": 10,
+      "removed": 10,
+      "claimedButVisible": 0
+     },
+     "pimple": {
+      "n": 5,
+      "found": 3,
+      "removed": 3,
+      "claimedButVisible": 0
+     },
+     "blackhead": {
+      "n": 12,
+      "found": 11,
+      "removed": 11,
+      "claimedButVisible": 0
+     },
+     "whitehead": {
+      "n": 6,
+      "found": 2,
+      "removed": 2,
+      "claimedButVisible": 0
+     },
+     "darkSpot": {
+      "n": 8,
+      "found": 7,
+      "removed": 7,
+      "claimedButVisible": 0
+     },
+     "postAcne": {
+      "n": 5,
+      "found": 5,
+      "removed": 5,
+      "claimedButVisible": 0
+     },
+     "mole": {
+      "n": 2,
+      "kept": 2,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "freckle": {
+      "n": 13,
+      "kept": 13,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     },
+     "follicle": {
+      "n": 51,
+      "kept": 51,
+      "damaged": 0,
+      "wronglyFlagged": 0
+     }
+    },
+    "addedMB": 221.7
+   }
+  }
+ ]
+}

@@ -9,7 +9,8 @@ import { editMaskFor, faceMaskFor } from '@/lib/export';
 import { ensureProxy, fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
 import { perfectedPixels, perfectionKeyOf, schedulePerfection, usePerfection } from '@/lib/perfection';
-import { drawMarks, hitMark } from './viewport/perfectionOverlay';
+import { drawMarks, hitLabel, hitMark } from './viewport/perfectionOverlay';
+import { restoreLabels, useLabels } from '@/lib/qaLabels';
 import { autoHealSource } from '@/engine/heal';
 import { noiseLevelOf } from '@/lib/noise';
 import { displayAdjustments, selectActivePhoto, useEditor } from '@/lib/store';
@@ -97,7 +98,10 @@ export function PhotoEditorViewport() {
   const drawPerfectionMarks = () => {
     const c = marksCanvasRef.current;
     const wrap = wrapRef.current;
-    if (c && wrap) drawMarks(c, wrap, perfFrame(), perfReport(), usePerfection.getState().selected);
+    const p = selectActivePhoto(useEditor.getState());
+    const ls = useLabels.getState();
+    const labels = p && (ls.on || ls.byPhoto[p.id]?.labels.length) ? { labels: ls.byPhoto[p.id]?.labels ?? [], selected: ls.selected } : null;
+    if (c && wrap) drawMarks(c, wrap, perfFrame(), perfReport(), usePerfection.getState().selected, labels);
   };
 
   const draw = useCallback(() => {
@@ -219,9 +223,15 @@ export function PhotoEditorViewport() {
   useEffect(() => {
     draw();
   }, [perfState?.key, perfState?.report, draw]);
+  const labelOn = useLabels((s) => s.on);
+  const labelSel = useLabels((s) => s.selected);
+  const labelsHere = useLabels((s) => (photo ? s.byPhoto[photo.id] : undefined));
+  useEffect(() => {
+    if (photo) restoreLabels(photo.id);
+  }, [photo?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     drawPerfectionMarks();
-  }, [perfSelected, perfOverlay]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [perfSelected, perfOverlay, labelOn, labelSel, labelsHere]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Edit as shown (with a pending assistant plan previewed), so previewed tools get their maps too.
   const shown = useEditor((s) => (photo ? displayAdjustments(s, photo) : null));
@@ -436,6 +446,23 @@ export function PhotoEditorViewport() {
       drawBrush(e.clientX - rect.left, e.clientY - rect.top, true);
       return;
     }
+    const ls = useLabels.getState();
+    if (!brush && e.button === 0 && ls.on && photo) {
+      // Label mode: click a label to select it (Alt-click deletes it); click skin to add one.
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const hit = hitLabel(x, y, perfFrame(), ls.byPhoto[photo.id]?.labels ?? []);
+      if (hit) {
+        if (e.altKey) ls.remove(photo.id, hit.id);
+        else ls.select(hit.id);
+        return;
+      }
+      const pt = toImage(x, y);
+      if (pt && pt[0] >= 0 && pt[0] <= 1 && pt[1] >= 0 && pt[1] <= 1) {
+        ls.add(photo.id, pt[0], pt[1]);
+        return;
+      }
+    }
     if (!brush && e.button === 0) {
       // Click a Skin Perfection mark to select it (Shift adds / removes); drag still pans.
       const m = hitMark(e.clientX - rect.left, e.clientY - rect.top, perfFrame(), perfReport());
@@ -513,7 +540,7 @@ export function PhotoEditorViewport() {
     <div
       ref={wrapRef}
       className="relative h-full w-full touch-none select-none overflow-hidden bg-ink-950"
-      style={{ cursor: brush ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
+      style={{ cursor: brush || labelOn ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}

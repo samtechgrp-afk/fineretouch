@@ -1,4 +1,4 @@
-import type { MarkStatus, PerfectionMark, PerfectionReport } from '@fineretouch/shared';
+import { isKeepKind, type MarkStatus, type PerfectionMark, type PerfectionReport, type QaLabel } from '@fineretouch/shared';
 import type { DisplayView } from '@/engine/renderer';
 
 /** Overlay colours per mark status (the Final quality check uses the same ones). */
@@ -29,7 +29,10 @@ function place(m: PerfectionMark, f: Frame): { x: number; y: number; r: number }
 }
 
 /** Draw every mark of the report as a ring coloured by status; selected marks get a white halo. */
-export function drawMarks(canvas: HTMLCanvasElement, wrap: HTMLElement, frame: Frame | null, report: PerfectionReport | null, selected: readonly number[]) {
+export function drawMarks(
+  canvas: HTMLCanvasElement, wrap: HTMLElement, frame: Frame | null, report: PerfectionReport | null, selected: readonly number[],
+  labels?: { labels: readonly QaLabel[]; selected: string | null } | null,
+) {
   const dpr = window.devicePixelRatio || 1;
   const w = Math.round(wrap.clientWidth * dpr);
   const h = Math.round(wrap.clientHeight * dpr);
@@ -41,8 +44,10 @@ export function drawMarks(canvas: HTMLCanvasElement, wrap: HTMLElement, frame: F
   if (!g) return;
   g.setTransform(1, 0, 0, 1, 0, 0);
   g.clearRect(0, 0, w, h);
-  if (!frame || !report || frame.display.mode === 'side') return;
+  if (!frame || frame.display.mode === 'side') return;
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (labels) drawLabels(g, frame, labels.labels, labels.selected);
+  if (!report) return;
   const sel = new Set(selected);
   for (const m of report.marks) {
     const p = place(m, frame);
@@ -73,6 +78,35 @@ export function hitMark(x: number, y: number, frame: Frame | null, report: Perfe
     const p = place(m, frame);
     if (Math.hypot(x - p.x, y - p.y) <= p.r + 2 && p.r < bestR) {
       best = m;
+      bestR = p.r;
+    }
+  }
+  return best;
+}
+
+/** QA labels: squares (red = remove, cyan = keep; dashed until confirmed, white when selected). */
+function drawLabels(g: CanvasRenderingContext2D, frame: Frame, labels: readonly QaLabel[], selected: string | null) {
+  for (const l of labels) {
+    const p = place({ x: l.x, y: l.y, r: l.r } as PerfectionMark, frame);
+    const s = p.r * 1.1;
+    g.strokeStyle = l.id === selected ? 'rgba(255,255,255,1)' : isKeepKind(l.kind) ? 'rgba(34,211,238,0.95)' : 'rgba(244,63,94,0.95)';
+    g.lineWidth = l.id === selected ? 2.5 : 1.5;
+    g.setLineDash(l.confirmed ? [] : [4, 3]);
+    g.strokeRect(p.x - s, p.y - s, 2 * s, 2 * s);
+  }
+  g.setLineDash([]);
+}
+
+/** The label under a CSS-pixel point, smallest first. */
+export function hitLabel(x: number, y: number, frame: Frame | null, labels: readonly QaLabel[]): QaLabel | null {
+  if (!frame || frame.display.mode === 'side') return null;
+  let best: QaLabel | null = null;
+  let bestR = Infinity;
+  for (const l of labels) {
+    const p = place({ x: l.x, y: l.y, r: l.r } as PerfectionMark, frame);
+    const s = p.r * 1.1 + 2;
+    if (Math.abs(x - p.x) <= s && Math.abs(y - p.y) <= s && p.r < bestR) {
+      best = l;
       bestR = p.r;
     }
   }

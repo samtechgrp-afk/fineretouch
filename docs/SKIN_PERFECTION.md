@@ -38,9 +38,10 @@ Blurring more would not fix any of these. The engine below replaces the detectio
 All stages run in the local AI engine on the full-resolution image (CPU, OpenCV + NumPy; no
 new dependencies or models).
 
-- **A. High-resolution analysis.** The skin bounding box is cropped and scaled so the face is
-  1100 px wide (`WORK_FACE`). It is never shrunk below that, and it is upscaled only when the
-  face is smaller. Body-only photos use the skin area. The crop is processed in 1024 px tiles
+- **A. High-resolution analysis.** The skin bounding box is cropped. Faces up to 1100 px wide
+  (`WORK_FACE`) are analysed at native resolution. **Wider faces are currently scaled down to
+  1100 px** (an earlier version of this document said the opposite; corrected in phase 2A and
+  scheduled to change in phase 2B). Body-only photos use the skin area. The crop is processed in 1024 px tiles
   with an apron, so a mark on a seam is found once (a test covers this).
 - **B. Skin segmentation.** Face skin (MediaPipe landmarks + face parsing) and body skin (selfie
   multiclass segmenter: body skin × not-hair × skin probability), with clothing, hair and
@@ -138,6 +139,11 @@ The original file is never changed. Everything is stored as settings in the edit
   removes root cause 1.
 
 ## 5. Measured results
+
+> Phase 2A replaced this section's benchmark with the QA report in `docs/SKIN_PERFECTION_QA.md`
+> (12 synthetic scenes, per tone and category, time and memory). The figures below are the
+> original PR #13 run and are synthetic only. The real photo used here had already been
+> retouched, so its counts are a smoke test, not an accuracy measurement.
 
 Synthetic dataset: `services/ai/tests/perfection_fixtures.py` builds Lab skin at Fitzpatrick-
 like tones I–VI. It includes lighting, multi-octave relief, a pore field, sensor noise,

@@ -737,3 +737,4 @@ export * from './skinMask.js';
 export * from './localRetouch.js';
 export * from './assistant.js';
 export * from './perfection.js';
+export * from './labels.js';

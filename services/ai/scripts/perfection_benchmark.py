@@ -1,7 +1,15 @@
-"""Skin Perfection benchmark: precision / recall / F1, removal, natural-feature safety and
-texture retention on labelled synthetic skin, for the new engine and the previous tools.
+"""Skin Perfection QA benchmark (metric definitions: qa/scoring.py).
 
-    cd services/ai && python -m scripts.perfection_benchmark [--quick] [--json out.json]
+    cd services/ai
+    python -m scripts.perfection_benchmark                       # synthetic suite, 12 scenes
+    python -m scripts.perfection_benchmark --quick               # 4 scenes (what CI runs)
+    python -m scripts.perfection_benchmark --json r.json --html r.html --baseline qa/baselines/synthetic.json
+    python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --split validation --html real.html
+    python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --coverage
+    python -m scripts.perfection_benchmark --perf D:/photos/IMG_0012.jpg --json perf.json   # time + memory
+
+Synthetic and real results are separate reports; synthetic numbers are not evidence of
+accuracy on real photographs. The functions below (evaluate, run_new) are kept for the tests.
 
 A detection matches a truth when its centre is within max(1.5 r, 3 px) of it. Removal of an
 imperfection is verified on the output (contrast against its ring fell to <= 40%); a natural
@@ -111,36 +119,68 @@ SCENES_QUICK = SCENES_FULL[:4]
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--quick", action="store_true")
-    ap.add_argument("--old", action="store_true", help="also score the previous acne / dark spot / blemish tools")
-    ap.add_argument("--json")
+    from qa import report as qa_report
+    from qa.dataset import coverage, load_manifest, required_photos
+    from qa.runners import run_real, run_synthetic
+
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--suite", choices=("synthetic", "real"), default="synthetic")
+    ap.add_argument("--quick", action="store_true", help="synthetic: 4 scenes (light, deep, deep dense, deep hard light)")
+    ap.add_argument("--dataset", help="real: folder with manifest.json, photos and .labels.json files")
+    ap.add_argument("--split", choices=("validation", "test"), help="real: score one split only")
+    ap.add_argument("--old", action="store_true", help="synthetic: also score the pre-v0.13 tools")
+    ap.add_argument("--json", help="write the report as JSON")
+    ap.add_argument("--html", help="write the report as HTML")
+    ap.add_argument("--baseline", help="compare with this report JSON; exit 1 on a regression")
+    ap.add_argument("--label", default="", help="free text shown in the report (e.g. a commit)")
+    ap.add_argument("--coverage", action="store_true", help="real: print photos per coverage cell and the gaps, then stop")
+    ap.add_argument("--perf", metavar="PHOTO", help="time one full-resolution render of PHOTO on this computer (no labels)")
+    ap.add_argument("--repeats", type=int, default=2, help="--perf: timed runs after a warm-up run")
     a = ap.parse_args()
-    rows = []
-    for sc in SCENES_QUICK if a.quick else SCENES_FULL:
-        img, truths, F = make_scene(**sc)
-        t0 = time.perf_counter()
-        out, marks, rep = run_new(img, F)
-        dt = time.perf_counter() - t0
-        r = evaluate(img, out, truths, F, marks)
-        row = {"scene": sc, "new": r, "ms": round(dt * 1000), "counts": rep.counts(), "passes": rep.passes}
-        if a.old:
-            row["old"] = evaluate(img, run_old(img, F), truths, F)
-        rows.append(row)
-        old = f" | old removal {row['old']['removal_rate']:.2f} nat {row['old']['natural_damaged']} tex {row['old']['texture_retention']:.2f}" if a.old else ""
-        print(f"{sc['size']:>5} {sc['tone']:>3} {sc['density']:>6}: P {r['precision']:.2f} R {r['recall']:.2f} F1 {r['f1']:.2f} "
-              f"removal {r['removal_rate']:.2f} nat {r['natural_damaged']} tex {r['texture_retention']:.2f} "
-              f"{dt:.1f}s{old}  {r['removed']}")
-    keys = ("precision", "recall", "f1", "removal_rate", "texture_retention")
-    mean = {k: round(float(np.mean([r["new"][k] for r in rows])), 3) for k in keys}
-    mean["natural_damaged"] = int(sum(r["new"]["natural_damaged"] for r in rows))
-    print("mean new:", mean)
+
+    if a.perf:
+        from qa.runners import run_perf
+
+        res = run_perf(a.perf, a.repeats)
+        print(f"{res['photo']} ({res['megapixels']} MP): median {res['msMedian'] / 1000:.1f} s, peak {res['peakMB']} MB")
+        if a.json:
+            Path(a.json).write_text(json.dumps(res, indent=1, default=float))
+        return
+
+    if a.suite == "real":
+        if not a.dataset:
+            ap.error("--suite real needs --dataset")
+        if a.coverage:
+            cov = coverage(load_manifest(a.dataset))
+            need = required_photos()
+            for split, c in cov.items():
+                print(f"{split}: {c['photos']} photos, {c['subjects']} subjects; about {need[split]} photos needed")
+                for g in c["gaps"]:
+                    print("  gap:", g)
+            return
+        rows = run_real(a.dataset, a.split)
+    else:
+        rows = run_synthetic(quick=a.quick, old=a.old)
+    rep = qa_report.build(a.suite, rows, a.label)
+    o = rep["overall"]
+    print(f"\n{a.suite} ({o['photos']} photos): P {o['precision']:.3f} R {o['recall']:.3f} F1 {o['f1']:.3f} "
+          f"removal {o['removalRate']:.3f} FP {o['falsePositives']} natural preserved {o['naturalPreserved']:.3f} "
+          f"texture {o['textureRetention'] or 0:.3f} time {o['msMean'] / 1000:.1f}s peak {o['peakMB']} MB")
+    print("   ", qa_report.SUITE_NOTE[a.suite])
     if a.old:
-        mo = {k: round(float(np.mean([r["old"][k] for r in rows])), 3) for k in ("removal_rate", "texture_retention")}
-        mo["natural_damaged"] = int(sum(r["old"]["natural_damaged"] for r in rows))
-        print("mean old:", mo)
-    if a.json:
-        Path(a.json).write_text(json.dumps({"rows": rows, "mean": mean}, indent=1, default=str))
+        old_rows = [r | {"score": r["old"] | {"ms": None, "peakMB": None}} for r in rows]
+        oo = qa_report.aggregate(old_rows)
+        print(f"pre-v0.13 tools: removal {oo['removalRate']:.3f} natural preserved {oo['naturalPreserved']:.3f} texture {oo['textureRetention'] or 0:.3f}")
+        for r in rows:
+            r["old"] = {k: v for k, v in r["old"].items() if k != "categories"}
+    cmp_ = None
+    if a.baseline:
+        cmp_ = qa_report.compare(rep, json.loads(Path(a.baseline).read_text()))
+        for x in cmp_["regressions"]:
+            print("REGRESSION", x)
+    qa_report.write(rep, a.json, a.html, cmp_)
+    if cmp_ and cmp_["regressions"]:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

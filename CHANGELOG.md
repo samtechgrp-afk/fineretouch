@@ -20,6 +20,12 @@
 - **Export.** Photos using Skin Perfection always render in the AI engine at full resolution. The GPU export path only approximated spot healing, and it was the default on integrated GPUs.
 - **Benchmark.** `python -m scripts.perfection_benchmark --old` scores 10 synthetic scenes (tones I–VI, normal and dense acne). Precision 0.97, recall 0.95, removal 0.94. The old tools at 2× removed 0.52. Details and limits are in `docs/SKIN_PERFECTION.md`.
 - No new dependencies or models.
+- **Phase 2A: quality assurance.** `python -m scripts.perfection_benchmark` now writes a QA report (JSON + HTML). The report:
+  - covers precision, recall, F1, removal, residual rate, false positives (on natural features, false corrections, per MP), natural-feature preservation, texture, clean-skin change, time and peak memory
+  - breaks results down by skin tone, by category, and by tone × category
+  - is compared against a committed baseline (`qa/baselines/`), and a regression fails CI
+- **Synthetic and real reports are separate.** The suite has 12 synthetic scenes. The real-photo suite reads `.labels.json` files and a manifest, splits by subject, and accepts only consented photos. `--coverage` lists the empty cells of the coverage matrix, and `--perf` times a full-resolution render on the current computer.
+- **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)
 
