@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.11.0 (unreleased): retouch assistant (Phase 6)
+
+- **Retouch assistant** panel: every suggestion is an **edit plan**. The plan lists each change with its value and the reason for it. You can untick a step, change any value, and scale everything with plan strength. The plan is previewed live and applied only when you **approve**, as one undo step. **Reject** discards it.
+- **Ask for an edit**: plain-English requests ("remove acne but keep the freckles, brighten the eyes slightly") are mapped to FineRetouch's tools.
+  - It understands intensity words, numbers and 2x/3x, and "keep / don't / less".
+  - It tells weakening a tool ("less smoothing") apart from removing a problem ("less acne").
+  - It runs offline with a fixed vocabulary and no language model, so nothing is uploaded. It lists what it did not understand.
+  - It **declines** requests that would change face shape, body shape or skin colour.
+- **Recommended for this photo**: corrections from the photo's own measurements, each with the measurement behind it.
+  - New **skin-tone safeguard**: brightening is capped so measured skin rises at most 10 L*, so a darker-skinned subject keeps their real tone.
+- **Retouching styles**: Natural, Corporate headshot, Beauty, Wedding, Mature skin and Men's grooming.
+  - Each style is built for each photo: light and colour come from that photo's measurements, and skin work is matched to its measured skin texture.
+  - With several photos selected, a style is rebuilt for each photo on approval.
+- The assistant never touches healing, clone, layers or mask strokes. Export and autosave ignore an unapproved plan.
+
 ## v0.10.0 (unreleased): professional retouching tools (Phase 5)
 
 - **Healing brush**: Alt-click sets the source; healing takes the source's texture and the tone and colour around the stroke (push-pull membrane fill of the difference), so there is no visible patch. Without a source, **spot healing** picks one automatically and avoids sources with their own blemish. The source is aligned after the first stroke, as in Photoshop.

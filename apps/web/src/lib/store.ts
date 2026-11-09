@@ -6,6 +6,14 @@ import {
   EFFECT_SOURCE,
   applyPreset,
   autoRetouch,
+  applyPlan,
+  planForPhoto,
+  planFromInstruction,
+  recommendPlan,
+  stylePlan,
+  type EditPlan,
+  type PlanStep,
+  type RetouchStyleId,
   mapStyleToAdjustments,
   sanitizeAdjustments,
   smartSyncAdjustments,
@@ -138,6 +146,8 @@ export interface EditorState {
   customPresets: Preset[];
   aiOnline: boolean | null;
   styleSync: StyleSyncState;
+  /** Retouch assistant (v0.11): a plan waiting for approval, previewed on its photo only. */
+  assistant: AssistantState;
 
   addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'> & Partial<Pick<Photo, 'raw' | 'fingerprint'>>>): void;
   removePhotos(ids: string[]): void;
@@ -214,6 +224,22 @@ export interface EditorState {
   setView(patch: Partial<ViewState>): void;
   setAiOnline(online: boolean): void;
   navigate(delta: number): void;
+  /** Retouch assistant: build a plan for the active photo (nothing is applied until approvePlan). */
+  proposeInstruction(text: string): EditPlan | null;
+  proposeRecommendation(): EditPlan | null;
+  proposeStyle(style: RetouchStyleId): EditPlan | null;
+  updatePlanStep(stepId: string, patch: Partial<Pick<PlanStep, 'value' | 'enabled'>>): void;
+  setPlanStrength(strength: number): void;
+  setPlanBatch(batch: boolean): void;
+  /** Commit the plan as one undo step per photo; returns how many photos changed. */
+  approvePlan(): number;
+  rejectPlan(): void;
+}
+
+export interface AssistantState {
+  pending: { photoId: string; plan: EditPlan } | null;
+  /** Also apply to the other selected photos on approval (styles and recommendations are rebuilt per photo). */
+  batch: boolean;
 }
 
 const PRESET_STORAGE_KEY = 'fineretouch.customPresets.v1';
@@ -267,6 +293,16 @@ function editLocal(
   set({ photos: mapPhotos(s, [p.id], (q) => (live ? { ...q, adjustments: next } : withHistory(q, next))) });
 }
 
+const ctxOf = (p: Photo) => ({ hasFace: Boolean(p.analysis?.faces.length) });
+
+function propose(get: () => EditorState, set: (partial: Partial<EditorState>) => void, build: (p: Photo) => EditPlan | null): EditPlan | null {
+  const s = get();
+  const p = selectActivePhoto(s);
+  const plan = p ? build(p) : null;
+  set({ assistant: { ...s.assistant, pending: p && plan ? { photoId: p.id, plan } : null } });
+  return plan;
+}
+
 function mapPhotos(s: EditorState, ids: string[], fn: (p: Photo) => Photo): Record<string, Photo> {
   const photos = { ...s.photos };
   for (const id of ids) if (photos[id]) photos[id] = fn(photos[id]);
@@ -282,6 +318,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   clipboard: null,
   customPresets: loadCustomPresets(),
   aiOnline: null,
+  assistant: { pending: null, batch: false },
   styleSync: {
     referenceImageId: null,
     referenceName: null,
@@ -345,7 +382,11 @@ export const useEditor = create<EditorState>()((set, get) => ({
   },
 
   setActive(id) {
-    if (get().photos[id]) set({ activeId: id, view: { ...get().view, zoom: 1, panX: 0, panY: 0 } });
+    const s = get();
+    if (!s.photos[id]) return;
+    // A pending plan belongs to the photo it was built for: switching photos discards it.
+    const assistant = s.assistant.pending && s.assistant.pending.photoId !== id ? { ...s.assistant, pending: null } : s.assistant;
+    set({ activeId: id, view: { ...s.view, zoom: 1, panX: 0, panY: 0 }, assistant });
   },
 
   toggleSelected(id, additive, range) {
@@ -739,6 +780,57 @@ export const useEditor = create<EditorState>()((set, get) => ({
     set({ aiOnline: online });
   },
 
+  proposeInstruction(text) {
+    return propose(get, set, (p) => planFromInstruction(text, p.adjustments, ctxOf(p)));
+  },
+
+  proposeRecommendation() {
+    return propose(get, set, (p) => (p.profile ? recommendPlan(p.profile, p.adjustments, ctxOf(p)) : null));
+  },
+
+  proposeStyle(style) {
+    return propose(get, set, (p) => stylePlan(style, p.profile ?? null, p.adjustments, ctxOf(p)));
+  },
+
+  updatePlanStep(stepId, patch) {
+    const a = get().assistant;
+    if (!a.pending) return;
+    const steps = a.pending.plan.steps.map((st) => (st.id === stepId ? { ...st, ...patch } : st));
+    set({ assistant: { ...a, pending: { ...a.pending, plan: { ...a.pending.plan, steps } } } });
+  },
+
+  setPlanStrength(strength) {
+    const a = get().assistant;
+    if (!a.pending) return;
+    const v = Math.round(Math.min(100, Math.max(0, strength)));
+    set({ assistant: { ...a, pending: { ...a.pending, plan: { ...a.pending.plan, strength: v } } } });
+  },
+
+  setPlanBatch(batch) {
+    set({ assistant: { ...get().assistant, batch } });
+  },
+
+  approvePlan() {
+    const s = get();
+    const pending = s.assistant.pending;
+    if (!pending || !s.photos[pending.photoId]) return 0;
+    const others = s.assistant.batch ? s.selected.filter((id) => id !== pending.photoId && s.photos[id]) : [];
+    let changed = 0;
+    const photos = mapPhotos(s, [pending.photoId, ...others], (p) => {
+      const plan = p.id === pending.photoId ? pending.plan : planForPhoto(pending.plan, p.profile ?? null, p.adjustments, ctxOf(p));
+      const next = sanitizeAdjustments(applyPlan(p.adjustments, plan));
+      if (JSON.stringify(next) === JSON.stringify(p.adjustments)) return p;
+      changed += 1;
+      return withHistory(p, next);
+    });
+    set({ photos, assistant: { ...s.assistant, pending: null } });
+    return changed;
+  },
+
+  rejectPlan() {
+    set({ assistant: { ...get().assistant, pending: null } });
+  },
+
   navigate(delta) {
     const s = get();
     if (!s.order.length) return;
@@ -766,4 +858,19 @@ if (typeof window !== 'undefined') {
       saveEdits(entries);
     }, 600);
   });
+}
+
+let previewCache: { adj: Adjustments; plan: EditPlan; out: Adjustments } | null = null;
+
+/**
+ * What the viewport shows for a photo: its edit, or its edit with the pending assistant plan
+ * applied (a preview only: history, autosave and export always use photo.adjustments).
+ */
+export function displayAdjustments(s: EditorState, p: Photo): Adjustments {
+  const pending = s.assistant.pending;
+  if (!pending || pending.photoId !== p.id) return p.adjustments;
+  if (previewCache && previewCache.adj === p.adjustments && previewCache.plan === pending.plan) return previewCache.out;
+  const out = sanitizeAdjustments(applyPlan(p.adjustments, pending.plan));
+  previewCache = { adj: p.adjustments, plan: pending.plan, out };
+  return out;
 }

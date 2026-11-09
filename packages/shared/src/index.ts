@@ -728,3 +728,4 @@ export * from './lut.js';
 export * from './effects.js';
 export * from './skinMask.js';
 export * from './localRetouch.js';
+export * from './assistant.js';

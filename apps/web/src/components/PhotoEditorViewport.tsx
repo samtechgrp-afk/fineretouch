@@ -10,7 +10,7 @@ import { fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
 import { autoHealSource } from '@/engine/heal';
 import { noiseLevelOf } from '@/lib/noise';
-import { selectActivePhoto, useEditor } from '@/lib/store';
+import { displayAdjustments, selectActivePhoto, useEditor } from '@/lib/store';
 
 const BG: [number, number, number] = [0.051, 0.055, 0.063];
 const MAX_ZOOM_PERCENT = 800;
@@ -47,6 +47,7 @@ export function PhotoEditorViewport() {
 
   const photo = useEditor(selectActivePhoto);
   const view = useEditor((s) => s.view);
+  const pending = useEditor((s) => s.assistant.pending);
   const setView = useEditor((s) => s.setView);
 
   // Create / destroy the GL context.
@@ -82,6 +83,8 @@ export function PhotoEditorViewport() {
       const st = useEditor.getState();
       const p = selectActivePhoto(st);
       if (!r || !p) return;
+      // The pending assistant plan is previewed here only (never saved or exported until approved).
+      const adj = displayAdjustments(st, p);
       const proxy = getProxy(p.id);
       if (!proxy) return;
       const t0 = performance.now();
@@ -93,13 +96,13 @@ export function PhotoEditorViewport() {
         healRef.current = null;
       }
       // Pro tools: heal / clone strokes replayed on the proxy pixels (stage 0b of the engine).
-      const lr = p.adjustments.localRetouch;
+      const lr = adj.localRetouch;
       const healed = lr.heal.length ? healedPixels(`${p.id}:proxy`, pixelsOf(`${p.id}:proxy`, proxy), proxy.width, proxy.height, lr.heal) : null;
       if (healRef.current !== healed) {
         r.setHealedSource(healed);
         healRef.current = healed;
       }
-      const sm = p.adjustments.skinMask;
+      const sm = adj.skinMask;
       const faceKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
       const maskKey = `${faceKey}:${p.parseState}:${sm.useSegmentation}:${sm.includeBodySkin}`;
       const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height, sm);
@@ -113,7 +116,7 @@ export function PhotoEditorViewport() {
         editKeyRef.current = edit?.data ?? null;
       }
       syncLayerMasks(r, p.id, lr, fitSize(proxy.width, proxy.height, LAYER_LONG_EDGE), mask, edit, `${maskKey}:${sm.strokes.length}:${sm.feather}`);
-      const hairOn = p.adjustments.strayHairRemoval.enabled;
+      const hairOn = adj.strayHairRemoval.enabled;
       const hairKey = `${faceKey}:${hairOn}`;
       if (hairKeyRef.current !== hairKey) {
         const roi = hairOn ? hairRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
@@ -126,7 +129,7 @@ export function PhotoEditorViewport() {
         r.setDepth(d?.source ?? null, d?.width, d?.height);
         depthKeyRef.current = depthKey;
       }
-      const glareOn = p.adjustments.glareReduction > 0 || st.view.overlay === 'glare';
+      const glareOn = adj.glareReduction > 0 || st.view.overlay === 'glare';
       const lensKey = `${faceKey}:${glareOn}`;
       if (lensKeyRef.current !== lensKey) {
         const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
@@ -139,8 +142,8 @@ export function PhotoEditorViewport() {
         r.setSegmentation(seg ?? null, seg?.width, seg?.height);
         segKeyRef.current = segKey;
       }
-      const noiseLevel = p.adjustments.skinNoise > 0 ? noiseLevelOf(`${p.id}:proxy`, proxy) : undefined;
-      r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats, noiseLevel });
+      const noiseLevel = adj.skinNoise > 0 ? noiseLevelOf(`${p.id}:proxy`, proxy) : undefined;
+      r.render(adj, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats, noiseLevel });
       const g = geometry();
       if (!g) return;
       const v = st.view;
@@ -157,7 +160,7 @@ export function PhotoEditorViewport() {
         dpr: g.dpr,
         background: BG,
       };
-      r.display(display, p.adjustments.glareReduction / 100);
+      r.display(display, adj.glareReduction / 100);
       displayRef.current = display;
       setRenderMs(performance.now() - t0);
     });
@@ -166,8 +169,10 @@ export function PhotoEditorViewport() {
   // Redraw whenever the photo, its edits/analysis or the view change.
   useEffect(() => {
     draw();
-  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, photo?.parseState, view, draw]);
+  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, photo?.parseState, pending, view, draw]);
 
+  // Edit as shown (with a pending assistant plan previewed), so previewed tools get their maps too.
+  const shown = useEditor((s) => (photo ? displayAdjustments(s, photo) : null));
   // AI face parsing for the semantic skin mask, once the photo has a face and the engine is up.
   const parseWanted = Boolean(photo?.adjustments.skinMask.useSegmentation && photo?.analysis?.faces.length);
   useEffect(() => {
@@ -175,14 +180,14 @@ export function PhotoEditorViewport() {
   }, [photo?.id, parseWanted, photo?.parseState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch (or upgrade) the depth map once bokeh is switched on for this photo.
-  const bokehOn = Boolean(photo?.adjustments.depthBokeh.enabled);
+  const bokehOn = Boolean(shown?.depthBokeh.enabled);
   const aiOnline = useEditor((s) => s.aiOnline);
   useEffect(() => {
     if (photo && bokehOn && photo.depthState !== 'pending' && photo.depthState !== 'model') void ensureDepth(photo.id);
   }, [photo?.id, bokehOn, photo?.depthState, photo?.analysisState, aiOnline]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch the garment mask once a clothing tool (or its overlay) is switched on.
-  const clothingOn = Boolean(photo?.adjustments.clothing.enabled) || view.overlay === 'clothing';
+  const clothingOn = Boolean(shown?.clothing.enabled) || view.overlay === 'clothing';
   useEffect(() => {
     if (photo && clothingOn && photo.segmentState === 'none') void ensureSegmentation(photo.id);
   }, [photo?.id, clothingOn, photo?.segmentState]); // eslint-disable-line react-hooks/exhaustive-deps

@@ -1,4 +1,4 @@
-# Retouch control system (v0.7), skin masks (v0.8), skin engine (v0.9), pro tools (v0.10) and upgrade audit
+# Retouch control system (v0.7), skin masks (v0.8), skin engine (v0.9), pro tools (v0.10), retouch assistant (v0.11) and upgrade audit
 
 This document has two parts: the Phase 1 audit of FineRetouch against the professional
 portrait-retouching specification, and the Phase 2 deliverable (per-effect strength,
@@ -326,3 +326,139 @@ presets never carry them to another photo.
   sync and presets never copy the pro tools.
 - `packages/shared/src/localRetouch.test.ts` (4): sanitising untrusted JSON, defaults, when a
   layer is active, split radius mapping.
+
+## Part 6: retouch assistant (v0.11)
+
+The **Retouch assistant** section (top of the right panel) suggests edits in three ways. All
+three produce the same thing: an **edit plan** (`EditPlan` in `packages/shared/src/assistant.ts`)
+that lists each change with its value and the reason for it. Nothing changes until the plan is
+approved.
+
+### Where it runs
+
+Everything runs in the app, on this computer. The photo is never uploaded for the assistant, and
+the instruction text is never sent anywhere. There is no language model: the instruction reader
+is a deterministic phrase matcher with a fixed retouching vocabulary. It says which parts of a
+request it did not understand instead of guessing.
+
+### 1. Ask for an edit (plain-English instructions)
+
+Type a request such as *"remove acne and dark spots, keep the freckles, brighten the eyes
+slightly"*. The request is split into clauses, and each clause is matched against the vocabulary,
+most specific phrase first, so "under-eye lines" never also triggers "eyes".
+
+| You say | Tool |
+| --- | --- |
+| acne, pimples, breakouts | Acne removal |
+| dark spots, sun spots, pigmentation, melasma | Dark spot removal |
+| blemishes, spots, marks, scars | Blemish removal |
+| redness, rosacea, flushed, blotchy | Redness reduction |
+| noise, grain | Skin noise reduction |
+| uneven skin tone | Skin tone correction |
+| smooth, airbrush, clear skin | Skin smoothing (plus texture preservation) |
+| pores, texture, natural skin, "not plastic" | Texture preservation |
+| dark circles, eye bags, tired eyes | Under-eye correction |
+| under-eye lines, crepey skin (also wrinkles, see below) | Under-eye texture |
+| eyes | Brighten eyes |
+| teeth, smile / stained teeth | Whiten teeth / Teeth stains |
+| glasses, glare, reflections | Glasses glare |
+| flyaways, stray hairs, frizz | Stray hair cleanup |
+| shirt wrinkles, iron | Clothing wrinkles |
+| blur the background, bokeh | Background blur |
+| brighter / darker, warmer / cooler, contrast, shadows, highlights, vivid / muted, black and white, vignette, sharpen, tint | The light, colour and detail sliders |
+| freckles, moles, beauty marks | Keep freckles / Protect beauty marks switches |
+
+- **Amounts.** Each tool has a normal amount. "Slightly", "a touch" give 60% of it; "a lot",
+  "very" give 135%. An overall "natural" or "subtle" scales the whole request to 75%; "glam" or
+  "flawless" to 130%. A number ("blemish removal to 80") is used as given, and "2x" / "3x" /
+  "double" sets the tool's multiplier.
+- **Direction.** "Less smoothing", "too sharp", "tone down the acne removal" weaken the named
+  tool. Naming the problem instead ("less acne", "tone down the redness") strengthens the tool
+  that removes it. "Don't", "no", "without" switch a tool off. "Keep the freckles" switches
+  protection on; "remove the freckles" switches it off.
+- **A verb on another subject is not a light change.** "Brighten the eyes" sets Brighten eyes,
+  not Exposure (unless the clause also says "the photo", "overall", "everything").
+- **Natural texture rule.** Smoothing never goes out on its own: if the plan smooths and texture
+  preservation is below 60, a texture preservation step is added.
+- **General requests.** "Retouch this portrait" gives a natural full pass: blemishes, light
+  smoothing with texture kept, tone, under-eyes and eyes (face tools only with a face).
+- **Declined on purpose.** Requests to slim, reshape, change the nose, jaw, eye or skin colour,
+  or make someone look younger or thinner are refused with the reason ("never changes face
+  shape, body shape or skin colour"). This is the identity rule from the master spec.
+- **Not understood.** Anything left over is listed as "Not understood", with a hint to name the
+  problem.
+- **No face.** Face-only steps (eyes, teeth, under-eyes, glare, stray hair) are unticked and say
+  so when no face was detected.
+
+### 2. Recommended for this photo
+
+Uses the photo's own measurements (the `StyleProfile` already used by Auto Retouch: mean L*,
+tonal spread, b*, a*, chroma, sharpness, skin texture) and gives each step the measurement
+behind it, for example *"The photo is on the dark side (mean lightness L* 33; a well-exposed
+portrait sits near 56)"*.
+
+**Skin-tone safeguard (new).** Auto Retouch brightens toward a whole-frame lightness target. On a
+darker-skinned subject in a dark scene that would lift the skin far beyond its real tone. The
+assistant caps brightening so the measured skin lightness rises by at most 10 L*
+(`SKIN_LIFT_MAX`), and says so in the step. The older **Auto retouch** button is unchanged (it
+applies directly, without the cap); the assistant's recommendations are the reviewed path.
+
+### 3. Retouching styles (automatic presets)
+
+Natural, Corporate headshot, Beauty, Wedding, Mature skin and Men's grooming. A style is not a
+fixed preset: it is built for each photo.
+
+- Light and colour come from the photo's measurements (as in Recommendations, with the
+  skin-tone cap), plus the style's own small offset (Wedding: a little warmer, softer contrast).
+- Skin smoothing and blemish removal are matched to the measured skin texture and scaled by the
+  style (Natural 0.7, Beauty 1.4, …), so a smooth-skinned and a rough-skinned photo get
+  different amounts from the same style.
+- The style's other settings (texture preservation, under-eyes, eyes, teeth, glare, stray hair,
+  clothing, freckles and beauty marks, multipliers) are its starting values, all editable in the
+  plan.
+
+### Approval workflow
+
+- **Preview.** A pending plan is shown live in the viewport on its photo only. It is a preview:
+  history, autosave and export keep using the saved edit until approval.
+- **Adjust.** Each step has a checkbox and its own control (slider, switch or 1x/2x/3x), with
+  "now X" showing the current value. **Plan strength** (0 to 100%) scales every numeric change
+  between the current edit and the plan.
+- **Approve** commits the ticked steps as **one undo step** per photo. **Reject** discards the
+  plan. Switching photos discards a pending plan.
+- **Batch.** With several photos selected, *Also apply to N other selected photos* applies on
+  approval. A style or recommendation is rebuilt from each photo's own measurements, keeping
+  the steps you unticked and the plan strength. An instruction plan carries the same values.
+- The assistant never touches healing, clone, layers or skin mask strokes.
+
+### Status
+
+| Feature | Status |
+| --- | --- |
+| Edit plan with reasons, adjustable steps and strength | Implemented |
+| Plain-English instructions (offline, rule-based) | Implemented, with a fixed vocabulary. Free-form phrasing outside it is reported as not understood |
+| Identity-changing requests declined | Implemented |
+| Recommendations from measurements, with reasons | Implemented |
+| Skin-tone safeguard on brightening | Implemented in the assistant; the old Auto retouch button is unchanged |
+| Retouching styles built per photo | Implemented (6 styles) |
+| Preview, approve as one undo step, reject, batch | Implemented |
+| Crow's feet and forehead lines | Partial: the request maps to under-eye texture and the plan says only the under-eye area is covered |
+| A local language model for free-form requests | Planned / blocked: a small on-device model would add hundreds of MB to the installer and seconds per request on the Ryzen 3 CPU. Not added; no cloud model is used |
+| Learning a user's own style from their past edits | Planned |
+
+### Tests
+
+- `packages/shared/src/assistant.test.ts` (24): vocabulary mapping, phrase priority, intensity
+  words, numbers and multipliers, texture rule, keep/remove freckles and moles, negation,
+  weakening a tool versus removing a problem, multi-word phrases, verbs on another subject, light
+  and colour direction, declined and unmatched parts, face-only steps without a face, general
+  requests, stray hair and clothing, plan application (ticks, strength, never touching strokes),
+  recommendations with reasons, the skin-tone cap, styles scaling with skin texture, natural
+  versus beauty, rebuilding a style per photo.
+- `apps/web/src/lib/assistant.store.test.ts` (6): preview without saving, approve as one undo
+  step, step edits and strength, reject, switching photos, batch rebuild per photo,
+  recommendations needing measurements.
+- Browser check on the sample portrait: a mixed request produced 5 steps, declined "slim the
+  face", reported "add a hat" as not understood, previewed live and was applied on approval; the
+  Corporate headshot style and recommendations showed their measured reasons, with the exposure
+  limited by the skin-tone cap. No console errors.
