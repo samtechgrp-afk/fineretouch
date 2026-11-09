@@ -10,6 +10,7 @@ import { ProToolsPanel } from './panels/ProToolsPanel';
 import { BatchSyncPanel } from './panels/BatchSyncPanel';
 import { EffectControlsRow, EffectSwitch, GlobalStrength } from './panels/EffectControls';
 import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
+import { AssistantPanel } from './panels/AssistantPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
 
@@ -37,6 +38,10 @@ export function AdjustmentPanel() {
       <Section title="Retouch strength" open={open.strength ?? true} onToggle={() => setOpen((o) => ({ ...o, strength: !(o.strength ?? true) }))}
         note={photo.restored ? 'Edits restored from your last session.' : undefined}>
         <GlobalStrength adj={photo.adjustments} />
+      </Section>
+      <Section title="Retouch assistant" open={open.assistant ?? true} onToggle={() => setOpen((o) => ({ ...o, assistant: !(o.assistant ?? true) }))}
+        note="Runs on this computer: nothing is uploaded">
+        <AssistantPanel photo={photo} />
       </Section>
       <Section title="Pro studio retouch" open={open.studio} onToggle={() => setOpen((o) => ({ ...o, studio: !o.studio }))} note={faceState}>
         <RetouchStudioPanel photo={photo} />
