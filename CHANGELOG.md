@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.9.0 (unreleased): skin engine (Phase 4)
+
+- The 1,700-line `retouch_engine.py` is split into per-tool modules under `services/ai/app/engines/` (common, boost, spots, skin, hair, bokeh, style, studio, clothing). It still re-exports every name, so nothing that imports it changes. All 203 engine tests passed unchanged after the split.
+- **Redness reduction** (`rednessReduction`): diffuse redness, flushed cheeks and rosacea, separate from acne removal. The tone layer's excess Cr over the person's own surrounding skin colour (a skin-only average that leaves the red areas out) is pulled back. Brightness, shading and pores are never changed.
+- **Skin noise reduction** (`skinNoise`): camera grain and colour noise on skin. The noise level is measured on the chroma fine bands, where pores can't inflate it, then the finest luma band is soft-thresholded at 2.5x that level and skin chroma is averaged. Clean files are barely touched; pores stronger than the noise stay.
+- **Under-eye texture** (`underEyeTexture`): fine lines and crepey skin in the landmark under-eye region. The crease band is faded (dark lines fully at 100%, lighter ridges by 35%); pores and the tone layer are kept. Capped at 90 for 2x/3x.
+- Each new tool has its own slider, switch, 1x/2x/3x, opacity and reset, a live preview, and works on export, batch and the cloud worker. Protect brush strokes now also cover the under-eye tools.
+
+
 ## v0.8.0 (unreleased): face parsing and editable skin masks (Phase 3)
 
 - **Semantic skin mask.** The MediaPipe selfie multiclass segmenter (Apache-2.0, CPU, already bundled) now parses each photo into face skin, body skin and hair. Face skin near a detected face extends the landmark mask to the hairline, ears and jaw; hair lying across the face is taken out; eyes, brows and lips stay cut out. Used by the engine export (`services/ai/app/masking.py`, `pipeline.build_masks`) and by the live preview through the new `POST /v1/parse` endpoint. Parsing runs on the local engine; nothing is uploaded anywhere else.

@@ -150,6 +150,8 @@ uniform float uSrcQ[17], uRefQ[17];
 uniform float uExposure, uContrast, uHighlights, uShadows;
 uniform float uTemp, uTint, uSat, uVib;
 uniform float uSmooth, uTexture, uBlemish, uUnify;
+uniform float uRedness, uNoise, uUnderEyeTex; // v0.9 skin engine (app/engines/redness.py, noise.py, under_eye.py)
+uniform float uNoiseLevel;                    // measured luma noise level of the source (lib/noise.ts)
 uniform float uEye, uDark, uTeeth, uSharpen, uVignette;
 uniform bool uMatch;
 uniform float uMatchAmount;
@@ -224,6 +226,29 @@ void main() {
   float faceArea = max(m.r, e.r) * (1.0 - e.g);
 
   vec3 c = src;
+  // Skin noise reduction (preview of engines/noise.py): the finest luma band (3x3) is
+  // soft-thresholded at 2.5x the measured noise level; chroma is averaged over 5x5 on skin.
+  if (uNoise > 0.0) {
+    ivec2 sz = textureSize(uSrc, 0);
+    ivec2 ip = ivec2(vUv * vec2(sz));
+    vec3 b3 = vec3(0.0), b5 = vec3(0.0);
+    for (int dy = -2; dy <= 2; dy++)
+      for (int dx = -2; dx <= 2; dx++) {
+        vec3 t = texelFetch(uSrc, clamp(ip + ivec2(dx, dy), ivec2(0), sz - 1), 0).rgb;
+        b5 += t;
+        if (abs(dx) <= 1 && abs(dy) <= 1) b3 += t;
+      }
+    b3 /= 9.0;
+    b5 /= 25.0;
+    float k = uNoise * skin;
+    float fineY = luma(src) - luma(b3);
+    float thr = 2.5 * uNoiseLevel;
+    float y = luma(src) - clamp(fineY, -thr, thr) * k;
+    float cb = cbOf(src), cr = crOf(src);
+    float edge = smoothstep(0.02, 0.05, abs(cb - cbOf(b5)) + abs(cr - crOf(b5)));
+    float kc = k * (1.0 - edge);
+    c = fromYCbCr(y, cb + (cbOf(b5) - cb) * kc, cr + (crOf(b5) - cr) * kc);
+  }
   vec3 fine = src - low1;
   vec3 mid = low1 - low2;
 
@@ -279,6 +304,15 @@ void main() {
     vec3 clean = low2 + fine * uTexture;
     c += (clean - c) * spot * area * min(1.0, uBlemish * (0.9 + 0.1 * sens));
   }
+  // Redness reduction (preview of engines/redness.py): excess Cr of the tone layer over the
+  // surrounding skin colour pulled back, Cb toward it; luma unchanged. Export compares with a
+  // skin-only average; the preview's broad bands also hold background and clothes, so the
+  // reference is the redder of low2 and low3 (never a too-neutral one that over-corrects).
+  if (uRedness > 0.0) {
+    float excess = crOf(low1) - max(crOf(low2), crOf(low3));
+    float k = uRedness * smoothstep(0.004, 0.025, excess) * skin;
+    c = fromYCbCr(luma(c), cbOf(c) + 0.4 * (cbOf(low2) - cbOf(low1)) * k, crOf(c) - 0.9 * max(excess, 0.0) * k);
+  }
   if (uUnify > 0.0) {
     float t = uUnify * 0.8 * skin;
     float y = luma(c);
@@ -322,12 +356,20 @@ void main() {
       float e = uEye * m.g;
       c = c * (1.0 + 0.35 * e) + 0.6 * e * (src - low0);
     }
+    float underEye = m.b * (1.0 - e.g); // Protect strokes apply to the under-eye tools too
     if (uDark > 0.0) {
-      float d = uDark * m.b;
+      float d = uDark * underEye;
       float y = luma(c);
       float cb = cbOf(c), cr = crOf(c);
       y += max(0.0, luma(low2) * 1.06 - y) * d;
       c = fromYCbCr(y, cb + (cbOf(low2) - cb) * 0.5 * d, cr + (crOf(low2) - cr) * 0.5 * d);
+    }
+    // Under-eye texture (preview of engines/under_eye.py): the crease band (low0 - low1) faded,
+    // dark lines fully at 100%, lighter ridges by 35%; pores (src - low0) kept.
+    if (uUnderEyeTex > 0.0) {
+      float band = luma(low0) - luma(low1);
+      float k = uUnderEyeTex * underEye;
+      c -= k * (min(band, 0.0) + 0.35 * max(band, 0.0));
     }
     if (uTeeth > 0.0) {
       float tp = smoothstep(0.30, 0.55, luma(c)) * m.a * uTeeth;

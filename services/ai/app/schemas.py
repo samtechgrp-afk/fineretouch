@@ -132,8 +132,11 @@ class EffectControls(BaseModel):
     blemishRemoval: EffectControl = EffectControl()
     acneRemoval: EffectControl = EffectControl()
     darkSpotRemoval: EffectControl = EffectControl()
+    rednessReduction: EffectControl = EffectControl()
+    skinNoise: EffectControl = EffectControl()
     skinToneUnify: EffectControl = EffectControl()
     darkCircles: EffectControl = EffectControl()
+    underEyeTexture: EffectControl = EffectControl()
     eyeBrighten: EffectControl = EffectControl()
     teethWhiten: EffectControl = EffectControl()
     teethStainRemoval: EffectControl = EffectControl()
@@ -188,6 +191,10 @@ class Adjustments(BaseModel):
     acneRemoval: float = Field(0, ge=0, le=100)
     darkSpotRemoval: float = Field(0, ge=0, le=100)
     keepFreckles: bool = False
+    # v0.9 skin engine (app/engines/redness.py, noise.py, under_eye.py).
+    rednessReduction: float = Field(0, ge=0, le=100)
+    skinNoise: float = Field(0, ge=0, le=100)
+    underEyeTexture: float = Field(0, ge=0, le=100)
     eyeBrighten: float = Field(0, ge=0, le=100)
     darkCircles: float = Field(0, ge=0, le=100)
     teethWhiten: float = Field(0, ge=0, le=100)

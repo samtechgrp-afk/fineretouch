@@ -208,6 +208,12 @@ export interface Adjustments {
   acneRemoval: number;
   /** v0.7 Dark spot removal: isolated dark marks, then uneven pigmentation on the tone layer. 0..100 */
   darkSpotRemoval: number;
+  /** v0.9 Redness reduction: diffuse redness, flushing and rosacea pulled to the surrounding skin tone. 0..100 */
+  rednessReduction: number;
+  /** v0.9 Skin noise reduction: grain and colour noise on skin, pores kept. 0..100 */
+  skinNoise: number;
+  /** v0.9 Under-eye texture: fine lines and crepey skin below the eyes. 0..100 */
+  underEyeTexture: number;
   /** Dark spot and blemish removal leave small, faint freckles alone. */
   keepFreckles: boolean;
   // Face (landmark driven)
@@ -297,6 +303,9 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   skinToneUnify: 0,
   acneRemoval: 0,
   darkSpotRemoval: 0,
+  rednessReduction: 0,
+  skinNoise: 0,
+  underEyeTexture: 0,
   keepFreckles: false,
   eyeBrighten: 0,
   darkCircles: 0,
@@ -346,6 +355,14 @@ export const SLIDERS: readonly SliderSpec[] = [
     hint: 'Heals isolated dark marks and evens brownish pigmentation patches. Facial shadows, beauty marks and (optionally) freckles are kept.',
   },
   {
+    key: 'rednessReduction', label: 'Redness reduction', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Calms diffuse redness, flushed cheeks and rosacea toward the person\'s own surrounding skin tone. Brightness, shading and texture are not changed.',
+  },
+  {
+    key: 'skinNoise', label: 'Skin noise reduction', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Removes camera grain and colour noise on skin. It measures the photo\'s own noise level, so pores and fine hair stronger than the noise stay.',
+  },
+  {
     key: 'blemishRemoval', label: 'Blemish removal', min: 0, max: 100, step: 1, group: 'skin',
     hint: 'General clean-up: every kind of small spot or mark (acne, dark spots, minor imperfections) in one pass.',
   },
@@ -356,6 +373,10 @@ export const SLIDERS: readonly SliderSpec[] = [
   {
     key: 'darkCircles', label: 'Under-eye correction', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
     hint: 'Lifts dark circles and under-eye discoloration toward the cheek tone, without enlarging or reshaping the eyes.',
+  },
+  {
+    key: 'underEyeTexture', label: 'Under-eye texture', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
+    hint: 'Fades fine lines and crepey texture below the eyes. Pores and the eye\'s own contour are kept.',
   },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },

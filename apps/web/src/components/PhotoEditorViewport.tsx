@@ -6,6 +6,7 @@ import { ensureDepth, hairRoiFor } from '@/lib/depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
 import { editMaskFor, faceMaskFor } from '@/lib/export';
 import { getDepth, getProxy, getSegmentation } from '@/lib/images';
+import { noiseLevelOf } from '@/lib/noise';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 
 const BG: [number, number, number] = [0.051, 0.055, 0.063];
@@ -125,7 +126,8 @@ export function PhotoEditorViewport() {
         r.setSegmentation(seg ?? null, seg?.width, seg?.height);
         segKeyRef.current = segKey;
       }
-      r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats });
+      const noiseLevel = p.adjustments.skinNoise > 0 ? noiseLevelOf(`${p.id}:proxy`, proxy) : undefined;
+      r.render(p.adjustments, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats, noiseLevel });
       const g = geometry();
       if (!g) return;
       const v = st.view;
