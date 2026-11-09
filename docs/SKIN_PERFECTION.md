@@ -118,11 +118,43 @@ new dependencies or models).
   the mark is widened (at most 1.5× its first radius) and corrected again or reported
   remaining, instead of being counted as a new mark. Each mark is attempted at most twice and there are at most 4 passes, so the
   loop always ends.
+  Since phase 2D, a scan after the first only adds a new mark where that pass changed pixels:
+  elsewhere the last scan already saw the same pixels, and a new hit is its tile statistics
+  shifting around a repair.
+- **H2. Correction quality gate (phase 2D, `app/engines/perfection_quality.py`).** Lower
+  contrast alone does not make a mark corrected. Each repair is measured on a window around it
+  (inner disc 0.8 R, ring 1.4–2.2 R; other marks and protected features left out) with seven
+  checks:
+
+  | Check | What it measures | Limit |
+  |---|---|---|
+  | residual | contrast left / allowed (the 40% rule) | ≤ 1 |
+  | colour | CIEDE2000 between the repaired disc and its ring, on low-passed colour | ≤ 2.0 |
+  | texture | fine-band energy in the disc vs the ring (both + a visibility floor) | 0.6–1.6 |
+  | pores | share of the ring's pore count kept in the disc (only where the ring has visible pores) | ≥ 0.5 |
+  | edges | gradient on the repair's edge vs the ring's own gradient (seams) | ≤ 2.0 |
+  | repetition | correlation between the disc's texture and any nearby patch (stamped donors) | ≤ 0.9 |
+  | surround | L* change of the skin just outside the repair | ≤ 1.0 L* |
+
+  A repair that fails is tried again from the original pixels (never stacked on the failed
+  one), with the next-best donor and 1.35× wider. Donors avoid every other mark; a partly
+  covered donor is used only when no clean one exists, with the covered pixels filled. When the
+  last attempt still fails a naturalness check (colour, texture, pores, edges, repetition,
+  surround), the original skin is put back and the mark goes to **Needs review** with reason
+  `repairFailed` and the failed checks. A colour failure that only means some of the mark is
+  left is not damage: that mark stays "remaining" and is measured again after the area tools.
+  A mark the user chose to correct keeps its repair and shows which checks it failed.
+  Marks waiting for review are untouched by every tool, the area tools included.
+  The thresholds are provisional: they were set on synthetic dev scenes and checked on retouched
+  real photos, and are calibrated on the real validation photos with the repair quality review
+  page (`SKIN_PERFECTION_QA.md`, section 8).
 - **I. Quality verification and report.** The report gives:
   - detected, corrected, remaining, review, protected and ignored counts
   - counts per kind and mean confidence
   - texture retention (fine-band energy after vs before)
-  - every mark (position, size, kind, confidence, region, status, contrast before and after)
+  - every mark (position, size, kind, confidence, region, status, contrast before and after,
+    and since phase 2D each repair's quality-check values and failed checks)
+  - failures per quality check
   Area tools follow: redness, discoloration, texture/scar smoothing and under-eye. Finally,
   every pixel outside the skin region is copied back unchanged.
 
@@ -158,11 +190,13 @@ must change the output on a control scene.
   radius, action). Correct also works where nothing was detected and adds a manual mark.
 - **Correct all remaining** adds a correct override for every remaining or low-confidence
   review mark at or above the confidence threshold, as one undo step. Marks that may be a
-  freckle or a follicle are never included. A correct override forces the mark at its centre
-  (the one chosen) and other ordinary marks inside its circle, but never a protected feature or
-  a "may be a feature" mark next to it: those need their own decision.
+  freckle or a follicle, and marks whose repair failed the quality checks, are never included.
+  A correct override forces the mark at its centre (the one chosen) and other ordinary marks
+  whose centre is inside its circle, but never a protected feature or a "may be a feature" mark
+  next to it: those need their own decision.
 - **The reason** for a review mark is shown when the mark is selected, and the panel counts the
-  marks that may be a natural feature.
+  marks that may be a natural feature and the repairs that failed the quality checks. A failed
+  repair shows which checks it failed and that the original skin was restored.
 - **Run another pass** adds one pass (up to 4).
 - **Rescan** runs the engine again with the same settings.
 - **Undo / redo**: overrides and settings are ordinary edit history. Earlier results are cached

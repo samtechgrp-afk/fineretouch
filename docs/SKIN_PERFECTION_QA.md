@@ -301,3 +301,83 @@ neighbours. An engine test covers this case.
   shafts. Its effect is unmeasured until real stubble photos are labelled.
 - Colourless "blemish" detections on the retouched photos (about 540) are unchanged. Phase 2D's
   correction checks and the real labels address them.
+
+## 8. Phase 2D results: correction quality
+
+### What changed
+
+- Seven quality checks per repair (residual, colour ΔE2000, texture, pores, edges, repetition,
+  surround). Definitions and limits: `SKIN_PERFECTION.md`, stage H2. A mark counts as corrected
+  only when its repair passes all checks that apply to it.
+- A failed repair is retried from the original skin with another donor, wider. If it still
+  fails, the original skin is restored and the mark is asked about (`repairFailed`). The user
+  can still choose Correct, which keeps the repair and shows the failed checks.
+- Repair fixes the checks found: donors no longer carry neighbouring marks into a repair, the
+  donor search window is wide enough on dense skin, pore reinjection no longer leaves a ghost
+  ring of the mark's edge, and the fill tone is taken from skin around the mark, not the mark.
+- Marks waiting for review are untouched by the area tools too (the tone tool used to lighten a
+  restored dark spot).
+- Later residual scans only add marks where the pass changed pixels.
+- **Repair quality review page** for calibrating the thresholds on real photos:
+
+      python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --split validation \
+          --quality-gallery quality-review.html
+
+  It shows every failed repair and 4 passed ones per photo, before | after, each check's value
+  against its limit, and boxes to tick "false alarm" (a failed repair that looks natural) or
+  "looks wrong" (a passed repair that does not). Thresholds are set on the validation split only.
+
+### Synthetic benchmark (held-out scenes) against phase 2C
+
+| Metric | 2C | 2D |
+|---|---|---|
+| Precision | 0.979 | 0.978 |
+| Recall | 0.985 | 0.985 |
+| Removal rate | 0.960 | 0.958 |
+| Corrected but still visible | 4 | **1** |
+| False positives | 16 | 17 |
+| … corrected (false corrections) | 7 | **5** |
+| … left for review, untouched | 9 | 12 |
+| Natural features damaged | 0 | 0 |
+| Texture retention (clean skin) | 1.000 | 1.000 |
+| Mean time per scene | 7.6 s | 10.2 s |
+| Peak memory | 1,167 MB | 1,307 MB |
+
+The gate reports no regression. `qa/baselines/synthetic-2D.json` is the new reference; the
+quick CI baseline is unchanged (it passes). On the dev scenes, false positives were 14 → 17 and
+false corrections 8 → 10: marks on untouched skin found by the first residual scan, whose tile
+statistics shift with the repairs around them. Limiting that scan to changed skin removed them
+but lowered type VI removal (0.917 → 0.893), because it also finds real marks the first
+detection missed on deep skin, so it was kept. Only later scans are limited to changed skin;
+that rule changed no count on these scenes.
+
+The synthetic scenes have clean, uniform skin texture, so nearly every repair passes there; the
+checks matter on real skin.
+
+### Real-photo check (retouched portraits, no labels)
+
+These photos are already retouched, so most detections are faint and a good engine changes
+little. Fine texture lost over the whole skin: 3.4% → **1.6%** (photo 1) and 5.8% → **2.7%**
+(photo 12). Of 1,274 repairs tried on the five photos, 366 passed, 742 were restored and asked
+about, and 166 stayed remaining (partly corrected colour). Failures per check: texture 663,
+colour 399, residual 337, pores 266, edges 15, repetition 2, surround 1. Most texture failures
+are in sheen and highlight areas, where the repair is smoother than the lit skin around it.
+
+### In the app
+
+On a 30 MP portrait (CRPixels-5) the panel reports 225 repairs that did not pass, and selecting
+one shows, for example, "Failed: colour, texture. The original skin was restored; choose
+Correct to repair it anyway." This check found a bug: **Correct all remaining** also corrected
+12 of the failed repairs, because they touched the circle of a remaining blemish beside them.
+A correct override now forces a neighbour only when its centre is inside the circle. After the
+fix, 4 of the 225 passed the checks when measured again and 2 were still forced: one sat inside
+a remaining blemish's circle, and one was the nearest new detection to an override whose own
+mark was not found again. An engine test covers the circle rule.
+
+### Remaining limitations
+
+- **The thresholds are provisional.** On the retouched photos 58% of attempted repairs fail,
+  mostly on texture in lit areas. Whether those are real problems or false alarms needs the
+  review page on the validation photos. Until then a strict gate means more marks to review.
+- Time is up 34% on the synthetic scenes (retries and wider donor search). Phase 2E works on
+  this.

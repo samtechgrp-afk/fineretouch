@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 import pytest
 
+from qa import quality_gallery as QG
 from qa import report as R
 from qa.dataset import (
     ALL_KINDS, CONDITIONS, LIGHTING, TONE_GROUPS, assign_split, check_subject_separation, coverage, load_labels,
@@ -195,8 +196,12 @@ def test_real_suite_plumbing(tmp_path):
     _write_labels(photo.with_name("p1.png.labels.json"), 500, 500, labels)
     (tmp_path / "manifest.json").write_text(json.dumps({"photos": [
         {"file": "S01/p1.png", "subject": "S01", "tone": "monk-8", "lighting": "soft", "conditions": ["whitehead"], "consent": "internal-qa"}]}))
-    rows = run_real(tmp_path, log=lambda *_: None)
+    gallery: list = []
+    rows = run_real(tmp_path, log=lambda *_: None, gallery=gallery)
     assert len(rows) == 1
+    q = rows[0]["score"]["quality"]
+    assert set(q["failed"]) == set(QG.Q.CHECKS) and q["repairs"] == len([g for g in gallery if g["failed"]]) + min(
+        QG.PASSED_SAMPLE, q["repairs"] - len([g for g in gallery if g["failed"]]))
     s = rows[0]["score"]
     assert s["imperfections"] == sum(t.kind in REMOVE_KINDS for t in truths)
     assert s["unconfirmedLabelsSkipped"] == 1
@@ -204,3 +209,22 @@ def test_real_suite_plumbing(tmp_path):
     rep = R.build("real", rows)
     assert rep["suite"] == "real" and "Real photographs" in rep["note"]
     assert set(ALL_KINDS) >= {k for k in rep["byCategory"]}
+
+
+def test_quality_gallery_shows_failed_and_sample_passed_repairs(tmp_path):
+    from app.engines.perfection import perfect_skin
+    from app.schemas import SkinPerfectionSettings
+    from tests.perfection_fixtures import oval_face
+
+    img, truths, F = make_scene(size=600, tone="V", seed=6)
+    out, rep = perfect_skin(img, oval_mask(600, 600), [oval_face(600, 600)], SkinPerfectionSettings(enabled=True))
+    rep.marks[0].quality = {**(rep.marks[0].quality or {"values": {k: None for k in QG.Q.CHECKS}, "incomplete": False}),
+                            "failed": ["texture"], "kept": True}  # one failed repair, to be sure it is listed
+    gallery = QG.collect("scene.png", img, out, rep.marks)
+    stats = QG.summary(rep.marks)
+    assert stats["repairs"] > QG.PASSED_SAMPLE and stats["failed"]["texture"] >= 1
+    assert any(g["failed"] == ["texture"] and g["kept"] for g in gallery)
+    assert sum(not g["failed"] for g in gallery) == QG.PASSED_SAMPLE
+    QG.write_html(gallery, stats, tmp_path / "review.html")
+    page = (tmp_path / "review.html").read_text()
+    assert "false alarm" in page and "data:image/png;base64," in page and "kept (user chose Correct)" in page

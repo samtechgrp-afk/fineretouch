@@ -170,3 +170,13 @@ def test_a_correct_override_for_one_mark_leaves_neighbouring_features_alone():
     o2 = PerfectionOverride(x=104.0 / 1000, y=100.0 / 1000, radius=4.0 / 1000, action="correct")
     out2, _ = P._apply_overrides(out, [o2], 1000, 1000, 4)
     assert out2[1].status == "forced" and out2[1].reason is None and out2[2].status == "protected"
+
+
+def test_a_correct_override_forces_a_neighbour_only_if_its_centre_is_inside_the_circle():
+    """One bulk override per remaining blemish: a separate mark that only touches the circle (often
+    one whose repair failed the quality checks) is not corrected because its neighbour was."""
+    mk = lambda i, x: P.Mark(i, x, 100.0, 3.0, "blemish", 0.9, "face", 0.3, status="detected")  # noqa: E731
+    marks = [mk(0, 100.0), mk(1, 105.0), mk(2, 108.0)]
+    o = PerfectionOverride(x=100.0 / 1000, y=100.0 / 1000, radius=6.0 / 1000, action="correct")
+    out, _ = P._apply_overrides(marks, [o], 1000, 1000, 3)
+    assert [m.status for m in out] == ["forced", "forced", "detected"]

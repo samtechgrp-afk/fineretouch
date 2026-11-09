@@ -19,6 +19,7 @@ from tests.perfection_fixtures import make_scene, oval_face, oval_mask
 
 from .dataset import load_labels, load_manifest, tone_group
 from .memory_probe import peak_memory
+from . import quality_gallery as QG
 from .scoring import Label, score_photo
 
 FITZ = {"I": "fitz-I", "II": "fitz-II", "III": "fitz-III", "IV": "fitz-IV", "V": "fitz-V", "VI": "fitz-VI"}
@@ -84,8 +85,10 @@ def run_synthetic(
     return rows
 
 
-def run_real(folder: str | Path, split: str | None = None, settings: SkinPerfectionSettings | None = None, log=print) -> list[dict]:
-    """Real photos through the same path as the app's export (decode, faces, parsing, render)."""
+def run_real(folder: str | Path, split: str | None = None, settings: SkinPerfectionSettings | None = None, log=print,
+             gallery: list | None = None) -> list[dict]:
+    """Real photos through the same path as the app's export (decode, faces, parsing, render).
+    gallery: if a list, repair-quality review entries are added to it (qa/quality_gallery.py)."""
     from app import imageio, raw_engine
     from app.depth import DepthEstimator
     from app.landmarks import FaceLandmarkService
@@ -133,6 +136,10 @@ def run_real(folder: str | Path, split: str | None = None, settings: SkinPerfect
         score = score_photo(before, after, labels, marks, region > 0, F, ms=ms, peak_mb=mem.peak_mb)
         score["addedMB"] = mem.added_mb
         score["unconfirmedLabelsSkipped"] = lf.unconfirmed
+        if rep is not None:
+            score["quality"] = QG.summary(rep.marks)
+            if gallery is not None:
+                gallery.extend(QG.collect(p["file"], before, after, rep.marks, seed=len(rows)))
         rows.append({"id": p["file"], "subject": p["subject"], "split": p["split"], "tone": p.get("tone"),
                      "toneGroup": tone_group(p.get("tone")), "lighting": p.get("lighting"),
                      "conditions": p.get("conditions", []), "size": max(w, h), "score": score})

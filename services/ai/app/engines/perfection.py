@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 
 import cv2
 import numpy as np
@@ -60,7 +60,8 @@ from .common import _cbcr, _ellipse, _from_ycbcr, _gauss, _luma, _masked_blur, _
 from .local import push_pull
 from .redness import reduce_redness
 from .skin import correct_pigmentation
-from .spots import _best_donor, face_width_px, faces_in_crop, feature_protection_mask
+from . import perfection_quality as Q
+from .spots import face_width_px, faces_in_crop, feature_protection_mask
 
 # --- A. analysis scale and tiling ----------------------------------------------------------
 WORK_FACE = 1100.0  # analysis resolution: face width in px (old detector: 420)
@@ -115,9 +116,12 @@ FRECKLE_OUTLIER_SIZE, FRECKLE_OUTLIER_DARK = 1.4, 1.8  # a spot this much bigger
 HAIR_COHERENCE = 0.5  # orientation coherence around a beard-area dot that says "hair runs here"
 FIELD_LIKE = 1.3  # a lone dot within this factor of a nearby stubble field's dots looks like one of them
 CLUSTER_PEAK_RATIO = 1.5  # a large flat mark with 2+ marks inside this much stronger is a cluster, not one patch
-REVIEW_REASONS = ("lowConfidence", "mayBeFreckle", "mayBeFollicle")
+REVIEW_REASONS = ("lowConfidence", "mayBeFreckle", "mayBeFollicle", "repairFailed")
+FINE_RESIDUAL = 0.6  # the residual check also rescans the mark at this share of its radius
 
 # --- F/G. correction ------------------------------------------------------------------------
+SHARP_KINDS = ("blackhead", "whitehead", "smallDot", "darkSpot", "postAcne")  # edges that leave a ghost ring
+SHARP_SMALL = 6.0  # a sharp mark up to this many pore scales across is all edge
 HEAL_KINDS = ("acne", "pimple", "blackhead", "whitehead", "blemish", "manual")
 PIGMENT_KINDS = ("darkSpot", "postAcne", "smallDot")
 PROTECTED_KINDS = ("mole", "freckle", "birthmark", "follicle")
@@ -131,6 +135,8 @@ MAX_ATTEMPTS = 2  # ... and no mark is corrected more than this many times
 REVIEW_BAND = 0.15  # confidence this far below the threshold -> "needs review", not corrected
 RESIDUE_REACH = 1.8  # a residual hit within this many radii of a corrected mark is that mark's residue ...
 RESIDUE_GROW = 1.5  # ... and widens it by at most this factor
+REPAIR_MARGIN = 1.0  # px added to every repair radius
+RETRY_GROW = 1.35  # a retry after a failed quality check repairs this much wider (within RESIDUE_GROW)
 
 
 def _fast_gauss(img: np.ndarray, sigma: float) -> np.ndarray:
@@ -185,6 +191,9 @@ class Mark:
     after: float | None = None  # relative contrast after the last correction
     r0: float | None = None  # radius when first found (residue may widen r up to RESIDUE_GROW x this)
     reason: str | None = None  # why a "review" mark needs a decision (REVIEW_REASONS)
+    quality: dict | None = None  # the correction quality checks of its last repair (perfection_quality)
+    fine0: float | None = None  # contrast at the finer residual scale, before any repair
+    forced: bool = False  # the user chose Correct for it
 
 
 @dataclass
@@ -199,6 +208,7 @@ class PerfectionReport:
     texture_retention: float | None = None  # fine-band energy around corrected marks, after / before
     ms: float = 0.0
     areas: dict[str, float] = field(default_factory=dict)  # area corrections applied (strength 0..1)
+    quality: dict[str, int] = field(default_factory=dict)  # final repairs failing each check (perfection_quality)
 
     def counts(self) -> dict[str, int]:
         st = [m.status for m in self.marks]
@@ -226,8 +236,9 @@ class PerfectionReport:
             "meanConfidence": round(float(np.mean(conf)), 3) if conf else None,
             "textureRetention": None if self.texture_retention is None else round(self.texture_retention, 3),
             "areas": {k: round(v, 3) for k, v in self.areas.items()},
+            "quality": dict(self.quality),
             "marks": [
-                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast", "r0")},
+                {**{k: v for k, v in asdict(m).items() if k not in ("x", "y", "r", "after", "contrast", "r0", "fine0", "forced")},
                  "x": round(m.x / self.width, 5), "y": round(m.y / self.height, 5), "r": round(m.r / L, 5),
                  "contrast": round(m.contrast, 3), "after": None if m.after is None else round(m.after, 3),
                  "confidence": round(m.confidence, 3)}
@@ -963,24 +974,124 @@ def _cap_fill(low: np.ndarray, fill: np.ndarray, sel: np.ndarray) -> np.ndarray:
     return low + (fill - low) * t[..., None]
 
 
+def _grow(settings: SkinPerfectionSettings) -> float:
+    """Repair radius / mark radius."""
+    return (1.25 + 1.0 * settings.correctionRadius / 100.0) * MULTIPLIER_RADIUS.get(int(settings.multiplier), 1.0)
+
+
+def _repair_radius(m: Mark, settings: SkinPerfectionSettings) -> float:
+    # The margin covers a pixel of centring error, which on a pore-sized mark leaves a fragment.
+    return max(1.5, m.r * _grow(settings) + REPAIR_MARGIN)
+
+
+def _natural_failures(m: Mark) -> list[str]:
+    """Failed checks of the mark's last repair that say it changed the skin wrongly (not only that
+    some of the mark is left: still visible, or its colour partly left)."""
+    q = m.quality or {}
+    return [k for k in q.get("failed", []) if k in Q.NATURALNESS and not (k == "colour" and q.get("incomplete"))]
+
+
+DONOR_MAX_TAKEN = 0.35  # a donor patch may overlap other marks / features by at most this share ...
+DONOR_TAKEN_COST = 0.05  # ... at this cost per unit of overlap (tone mismatch is in relative luma)
+
+
+def _ranked_donor(
+    box: tuple[int, int, int, int], low_y: np.ndarray, ok: np.ndarray, taken: np.ndarray, distance: int, rank: int = 0
+) -> tuple[int, int] | None:
+    """Offset (dy, dx) of a nearby skin patch whose tone matches the mark's rim: the best one, or
+    for a retry after a failed quality check the next best (rank 1, 2, ...). A patch must be skin
+    (`ok`) throughout; overlap with other marks (`taken`) is allowed up to DONOR_MAX_TAKEN and
+    costs, so in a dense acne field a mostly clear patch still gives texture."""
+    x, y, bw, bh = box
+    h, w = ok.shape
+    pad = max(2, max(bw, bh) // 3)
+    y0, y1, x0, x1 = max(0, y - pad), min(h, y + bh + pad), max(0, x - pad), min(w, x + bw + pad)
+    target = float(np.median(low_y[y0:y1, x0:x1]))
+    found: list[tuple[float, tuple[int, int]]] = []
+    for i in range(12):
+        t = 2 * math.pi * i / 12
+        for dist in (distance, int(distance * 1.6), int(distance * 2.4), int(distance * 3.6)):
+            dy, dx = round(math.sin(t) * dist), round(math.cos(t) * dist)
+            yy0, yy1, xx0, xx1 = y0 + dy, y1 + dy, x0 + dx, x1 + dx
+            if yy0 < 0 or xx0 < 0 or yy1 > h or xx1 > w or not ok[yy0:yy1, xx0:xx1].all():
+                continue
+            cover = float(taken[yy0:yy1, xx0:xx1].mean())
+            if cover > DONOR_MAX_TAKEN:
+                continue
+            cost = abs(float(np.median(low_y[yy0:yy1, xx0:xx1])) - target) + 0.002 * dist / max(1, distance) + DONOR_TAKEN_COST * cover
+            found.append((cost, (dy, dx)))
+        if rank == 0 and found and min(found)[0] < 0.01:
+            break
+    if not found:
+        return None
+    found.sort(key=lambda c: c[0])
+    return found[min(rank, len(found) - 1)][1]
+
+
+def _known_blur(img: np.ndarray, known: np.ndarray, sigma: float) -> np.ndarray:
+    """Gaussian blur of the known pixels only (normalised convolution); unknown pixels far from
+    any known one keep a plain blur, and are replaced by the fill anyway."""
+    den = _gauss(known, sigma)[..., None]
+    num = _gauss(img * known[..., None], sigma)
+    return np.where(den > 1e-3, num / np.maximum(den, 1e-3), _gauss(img, sigma)).astype(np.float32)
+
+
+def _donor_patch(
+    img: np.ndarray, skin: np.ndarray, hole: np.ndarray, box: tuple[int, int, int, int], size: int, sigma: float, rank: int,
+) -> np.ndarray | None:
+    """Fine texture (above `sigma`) of the healthy patch that best matches the mark's rim, from a
+    window wide enough for every offset the search tries (box in image pixels). `hole` marks
+    every repair and every detected feature or mark: a donor's pixels on one are filled from the
+    donor's clean texture around them, so no stubble dot, freckle or blackhead is stamped into
+    the repair."""
+    x, y, bw, bh = box
+    h, w = img.shape[:2]
+    dist = max(4, int(size * 1.3))
+    pad = int(math.ceil(3.6 * dist + size / 3 + 2 * sigma)) + 2
+    y0, y1, x0, x1 = max(0, y - pad), min(h, y + bh + pad), max(0, x - pad), min(w, x + bw + pad)
+    crop = img[y0:y1, x0:x1].astype(np.float32)
+    low = _gauss(crop, sigma)
+    ly, sk = _luma(low), skin[y0:y1, x0:x1]
+    taken = cv2.dilate(hole[y0:y1, x0:x1], _ellipse(3)).astype(np.float32)
+    b = (x - x0, y - y0, bw, bh)
+    off = _ranked_donor(b, ly, sk > 0.6, taken, dist, rank)
+    if off is None:
+        off = _ranked_donor(b, ly, sk > 0.3, taken, dist, rank)
+    if off is None:
+        return None
+    dy, dx = off
+    yy, xx = y - y0 + dy, x - x0 + dx
+    patch = (crop - low)[yy:yy + bh, xx:xx + bw]
+    bad = taken[yy:yy + bh, xx:xx + bw]
+    if bad.any():
+        # Fill the overlap from the patch's clean texture (pores mirrored in from around it).
+        clean = 1.0 - bad
+        fill = push_pull(patch, clean)
+        turn = (lambda a: a[::-1, ::-1]) if (x + y) % 2 else (lambda a: a[::-1, :])  # noqa: E731
+        tex = np.where(turn(clean)[..., None] > 0, turn(patch), fill)
+        patch = np.where(bad[..., None] > 0, tex, patch)
+    return patch
+
+
 def _correct_marks(
     image: np.ndarray, skin: np.ndarray, marks: list[Mark], settings: SkinPerfectionSettings, F: float,
-    edge_guard: np.ndarray | None,
+    edge_guard: np.ndarray | None, avoid: list[Mark] = (),
 ) -> np.ndarray:
-    """Heal / pigment-correct the given marks at full resolution, cluster by cluster."""
+    """Heal / pigment-correct the given marks at full resolution, cluster by cluster. `avoid`:
+    every other detected mark and feature, never used as donor skin."""
     if not marks:
         return image
     h, w = image.shape[:2]
-    mult = int(settings.multiplier)
-    grow = (1.25 + 1.0 * settings.correctionRadius / 100.0) * MULTIPLIER_RADIUS.get(mult, 1.0)
     overall = settings.strength / 100.0
     tp = settings.texturePreservation / 100.0
     pp = settings.porePreservation / 100.0
     heal = np.zeros((h, w), np.float32)  # strength where the texture is rebuilt
     pig = np.zeros((h, w), np.float32)  # strength where only the tone is rebuilt
     hole = np.zeros((h, w), np.uint8)
+    core = np.zeros((h, w), np.float32)  # the marks themselves: their fine band is the mark, not skin
+    sf_ = max(0.7, 0.0012 * F)
     for m in marks:
-        R = max(1.5, m.r * grow)
+        R = _repair_radius(m, settings)
         cat = settings.category("blemish" if m.kind == "manual" else m.kind)
         st = float(np.clip(cat.strength / 100.0 * overall, 0.0, 1.0))
         if st <= 0:
@@ -988,10 +1099,27 @@ def _correct_marks(
         canvas = heal if m.kind in HEAL_KINDS else pig
         cv2.circle(canvas, (int(round(m.x)), int(round(m.y))), int(math.ceil(R)), st, -1, lineType=cv2.LINE_AA)
         cv2.circle(hole, (int(round(m.x)), int(round(m.y))), int(math.ceil(R)), 1, -1)
+        if m.kind in SHARP_KINDS:
+            # A sharp mark's fine band is its own edge. A small one is all edge; on a large one only
+            # the rim is replaced, so the pores and follicles inside it are kept.
+            c = (int(round(m.x)), int(round(m.y)))
+            cv2.circle(core, c, int(math.ceil(min(1.6 * m.r, R))), 1.0, -1, lineType=cv2.LINE_AA)
+            if m.r > SHARP_SMALL * sf_:
+                cv2.circle(core, c, int(0.6 * m.r), 0.0, -1, lineType=cv2.LINE_AA)
     if not hole.any():
         return image
+    taken = hole.copy()
+    for m in avoid:
+        cv2.circle(taken, (int(round(m.x)), int(round(m.y))), int(math.ceil(1.6 * m.r)) + 1, 1, -1)
     out = image.copy()
     n, labels, stats, _ = cv2.connectedComponentsWithStats(hole, connectivity=8)
+    # A cluster holding a mark whose last repair failed a naturalness check is retried with the
+    # next-best donor patch.
+    rank = np.zeros(n, np.int32)
+    for m in marks:
+        if _natural_failures(m):
+            lab = labels[min(h - 1, max(0, int(round(m.y)))), min(w - 1, max(0, int(round(m.x))))]
+            rank[lab] = max(rank[lab], m.attempts)
     sf = max(0.7, 0.0012 * F)  # pore band
     for i in range(1, n):
         x, y, bw, bh, _ = stats[i]
@@ -1003,31 +1131,36 @@ def _correct_marks(
         sel = labels[cy0:cy1, cx0:cx1] == i
         known = (~sel).astype(np.float32)
         sigma = max(0.8, 0.3 * size)
-        low = _gauss(crop, sigma)
+        # Tone from the skin around the mark only: a plain blur spreads the mark into the ring the
+        # fill is built from, and the repair comes out tinted by the mark it replaced.
+        low = _known_blur(crop, known, sigma)
         high = crop - low
         low_fill = _cap_fill(low, push_pull(low, known), sel)
-        # Pigment marks: rebuild everything above the pore scale; the pores inside stay.
+        # The fine band (pores) inside the repair is kept, except over the mark itself: there it
+        # is the mark's own sharp edge, and keeping it leaves a ghost ring.
+        mcore = _gauss(core[cy0:cy1, cx0:cx1], 0.6)[..., None] * sel[..., None]
         low_p = _gauss(crop, sf)
-        pig_out = _cap_fill(low_p, push_pull(low_p, known), sel) + (crop - low_p)
+        fine_o = crop - low_p
         # Heal marks: rebuilt tone + texture from the best healthy patch nearby.
         sk = skin[cy0:cy1, cx0:cx1]
-        donor_ok = (sk > 0.6) & (cv2.dilate(hole[cy0:cy1, cx0:cx1], _ellipse(3)) == 0)
         texture = push_pull(high, known)  # smooth fallback (no grain)
-        off = _best_donor((x - cx0, y - cy0, bw, bh), _luma(low), donor_ok, max(4, int(size * 1.3)))
-        if off is None:
-            off = _best_donor((x - cx0, y - cy0, bw, bh), _luma(low), sk > 0.3, max(4, int(size * 1.3)))
-        if off is not None:
-            dy, dx = off
-            yy0, xx0 = y - cy0 + dy, x - cx0 + dx
+        donor_high = _donor_patch(out, skin, taken, (x, y, bw, bh), size, sigma, int(rank[i]))
+        fine_fill = push_pull(fine_o, known * (1.0 - mcore[..., 0]))  # mark core: no texture at worst
+        if donor_high is not None:
             donor = np.zeros_like(high)
-            donor[y - cy0:y - cy0 + bh, x - cx0:x - cx0 + bw] = high[yy0:yy0 + bh, xx0:xx0 + bw]
-            # Pore preservation: on marks bigger than a pore, keep the original pore band.
-            fine_o = crop - _gauss(crop, sf)
+            donor[y - cy0:y - cy0 + bh, x - cx0:x - cx0 + bw] = donor_high
             fine_d = donor - _gauss(donor, sf)
+            fine_fill = np.where(sel[..., None], fine_d, fine_o)
+            # Pore preservation: on marks bigger than a pore, keep the original pore band around
+            # the mark (not over it).
             big = float(_smoothstep(3.0 * sf, 6.0 * sf, np.array(0.5 * size)))
-            donor = donor + (fine_o - fine_d) * (pp * big)
+            donor = donor + (fine_o - fine_d) * (pp * big) * (1.0 - mcore)
             texture = texture * (1.0 - tp) + donor * tp
             texture = np.where(sel[..., None], texture, high)
+        # Pigment marks: rebuild everything above the pore scale; the pores around the mark stay,
+        # and over the mark the donor's pores stand in for the mark's edge.
+        fine_keep = fine_o * (1.0 - mcore) + fine_fill * mcore
+        pig_out = _cap_fill(low_p, push_pull(low_p, known), sel) + fine_keep
         heal_out = low_fill + texture
         own = sel.astype(np.float32)  # this cluster only; neighbours get their own pass
         wh = _gauss(heal[cy0:cy1, cx0:cx1] * own, max(0.6, 0.12 * size))
@@ -1154,6 +1287,66 @@ def _needs_own_decision(m: Mark) -> bool:
     return m.status == "protected" or (m.status == "review" and m.reason not in (None, "lowConfidence"))
 
 
+def _verify(
+    image: np.ndarray, out: np.ndarray, skin: np.ndarray, todo: list[Mark], earlier: list[Mark],
+    settings: SkinPerfectionSettings, F: float, features: list[Mark] = (), count: bool = True,
+) -> None:
+    """The quality gate (perfection_quality): a mark is corrected only if its repair passes every
+    check. A failure leaves it "remaining", so the next pass retries it (with another donor
+    when a naturalness check failed)."""
+    h, w = out.shape[:2]
+    holes = np.zeros((h, w), np.uint8)
+    for m in todo + earlier:
+        cv2.circle(holes, (int(round(m.x)), int(round(m.y))), int(math.ceil(_repair_radius(m, settings))) + 1, 1, -1)
+    for m in features:  # moles, freckles, marks left alone: not "the skin around" a repair
+        cv2.circle(holes, (int(round(m.x)), int(round(m.y))), int(math.ceil(1.6 * m.r)) + 1, 1, -1)
+    tk, pk = settings.texturePreservation / 100.0, settings.porePreservation / 100.0
+    sigs, xs, ys, rs, quals = [], [], [], [], []
+    for m in todo:
+        m.attempts += int(count)
+        m.after = _mark_contrast(out, skin, m)
+        R = _repair_radius(m, settings)
+        residual = None
+        if m.kind != "manual" and m.contrast > 0:
+            fine = replace(m, r=FINE_RESIDUAL * m.r)
+            if m.fine0 is None:
+                m.fine0 = _mark_contrast(image, skin, fine)
+            floor = 0.5 * MIN_REL_CONTRAST
+            residual = (m.after / max(VERIFY_RATIO * m.contrast, floor),
+                        _mark_contrast(out, skin, fine) / max(VERIFY_RATIO * m.fine0, floor))
+        q = Q.assess(Q.window(image, out, skin, holes, m.x, m.y, R), R, F, residual, tk, pk)
+        quals.append(q)
+        sigs.append(Q.texture_signature(out, m.x, m.y, R, F))
+        xs.append(m.x), ys.append(m.y), rs.append(R)
+    # Repetition, against every repair so far (this pass and earlier ones).
+    for m in earlier:
+        R = _repair_radius(m, settings)
+        sigs.append(Q.texture_signature(out, m.x, m.y, R, F))
+        xs.append(m.x), ys.append(m.y), rs.append(R)
+    rep_ = Q.repetition(sigs, xs, ys, rs)
+    for m, q, r in zip(todo, quals, rep_):
+        q.values["repetition"] = r
+        q.failed = Q.failures(q.values, tk, pk)
+        m.quality = q.to_json()
+        m.status = "corrected" if not q.failed else "remaining"
+
+
+def _restore(image: np.ndarray, out: np.ndarray, failed: list[Mark], kept: list[Mark], settings: SkinPerfectionSettings) -> np.ndarray:
+    """Put the original pixels back over failed repairs, but not over repairs that passed."""
+    h, w = out.shape[:2]
+    back = np.zeros((h, w), np.float32)
+    keep = np.zeros((h, w), np.float32)
+    for m in failed:
+        cv2.circle(back, (int(round(m.x)), int(round(m.y))), int(math.ceil(_repair_radius(m, settings) * 1.25)) + 1, 1.0, -1)
+    for m in kept:
+        cv2.circle(keep, (int(round(m.x)), int(round(m.y))), int(math.ceil(_repair_radius(m, settings))) + 1, 1.0, -1)
+    if not back.any():
+        return out
+    sig = max(0.6, 0.15 * float(np.median([_repair_radius(m, settings) for m in failed])))
+    back = _gauss(back, sig) * (1.0 - _gauss(keep, sig))
+    return (out + (image - out) * np.clip(back, 0.0, 1.0)[..., None]).astype(np.float32)
+
+
 def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: int, h: int, next_id: int) -> tuple[list[Mark], int]:
     L = float(max(w, h))
     for o in overrides:
@@ -1168,14 +1361,16 @@ def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: 
                 # whatever it is. A neighbour inside the circle is forced only if it is an ordinary
                 # mark: a protected feature, or one waiting for review because it may be one, needs
                 # its own decision (one "Correct all remaining" override per blemish must not
-                # correct the follicle next to it).
+                # correct the follicle next to it). Nor is a neighbour that only touches the circle:
+                # its centre must be inside it (a failed repair next to a remaining blemish is
+                # measured afresh, and must not be corrected because its neighbour was).
                 target = min(hit, key=lambda m: (m.x - ox) ** 2 + (m.y - oy) ** 2)
                 for m in hit:
-                    if m is not target and _needs_own_decision(m):
+                    if m is not target and (_needs_own_decision(m) or (m.x - ox) ** 2 + (m.y - oy) ** 2 > orad * orad):
                         continue
-                    m.status, m.reason = "forced", None
+                    m.status, m.reason, m.forced = "forced", None, True
             else:
-                marks.append(Mark(next_id, ox, oy, orad, "manual", 1.0, "face", 0.0, status="forced"))
+                marks.append(Mark(next_id, ox, oy, orad, "manual", 1.0, "face", 0.0, status="forced", forced=True))
                 next_id += 1
     return marks, next_id
 
@@ -1275,14 +1470,29 @@ def perfect_skin(
             break
         if before_energy is None:
             before_energy = _fine_energy(image, todo, F)
-        out = _correct_marks(out, region, todo, settings, F, edge_guard)
+        # A retry after a failed quality check is a fresh repair from the original skin (with
+        # another donor), not a repair of the failed repair: stacking would wear away the pores
+        # and follicles inside the mark each time.
+        # It is also wider: a ghost ring or seam usually means the mark reaches past its measured
+        # radius, so half its edge was left in the blend.
+        retry = [m for m in todo if _natural_failures(m)]
+        if retry:
+            out = _restore(image, out, retry, [m for m in marks if m.status == "corrected"], settings)
+            for m in retry:
+                if m.r0 is None:
+                    m.r0 = m.r
+                m.r = min(RESIDUE_GROW * m.r0, RETRY_GROW * m.r)
+        prev = out
+        out = _correct_marks(out, region, todo, settings, F, edge_guard, [m for m in marks if m not in todo])
         rep.passes = p + 1
-        for m in todo:
-            m.attempts += 1
-            m.after = _mark_contrast(out, region, m)
-            gone = m.after <= max(VERIFY_RATIO * m.contrast, 0.5 * MIN_REL_CONTRAST) if m.contrast > 0 else m.after < MIN_REL_CONTRAST
-            forced = m.kind == "manual"
-            m.status = "corrected" if gone or forced else "remaining"
+        # The first residual scan looks at the whole face again, more sensitively (it finds marks
+        # the first detection missed, most often on deep skin). Later scans look for what the
+        # repairs left: where a pass changed nothing, the last scan already saw these pixels, and a
+        # new hit there is its tile statistics shifting around a repair, not a new mark.
+        changed = None if p == 0 else cv2.dilate((np.abs(out - prev).max(axis=2) > 1e-4).astype(np.uint8), np.ones((3, 3), np.uint8),
+                              iterations=max(1, int(round(0.01 * F)))) > 0
+        _verify(image, out, region, todo, [m for m in marks if m.attempts > 0 and m not in todo], settings, F,
+                [m for m in marks if m.attempts == 0 and m not in todo])
         # H. Residual scan of the corrected image (more sensitive), new marks join the next pass.
         boost = 20.0 * settings.residualIntensity / 100.0
         res, _ = _analyse(out, region, body, faces, F, settings, sens_boost=boost)
@@ -1306,6 +1516,8 @@ def perfect_skin(
                 if m.status == "corrected":
                     m.status = "remaining"
                 continue
+            if changed is not None and not changed[min(h - 1, max(0, int(round(y)))), min(w - 1, max(0, int(round(x))))]:
+                continue
             st = "review" if why or conf < thr else "detected"
             if p + 1 >= settings.passes and st == "detected":
                 st = "remaining"  # no pass left to correct it
@@ -1316,6 +1528,20 @@ def perfect_skin(
     for m in marks:
         if m.status in ("detected", "forced"):
             m.status = "remaining"
+    # A repair that still fails a naturalness check after its last attempt is not "corrected": it
+    # is undone (the original skin comes back) and the mark waits for review with the failed
+    # checks. A mark the user chose to correct keeps its repair and shows the checks it failed.
+    failed = [m for m in marks if m.status == "remaining" and _natural_failures(m)]
+    undo = [m for m in failed if not m.forced]
+    if undo:
+        out = _restore(image, out, undo, [m for m in marks if m.status == "corrected" or (m.forced and m in failed)], settings)
+    for m in failed:
+        m.quality["kept"] = m.forced
+        if m.forced:
+            m.status = "corrected"
+        else:
+            m.status, m.reason = "review", "repairFailed"
+        m.after = _mark_contrast(out, region, m)
 
     corrected = [m for m in marks if m.status in ("corrected", "remaining") and m.attempts > 0]
     if before_energy:
@@ -1343,6 +1569,22 @@ def perfect_skin(
         rep.areas["texture"] = tex / 100.0
     if amt("underEye") > 0 and under_eye is not None:
         out = lift_under_eye(out, under_eye, F, amt("underEye"))
+    # A mark waiting for review is untouched by every tool, the area tools included: the tone
+    # tool would otherwise lighten a restored dark spot (or a freckle) the engine was unsure of.
+    waiting = [m for m in marks if m.status == "review"]
+    if waiting:
+        out = _restore(image, out, waiting, [m for m in marks if m.status == "corrected"], settings)
+    # A repair left "remaining" only because some of the mark's colour was left is measured again
+    # once the redness and tone tools have run: they often finish it.
+    unfinished = [m for m in marks if m.status == "remaining" and m.attempts > 0 and m.quality
+                  and set(m.quality["failed"]) <= {"colour", "residual"} and m.quality.get("incomplete", True)]
+    if unfinished:
+        _verify(image, out, region, unfinished, [m for m in marks if m.status == "corrected"], settings, F,
+                [m for m in marks if m.attempts == 0], count=False)
+    for m in marks:
+        if m.attempts > 0 and m.quality:
+            for k in m.quality["failed"]:
+                rep.quality[k] = rep.quality.get(k, 0) + 1
         rep.areas["underEye"] = amt("underEye") / 100.0
     rep.marks = marks
     # Nothing outside skin (clothing, hair, jewellery, background) ever changes, not even by

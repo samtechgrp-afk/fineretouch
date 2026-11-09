@@ -6,6 +6,7 @@
     python -m scripts.perfection_benchmark --json r.json --html r.html --baseline qa/baselines/synthetic.json
     python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --split validation --html real.html
     python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --coverage
+    python -m scripts.perfection_benchmark --suite real --dataset D:/qa-photos --split validation --quality-gallery review.html
     python -m scripts.perfection_benchmark --perf D:/photos/IMG_0012.jpg --json perf.json   # time + memory
 
 Synthetic and real results are separate reports; synthetic numbers are not evidence of
@@ -134,6 +135,7 @@ def main() -> None:
     ap.add_argument("--html", help="write the report as HTML")
     ap.add_argument("--baseline", help="compare with this report JSON; exit 1 on a regression")
     ap.add_argument("--label", default="", help="free text shown in the report (e.g. a commit)")
+    ap.add_argument("--quality-gallery", metavar="HTML", help="real: write a page of failed and sample passed repairs, to calibrate the quality checks")
     ap.add_argument("--coverage", action="store_true", help="real: print photos per coverage cell and the gaps, then stop")
     ap.add_argument("--perf", metavar="PHOTO", help="time one full-resolution render of PHOTO on this computer (no labels)")
     ap.add_argument("--repeats", type=int, default=2, help="--perf: timed runs after a warm-up run")
@@ -159,7 +161,27 @@ def main() -> None:
                 for g in c["gaps"]:
                     print("  gap:", g)
             return
-        rows = run_real(a.dataset, a.split)
+        gallery: list | None = [] if a.quality_gallery else None
+        rows = run_real(a.dataset, a.split, gallery=gallery)
+        if a.quality_gallery:
+            from qa import quality_gallery as QG
+            if a.split != "validation":
+                print("note: thresholds are tuned on the validation split only; this gallery is for review, not tuning")
+            agg = {"repairs": 0, "failed": {}, "percentiles": {}}
+            for r in rows:
+                q = r["score"].get("quality") or {}
+                agg["repairs"] += q.get("repairs", 0)
+                for k, v in (q.get("failed") or {}).items():
+                    agg["failed"][k] = agg["failed"].get(k, 0) + v
+            stats = {"repairs": agg["repairs"], "failed": {k: agg["failed"].get(k, 0) for k in QG.Q.CHECKS},
+                     "percentiles": QG.summary([]).get("percentiles")}
+            # Percentiles over all photos' repairs, from the gallery's per-mark values.
+            vals = {k: [x["values"][k] for x in gallery if x["values"].get(k) is not None] for k in QG.Q.CHECKS}
+            import numpy as _np
+            stats["percentiles"] = {k: (dict(zip(("p5", "p50", "p95", "p99"), _np.percentile(v, [5, 50, 95, 99]).round(3).tolist())) if v else None)
+                                    for k, v in vals.items()}
+            QG.write_html(gallery, stats, a.quality_gallery)
+            print(f"repair quality review: {len(gallery)} repairs -> {a.quality_gallery}")
     else:
         rows = run_synthetic(quick=a.quick, old=a.old, dev=a.dev)
     rep = qa_report.build(a.suite, rows, a.label)

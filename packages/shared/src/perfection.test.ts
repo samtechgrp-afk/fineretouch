@@ -6,6 +6,7 @@ import {
   correctRemaining,
   groupSensitivity,
   overrideMark,
+  qualitySummary,
   sanitizeSkinPerfection,
   setGroupSensitivity,
   type PerfectionReport,
@@ -67,6 +68,27 @@ describe('skin perfection settings', () => {
     expect(s.overrides[0]).toMatchObject({ x: 0.5 });
     // A per-mark decision still can.
     expect(overrideMark(DEFAULT_SKIN_PERFECTION, r.marks[1], 'correct').overrides).toHaveLength(1);
+  });
+
+  it('correct-remaining never re-corrects a repair that failed the quality checks', () => {
+    const r = report([
+      { status: 'remaining', confidence: 0.9 },
+      { status: 'review', reason: 'repairFailed', confidence: 0.95, x: 0.2 },
+    ]);
+    const s = correctRemaining(DEFAULT_SKIN_PERFECTION, r, 0.5);
+    expect(s.overrides).toHaveLength(1);
+    expect(s.overrides[0]).toMatchObject({ x: 0.5 });
+  });
+
+  it('quality summary names the failed checks and what happened to the repair', () => {
+    expect(qualitySummary(null)).toBeNull();
+    expect(qualitySummary({ failed: [], incomplete: false, values: { residual: 0.1, colour: 0.4, texture: 1 } })).toBe(
+      'Passed all 3 quality checks that apply to it.',
+    );
+    const kept = qualitySummary({ failed: ['texture', 'edges'], incomplete: false, kept: true, values: { texture: 2.1, edges: 2.2 } })!;
+    expect(kept).toContain('Failed: texture, edges.');
+    expect(kept).toContain('Kept because you chose Correct');
+    expect(qualitySummary({ failed: ['colour'], incomplete: false, kept: false, values: { colour: 5 } })).toContain('original skin was restored');
   });
 
   it('override at a mark replaces an earlier decision there', () => {

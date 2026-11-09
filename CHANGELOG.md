@@ -46,6 +46,14 @@
   - **Fix:** a correct override no longer forces a protected feature, or a mark under review as a possible feature, that sits next to the mark it was placed for.
 
   Results on the synthetic benchmark (held-out scenes): recall 0.967 → 0.985, false corrections 11 → 7, natural features damaged 4 → 0, and type VI dark spots 36 of 36. False positives rose 12 → 16; all four extra are freckles left for review, untouched. The report now counts these separately.
+- **Phase 2D: correction quality.**
+  - **Seven checks per repair:** contrast left, colour (ΔE2000 against the skin around it), texture, pores, seams at the edge, repeated donor texture, and change to the skin around it. A mark is corrected only when its repair passes.
+  - **Failed repairs are undone.** A repair that fails is retried from the original skin with another donor. If it still fails, the original skin is restored and the mark goes to Needs review with the failed checks. Choosing Correct keeps the repair anyway.
+  - **Better repairs:** donors no longer bring neighbouring marks into a repair, no ghost ring from the mark's edge, and the fill tone comes from the skin around the mark.
+  - Marks waiting for review are untouched by the area tools. **Correct all remaining** skips failed repairs and forces a neighbour only if its centre is inside the circle.
+  - **Repair quality review page** (`--quality-gallery`) to calibrate the checks on real validation photos.
+
+  Results on the synthetic benchmark (held-out scenes): marks reported corrected but still visible 4 → 1, false corrections 7 → 5, no regression. On retouched real photos, fine texture lost fell from 3.4% to 1.6% and from 5.8% to 2.7%. The thresholds stay provisional until the validation photos are reviewed. Time rose 34%, which phase 2E addresses.
 - **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)

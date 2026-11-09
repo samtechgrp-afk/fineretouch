@@ -226,14 +226,53 @@ export type MarkStatus = 'corrected' | 'remaining' | 'review' | 'protected' | 'i
  * Why a mark is waiting for a decision (status "review"). lowConfidence: below the confidence
  * threshold. mayBeFreckle / mayBeFollicle: it could be a natural feature (a freckle among
  * freckles, a hair follicle in stubble), so it is never corrected unless you choose it.
+ * repairFailed: its repair did not pass every quality check, so it is not counted as corrected.
  */
-export type ReviewReason = 'lowConfidence' | 'mayBeFreckle' | 'mayBeFollicle';
+export type ReviewReason = 'lowConfidence' | 'mayBeFreckle' | 'mayBeFollicle' | 'repairFailed';
 
 export const REVIEW_REASON_TEXT: Record<ReviewReason, string> = {
   lowConfidence: 'Low confidence: below the confidence threshold.',
   mayBeFreckle: 'May be a freckle: clearly darker and larger than the freckles around it, but kept until you choose.',
   mayBeFollicle: 'May be a hair follicle: it sits where hair grows, so it is kept until you choose.',
+  repairFailed: 'The repair did not pass every quality check, so it is not counted as corrected.',
 };
+
+/** Review reasons that mean "this may be a natural feature" (never corrected unless chosen). */
+export const FEATURE_REASONS: readonly ReviewReason[] = ['mayBeFreckle', 'mayBeFollicle'];
+
+/** The correction quality checks (phase 2D), in the engine's order. */
+export const QUALITY_CHECKS = ['residual', 'colour', 'texture', 'pores', 'edges', 'repetition', 'surround'] as const;
+export type QualityCheck = (typeof QUALITY_CHECKS)[number];
+
+export const QUALITY_CHECK_LABELS: Record<QualityCheck, string> = {
+  residual: 'still visible',
+  colour: 'colour',
+  texture: 'texture',
+  pores: 'pores',
+  edges: 'edges',
+  repetition: 'repeated texture',
+  surround: 'surrounding skin',
+};
+
+/** The quality checks of a mark's last repair (absent on marks never repaired, and older engines). */
+export interface MarkQuality {
+  failed: QualityCheck[];
+  values: Partial<Record<QualityCheck, number | null>>;
+  /** The colour left is the mark's own colour, partly left (not a new, wrong tone). */
+  incomplete: boolean;
+  /** After a failed repair: false when the original skin was restored; true when you chose Correct, so it was kept. */
+  kept?: boolean;
+}
+
+/** One line on a mark's repair quality, for the panel. */
+export function qualitySummary(q: MarkQuality | null | undefined): string | null {
+  if (!q) return null;
+  const measured = QUALITY_CHECKS.filter((k) => q.values[k] != null).length;
+  if (!q.failed.length) return `Passed all ${measured} quality checks that apply to it.`;
+  const names = q.failed.map((k) => QUALITY_CHECK_LABELS[k]).join(', ');
+  const after = q.kept === undefined ? '' : q.kept ? ' Kept because you chose Correct.' : ' The original skin was restored; choose Correct to repair it anyway.';
+  return `Failed: ${names}.${after}`;
+}
 
 export interface PerfectionMark {
   id: number;
@@ -251,6 +290,8 @@ export interface PerfectionMark {
   after: number | null;
   /** Set when status is "review" (older engines: absent). */
   reason?: ReviewReason | null;
+  /** The quality checks of its last repair (phase 2D; absent before). */
+  quality?: MarkQuality | null;
 }
 
 export interface PerfectionReport {
@@ -267,13 +308,15 @@ export interface PerfectionReport {
   meanConfidence: number | null;
   textureRetention: number | null;
   areas: Record<string, number>;
+  /** Final repairs failing each quality check (phase 2D; absent before). */
+  quality?: Partial<Record<QualityCheck, number>>;
   marks: PerfectionMark[];
 }
 
 /**
  * Marks "Correct all remaining" may correct: remaining marks and low-confidence review marks at
- * or above `minConfidence`. A mark that may be a natural feature is never corrected in bulk;
- * it needs its own decision.
+ * or above `minConfidence`. A mark that may be a natural feature, or whose repair failed the
+ * quality checks, is never corrected in bulk; it needs its own decision.
  */
 export function isBulkCorrectable(m: PerfectionMark, minConfidence: number): boolean {
   if (m.confidence < minConfidence) return false;

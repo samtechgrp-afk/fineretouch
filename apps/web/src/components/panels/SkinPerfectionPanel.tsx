@@ -6,7 +6,9 @@ import {
   PERFECTION_GROUPS,
   correctRemaining,
   isBulkCorrectable,
+  FEATURE_REASONS,
   REVIEW_REASON_TEXT,
+  qualitySummary,
   groupSensitivity,
   overrideMark,
   setGroupSensitivity,
@@ -64,7 +66,8 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
   const chosen = selected.map((id) => marksById.get(id)).filter((m): m is NonNullable<typeof m> => Boolean(m));
   const minConf = sp.confidenceThreshold / 100;
   const fixable = report?.marks.filter((m) => isBulkCorrectable(m, minConf)).length ?? 0;
-  const undecided = report?.marks.filter((m) => m.status === 'review' && m.reason && m.reason !== 'lowConfidence').length ?? 0;
+  const undecided = report?.marks.filter((m) => m.status === 'review' && m.reason && FEATURE_REASONS.includes(m.reason)).length ?? 0;
+  const repairFailed = report?.marks.filter((m) => m.status === 'review' && m.reason === 'repairFailed').length ?? 0;
   const status = !on
     ? 'Off'
     : !aiOnline
@@ -191,6 +194,11 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
             {undecided} mark{undecided > 1 ? 's' : ''} may be a freckle or a hair follicle. They are left untouched until you select them and choose Correct or Ignore.
           </p>
         )}
+        {repairFailed > 0 && (
+          <p className="mt-1 text-[11px] text-amber-300" data-testid="perfection-repair-failed">
+            {repairFailed} repair{repairFailed > 1 ? 's' : ''} did not pass the quality checks (colour, texture, pores, edges, repeated texture or surrounding skin), so {repairFailed > 1 ? 'they are' : 'it is'} not counted as corrected. Select one to see why.
+          </p>
+        )}
         {report && (
           <ul className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-ink-400" aria-label="Overlay legend">
             {(['corrected', 'remaining', 'review', 'protected', 'ignored'] as const).map((k) => (
@@ -228,6 +236,9 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
             </p>
             {chosen.length === 1 && chosen[0].status === 'review' && chosen[0].reason && (
               <p className="mt-1 text-ink-300" data-testid="perfection-reason">{REVIEW_REASON_TEXT[chosen[0].reason]}</p>
+            )}
+            {chosen.length === 1 && qualitySummary(chosen[0].quality) && (
+              <p className="mt-1 text-ink-300" data-testid="perfection-mark-quality">{qualitySummary(chosen[0].quality)}</p>
             )}
             <div className="mt-1.5 flex gap-2">
               <button className="btn flex-1" onClick={() => { commit(chosen.reduce((s, m) => overrideMark(s, m, 'correct'), sp)); select([]); }}>Correct</button>
