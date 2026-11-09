@@ -143,6 +143,31 @@ class EffectControls(BaseModel):
     clothingIron: EffectControl = EffectControl()
 
 
+MAX_MASK_STROKES = 200
+MAX_STROKE_POINTS = 4000
+
+
+class MaskStroke(BaseModel):
+    """One brush stroke on the skin mask (mirror of packages/shared MaskStroke)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["add", "erase"] = "add"
+    size: float = Field(0.02, ge=0.001, le=0.2)  # brush radius, share of the long edge
+    points: list[float] = Field(..., min_length=2, max_length=2 * MAX_STROKE_POINTS)  # normalised x, y pairs
+
+
+class SkinMaskSettings(BaseModel):
+    """Skin mask refinement (app/masking.py): AI face parsing and the user's brush strokes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    useSegmentation: bool = True
+    includeBodySkin: bool = False
+    feather: float = Field(50, ge=0, le=100)
+    strokes: list[MaskStroke] = Field(default_factory=list, max_length=MAX_MASK_STROKES)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -186,6 +211,8 @@ class Adjustments(BaseModel):
     # v0.7 per-effect controls and master retouch strength (app/effects.py).
     effects: EffectControls = EffectControls()
     globalStrength: float = Field(100, ge=0, le=100)
+    # v0.8 skin mask: face parsing + user brush strokes (app/masking.py).
+    skinMask: SkinMaskSettings = SkinMaskSettings()
 
 
 class StyleProfile(BaseModel):

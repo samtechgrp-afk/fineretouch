@@ -11,6 +11,7 @@ Endpoints
   POST /v1/style/sync          reference + N targets -> per-target adjustment patches ("Sync to All")
   POST /v1/raw/metadata        camera RAW format + EXIF (camera, lens, ISO, shutter, aperture, orientation)
   POST /v1/raw/preview         camera RAW -> JPEG (embedded preview, or a fast half-size demosaic)
+  POST /v1/parse               face skin / body skin / hair masks (PNG, R face skin, G body skin, B hair)
   POST /v1/segment             person / hair / clothes masks (PNG, R clothes, G hair, B person) for the preview
   POST /v1/lut/fit             before + after of a graded reference -> 3D look LUT (+ .cube text)
   POST /v1/lut/parse           .cube file -> look LUT
@@ -171,6 +172,16 @@ def _parse_adjustments(raw: str) -> Adjustments:
         raise HTTPException(422, f"Invalid adjustments: {exc}") from exc
 
 
+def _needs_skin_parse(adj: Adjustments) -> bool:
+    """Face parsing refines the skin mask; skip it when no skin tool is on or the user turned it off."""
+    a = adj
+    skin_tools = (
+        a.skinSmoothing > 0 or a.blemishRemoval > 0 or a.acneRemoval > 0 or a.darkSpotRemoval > 0
+        or a.skinToneUnify > 0 or a.skinMultiplier > 1 or a.sharpen > 0
+    )
+    return skin_tools and a.skinMask.useSegmentation
+
+
 def _render_bytes(
     data: bytes, adj: Adjustments | Callable[[np.ndarray], Adjustments], out: OutputSpec
 ) -> tuple[bytes, str, CullFlags]:
@@ -191,7 +202,8 @@ def _render_bytes(
         seg = depth_service.segment(rgb)
         if seg is not None:
             hair, clothes = seg[1], seg[2]
-    result = render(hq, adj, faces, depth=depth, hair_prob=hair, clothes_prob=clothes if want_clothes else None)
+    parse = depth_service.parse(rgb) if faces and _needs_skin_parse(adj) else None
+    result = render(hq, adj, faces, depth=depth, hair_prob=hair, clothes_prob=clothes if want_clothes else None, parse=parse)
     encoded, mime = imageio.encode(result, out.format, out.quality)
     return encoded, mime, cull_flags(faces, sharpness(rgb))
 
@@ -327,6 +339,27 @@ async def raw_preview(
 
     encoded, source = await run_in_threadpool(work)
     return Response(encoded, media_type="image/jpeg", headers={"X-Raw-Source": source})
+
+
+@app.post("/v1/parse")
+async def parse_map(file: UploadFile = File(...)) -> Response:
+    """Face parsing for the live preview's skin mask: PNG with R = face skin, G = body skin,
+    B = hair (0..255) on the same pixels the editor shows. 404 when the segmenter model is not
+    installed (the editor then keeps the landmark-only skin mask)."""
+    data = await _read_upload(file)
+
+    def work() -> bytes:
+        rgb = _decode(data, ANALYZE_LONG_EDGE)
+        p = depth_service.parse(rgb)
+        if p is None:
+            raise HTTPException(404, "Segmentation model not available")
+        planes = np.stack([p.hair, p.body_skin, p.face_skin], axis=-1)  # BGR order for OpenCV
+        ok, png = cv2.imencode(".png", (np.clip(planes, 0, 1) * 255 + 0.5).astype(np.uint8))
+        if not ok:
+            raise HTTPException(500, "Could not encode face parsing")
+        return png.tobytes()
+
+    return Response(await run_in_threadpool(work), media_type="image/png")
 
 
 @app.post("/v1/segment")
