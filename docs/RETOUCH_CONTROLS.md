@@ -1,4 +1,4 @@
-# Retouch control system (v0.7), skin masks (v0.8), skin engine (v0.9) and upgrade audit
+# Retouch control system (v0.7), skin masks (v0.8), skin engine (v0.9), pro tools (v0.10) and upgrade audit
 
 This document has two parts: the Phase 1 audit of FineRetouch against the professional
 portrait-retouching specification, and the Phase 2 deliverable (per-effect strength,
@@ -250,3 +250,79 @@ Preview (`shaders.ts`):
 `apps/web/src/engine/noise.test.ts` pins the browser estimator to the same behaviour.
 
 Real-photo check (MediaPipe sample portrait, 820 x 1024): each tool takes 0.2 to 0.35 s for the whole render on CPU. Noise reduction removes added sensor noise and leaves the clean file nearly unchanged (mean change 0.05/255).
+
+## Part 5: professional retouching tools (v0.10)
+
+All of these are non-destructive: strokes and layer settings are stored in the edit
+(`Adjustments.localRetouch`, `packages/shared/src/localRetouch.ts`) and replayed on the original
+pixels at render time. The original file is never written.
+
+### Where each tool runs
+
+| Tool | Export (engine) | Preview and browser export |
+| :--- | :--- | :--- |
+| Healing, clone | `engines/local.apply_heal_strokes`, stage 0b: on the original pixels, before every other stage | `engine/heal.ts` on the proxy pixels (full-size pixels for a browser export), uploaded as the renderer's working source |
+| Frequency separation, dodge & burn, correction brush | `engines/local.apply_local_layers`, stage 10: after global tone, before bokeh | `LOCAL_FRAG`, one WebGL pass per layer after the studio pass |
+| Layer masks | `engines/local.layer_masks` at full size | `engine/heal.ts buildLayerMask` at 1536 px, sampled by UV |
+
+### How the tools work
+
+| Tool | Algorithm |
+| :--- | :--- |
+| Clone | Copies the source (destination + offset, bilinear) through a brush with hardness and opacity |
+| Healing | `healed = source + fill(destination - source)`: the difference is known around the stroke and filled across it by a push-pull membrane, so texture comes from the source and tone and colour meet the surroundings with no seam |
+| Spot healing | With no source set, the brush picks one when the stroke ends: 48 candidates around the stroke, scored by how well their border matches the destination's border and how close their inside is to that tone (so a blemish is never copied in). The chosen offset is saved with the stroke, so the export uses the same source |
+| Frequency separation | Split at a user radius (0.08% to 2.4% of the long edge). The tone layer is smoothed toward a 5x wider blur, stopping at edges (tone step above 0.04 to 0.12 in luma); the detail layer is kept at 0 to 200% |
+| Dodge & burn | Painted exposure of up to 1.5 EV, in linear light so colour is kept, optionally limited to shadows, midtones or highlights. Low-flow strokes build up |
+| Correction brush | Local exposure (same scale as the global slider), contrast, saturation, temperature and tint, plus optional frequency-separation smoothing and texture |
+
+### Masks
+
+Each layer has its own mask: a base (painted only, the AI skin mask, or everything), add and
+erase strokes with flow, feather, invert, a luminance range with soft roll-off, density and
+layer opacity. M shows the active layer's mask while its brush is on (red for coverage, yellow
+for dodge, blue for burn). Layers stack bottom to top, can be reordered, switched off, renamed
+and deleted (up to 8 per photo).
+
+Healing, clone and layers belong to one photo: copy/paste, sync, smart sync, presets and saved
+presets never carry them to another photo.
+
+### Status
+
+| Requirement | Status |
+| :--- | :--- |
+| Frequency separation | Implemented as a layer (adjustable split radius, tone smoothing, texture 0 to 200%) |
+| Healing brush | Implemented, with Alt-click source, aligned offset and automatic spot-healing source |
+| Clone stamp | Implemented, with hardness and opacity |
+| Dodge and burn | Implemented as a layer with dodge, burn and erase brushes, flow, strength and tonal range |
+| Manual correction brushes | Implemented: exposure, contrast, saturation, temperature, tint, smoothing and texture through a painted mask |
+| Advanced masks | Implemented per layer: base, add / erase with flow, feather, invert, luminance range, density, opacity, overlay |
+| 1x / 2x / 3x on the pro tools | Not applicable: these are manual tools with their own strength, flow and opacity |
+| Global retouch strength on the pro tools | Not applied, by design: manual strokes do exactly what was painted |
+| Per-layer blend modes, layer groups | Planned |
+| Skin base without a detected face | Partial: the export uses the colour-based skin weight; the preview has no skin mask without a face, so an "AI skin" layer shows no effect there until a face is found |
+
+### Parity
+
+- Healing and clone: the engine and the browser run the same algorithm and are pinned to the same
+  test vectors (`HEAL_VECTORS` in `services/ai/tests/test_local_tools.py` and
+  `apps/web/src/engine/heal.test.ts`), equal to uint8 rounding.
+- In the real app on the sample portrait with every tool used at once, the GPU export and the
+  engine export differ by 0.05/255 on average over the whole image; inside each tool's area the
+  mean difference is 0.0 (clone), 2.2 (the healing area, which also sits under the frequency-separation layer on skin),
+  0.4 to 0.6 (dodge, burn), 0.7 (frequency separation) and 0.01 (correction brush).
+
+### Tests
+
+- `services/ai/tests/test_local_tools.py` (13): push-pull fill, healing removes a blemish to the
+  surrounding tone (not the brighter source's) and keeps > 60% of the texture, nothing outside the
+  brush changes, clone and opacity, stroke order, frequency separation evens blotches by > 25%
+  with pores kept > 90% and texture 0 removing them, no smearing across a strong edge, mask
+  strokes / invert / luminance range, flow build-up and erase, dodge & burn keep channel ratios
+  and respect the tonal range, skin base, full render, schema round trip, the parity vectors.
+- `apps/web/src/engine/heal.test.ts` (7): the same properties for the browser port, spot healing
+  avoiding a source with its own blemish, and the parity vectors.
+- `apps/web/src/lib/localRetouch.store.test.ts` (3): undo steps, layer order, and that paste,
+  sync and presets never copy the pro tools.
+- `packages/shared/src/localRetouch.test.ts` (4): sanitising untrusted JSON, defaults, when a
+  layer is active, split radius mapping.

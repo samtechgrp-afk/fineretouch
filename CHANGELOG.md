@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.10.0 (unreleased): professional retouching tools (Phase 5)
+
+- **Healing brush**: Alt-click sets the source; healing takes the source's texture and the tone and colour around the stroke (push-pull membrane fill of the difference), so there is no visible patch. Without a source, **spot healing** picks one automatically and avoids sources with their own blemish. The source is aligned after the first stroke, as in Photoshop.
+- **Clone stamp** with hardness and opacity.
+- **Retouch layers** (up to 8 per photo, reorderable, switchable, renamable):
+  - **Frequency separation**: split radius, edge-aware tone smoothing, texture 0 to 200%. Starts on the AI skin mask.
+  - **Dodge & burn**: dodge, burn and erase brushes with flow (strokes build up), up to 1.5 EV in linear light (colour kept), limited to shadows, midtones or highlights if wanted.
+  - **Correction brush**: local exposure, contrast, saturation, temperature, tint, smoothing and texture.
+- **Advanced masks** per layer: start from nothing, the AI skin or everything; add / erase strokes; feather; invert; luminance range; density; opacity; mask overlay (M).
+- All non-destructive and stored in the edit (`localRetouch`); works in the live preview, the browser export and the engine (`services/ai/app/engines/local.py`). Healing and clone match between browser and engine to uint8 rounding (shared test vectors).
+- Pro tools belong to one photo: paste, sync, presets and saved presets never copy them.
+
 ## v0.9.0 (unreleased): skin engine (Phase 4)
 
 - The 1,700-line `retouch_engine.py` is split into per-tool modules under `services/ai/app/engines/` (common, boost, spots, skin, hair, bokeh, style, studio, clothing). It still re-exports every name, so nothing that imports it changes. All 203 engine tests passed unchanged after the split.

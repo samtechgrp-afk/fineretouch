@@ -171,6 +171,79 @@ class SkinMaskSettings(BaseModel):
     strokes: list[MaskStroke] = Field(default_factory=list, max_length=MAX_MASK_STROKES)
 
 
+MAX_HEAL_STROKES = 300
+MAX_LAYERS = 8
+MAX_LAYER_STROKES = 200
+MAX_TOOL_POINTS = 4000
+
+
+class HealStroke(BaseModel):
+    """Healing / clone brush stroke (mirror of packages/shared localRetouch.ts HealStroke)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["heal", "clone"] = "heal"
+    size: float = Field(0.02, ge=0.001, le=0.2)
+    hardness: float = Field(50, ge=0, le=100)
+    opacity: float = Field(100, ge=0, le=100)
+    offset: tuple[float, float]  # source - destination, normalised to width / height
+    points: list[float] = Field(..., min_length=2, max_length=2 * MAX_TOOL_POINTS)
+
+
+class LayerStroke(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    mode: Literal["add", "erase", "dodge", "burn"] = "add"
+    size: float = Field(0.02, ge=0.001, le=0.2)
+    flow: float = Field(100, ge=1, le=100)
+    points: list[float] = Field(..., min_length=2, max_length=2 * MAX_TOOL_POINTS)
+
+
+class LayerMask(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    base: Literal["none", "skin", "all"] = "none"
+    feather: float = Field(50, ge=0, le=100)
+    invert: bool = False
+    lumaMin: float = Field(0, ge=0, le=100)
+    lumaMax: float = Field(100, ge=0, le=100)
+    lumaSoftness: float = Field(20, ge=0, le=100)
+    density: float = Field(100, ge=0, le=100)
+    strokes: list[LayerStroke] = Field(default_factory=list, max_length=MAX_LAYER_STROKES)
+
+
+class RetouchLayer(BaseModel):
+    """Local retouch layer (frequency separation, dodge & burn or correction brush)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str = "layer"
+    name: str = ""
+    kind: Literal["frequency", "dodgeBurn", "correction"] = "correction"
+    enabled: bool = True
+    opacity: float = Field(100, ge=0, le=100)
+    mask: LayerMask = LayerMask()
+    splitRadius: float = Field(40, ge=0, le=100)
+    toneSmoothing: float = Field(0, ge=0, le=100)
+    texture: float = Field(100, ge=0, le=200)
+    dodgeBurnStrength: float = Field(50, ge=0, le=100)
+    dodgeBurnRange: Literal["all", "shadows", "midtones", "highlights"] = "all"
+    exposure: float = Field(0, ge=-100, le=100)
+    contrast: float = Field(0, ge=-100, le=100)
+    saturation: float = Field(0, ge=-100, le=100)
+    temperature: float = Field(0, ge=-100, le=100)
+    tint: float = Field(0, ge=-100, le=100)
+
+
+class LocalRetouch(BaseModel):
+    """Pro tools (app/engines/local.py): healing / clone strokes and local retouch layers."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    heal: list[HealStroke] = Field(default_factory=list, max_length=MAX_HEAL_STROKES)
+    layers: list[RetouchLayer] = Field(default_factory=list, max_length=MAX_LAYERS)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -220,6 +293,7 @@ class Adjustments(BaseModel):
     globalStrength: float = Field(100, ge=0, le=100)
     # v0.8 skin mask: face parsing + user brush strokes (app/masking.py).
     skinMask: SkinMaskSettings = SkinMaskSettings()
+    localRetouch: LocalRetouch = LocalRetouch()
 
 
 class StyleProfile(BaseModel):

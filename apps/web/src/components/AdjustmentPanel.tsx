@@ -6,6 +6,7 @@ import { Fragment, useState } from 'react';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 import { ColorMixerPanel } from './ColorMixerPanel';
 import { RetouchControlPanel } from './RetouchControlPanel';
+import { ProToolsPanel } from './panels/ProToolsPanel';
 import { BatchSyncPanel } from './panels/BatchSyncPanel';
 import { EffectControlsRow, EffectSwitch, GlobalStrength } from './panels/EffectControls';
 import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
@@ -42,6 +43,10 @@ export function AdjustmentPanel() {
       </Section>
       <Section title="Batch style sync" open={open.batch} onToggle={() => setOpen((o) => ({ ...o, batch: !o.batch }))}>
         <BatchSyncPanel photo={photo} />
+      </Section>
+      <Section title="Healing, clone & layers" open={open.tools} onToggle={() => setOpen((o) => ({ ...o, tools: !o.tools }))}
+        note={photo.adjustments.localRetouch.heal.length || photo.adjustments.localRetouch.layers.length ? 'Pro tools in use on this photo' : undefined}>
+        <ProToolsPanel photo={photo} />
       </Section>
       <Section title="AI pro tools" open={open.pro} onToggle={() => setOpen((o) => ({ ...o, pro: !o.pro }))}>
         <RetouchControlPanel photo={photo} />

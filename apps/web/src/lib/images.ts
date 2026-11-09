@@ -6,6 +6,7 @@
  */
 
 import { forgetNoiseLevel } from './noise';
+import { forgetLocalRetouch } from './localRetouch';
 import { isRawFileName, parseRawFile, type RawExif, type RawFormat } from './rawParser';
 
 export const PROXY_LONG_EDGE = 2560;
@@ -179,6 +180,7 @@ export const setCachedLensRoi = (id: string, m: Uint8Array) => lensRois.set(id, 
 
 export function forgetImage(id: string) {
   forgetNoiseLevel(id);
+  forgetLocalRetouch(id);
   segmentations.get(id)?.close();
   segmentations.delete(id);
   lensRois.delete(id);

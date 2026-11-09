@@ -420,8 +420,9 @@ void main() {
 export const DISPLAY_FRAG = /* glsl */ `#version 300 es
 precision highp float;
 out vec4 outColor;
-uniform sampler2D uProcessed, uOriginal, uMask, uOverlay, uEdit;
+uniform sampler2D uProcessed, uOriginal, uMask, uOverlay, uEdit, uLayerMask;
 uniform bool uHasEdit;
+uniform int uLayerShow;  // 0 skin mask overlay, 1 a layer's coverage, 2 a dodge & burn layer
 uniform bool uOverlayOn;  // pro studio QA overlay (premultiplied by its own alpha below)
 uniform vec2 uCanvas;   // canvas size in device pixels
 uniform vec2 uImage;    // proxy size in pixels
@@ -468,7 +469,14 @@ void main() {
     vec3 heat = d < 0.5 ? mix(vec3(0.05, 0.06, 0.1), vec3(0.93, 0.6, 0.2), d * 2.0) : mix(vec3(0.93, 0.6, 0.2), vec3(1.0), (d - 0.5) * 2.0);
     c = mix(luma(o) * vec3(0.35), heat, smoothstep(0.02, 0.1, d));
   }
-  if (uShowMask) {
+  if (uShowMask && uLayerShow > 0) {
+    vec4 lm = texture(uLayerMask, ip / uImage);
+    if (uLayerShow == 1) c = mix(c, vec3(1.0, 0.25, 0.35), lm.r * 0.5);
+    else {
+      c = mix(c, vec3(1.0, 0.85, 0.3), lm.g * 0.6);
+      c = mix(c, vec3(0.25, 0.4, 1.0), lm.b * 0.6);
+    }
+  } else if (uShowMask) {
     vec4 m = texture(uMask, ip / uImage);
     vec2 e = uHasEdit ? texture(uEdit, ip / uImage).rg : vec2(0.0);
     c = mix(c, vec3(1.0, 0.25, 0.35), max(m.r, e.r) * (1.0 - e.g) * 0.45);
@@ -483,6 +491,68 @@ void main() {
   outColor = vec4(c, 1.0);
 }`;
 
+
+/**
+ * Local retouch layer (v0.10, Phase 5), one pass per layer: frequency separation and the
+ * correction brush through the layer's coverage, or dodge & burn in linear light. A port of
+ * services/ai/app/engines/local.py apply_local_layers. uLowA / uLowB are the current image
+ * blurred at the split radius and at FS_SMOOTH_RATIO times it.
+ */
+export const FS_SMOOTH_RATIO = 5;
+export const LOCAL_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uImg, uLowA, uLowB, uLayer;
+uniform bool uDodgeBurn, uFs, uCorr;
+uniform float uGain;          // density * opacity
+uniform vec3 uLuma;           // lumaMin, lumaMax (0..1), softness (0..1)
+uniform float uSmooth, uTexture;
+uniform float uDb;            // dodge & burn strength 0..1
+uniform int uRange;           // 0 all, 1 shadows, 2 midtones, 3 highlights
+uniform float uExposure, uContrast, uSat, uTemp, uTint; // -1..1
+${COMMON}
+float lumaGate(float y) {
+  if (uLuma.x <= 0.0 && uLuma.y >= 1.0) return 1.0;
+  float s = max(0.005, uLuma.z * 0.25);
+  float g = 1.0;
+  if (uLuma.x > 0.0) g *= smoothstep(uLuma.x - s, uLuma.x, y);
+  if (uLuma.y < 1.0) g *= 1.0 - smoothstep(uLuma.y, uLuma.y + s, y);
+  return g;
+}
+float rangeWeight(float y) {
+  if (uRange == 1) return 1.0 - smoothstep(0.2, 0.6, y);
+  if (uRange == 3) return smoothstep(0.4, 0.8, y);
+  if (uRange == 2) return 1.0 - smoothstep(0.15, 0.5, abs(y - 0.5));
+  return 1.0;
+}
+void main() {
+  vec3 c = clamp(texture(uImg, vUv).rgb, 0.0, 1.0);
+  vec4 L = texture(uLayer, vUv);
+  float gate = lumaGate(luma(c)) * uGain;
+  if (uDodgeBurn) {
+    float stops = 1.5 * uDb * (L.g - L.b) * gate * rangeWeight(luma(c));
+    outColor = vec4(toSrgb(toLinear(c) * exp2(stops)), 1.0);
+    return;
+  }
+  float m = L.r * gate;
+  if (uFs) {
+    vec3 low = texture(uLowA, vUv).rgb;
+    vec3 delta = texture(uLowB, vUv).rgb - low;
+    float edge = 1.0 - smoothstep(0.04, 0.12, abs(luma(delta)));
+    vec3 o = low + delta * (uSmooth * edge) + (c - low) * uTexture;
+    c = c + (o - c) * m;
+  }
+  if (uCorr) {
+    vec3 lin = toLinear(c) * exp2(uExposure * 2.0) * vec3(1.0 + 0.2 * uTemp, 1.0 - 0.12 * uTint, 1.0 - 0.2 * uTemp);
+    vec3 o = toSrgb(lin);
+    o = (o - 0.5) * (1.0 + 0.5 * uContrast) + 0.5;
+    float y = luma(o);
+    o = clamp(y + (o - y) * (1.0 + uSat), 0.0, 1.0);
+    c = c + (o - c) * m;
+  }
+  outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
+}`;
 
 /** Box-filtered downsample (4x4 taps across the source footprint). */
 export const DOWNSAMPLE_FRAG = /* glsl */ `#version 300 es

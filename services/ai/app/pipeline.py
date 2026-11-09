@@ -32,6 +32,9 @@ Stages (all on float32 sRGB in [0, 1]):
      contrast, saturation, vibrance; 8b. HSL mixer and colour grading (color_engine);
      8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
+  Pro tools (v0.10, engines/local.py): 0b. healing and clone strokes on the original pixels
+  before stage 1; 10. local retouch layers (frequency separation, dodge & burn, correction
+  brushes with their own masks) after stage 8 and before the bokeh of stage 9.
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ from .retouch_engine import (
     shift_clothing_color,
     skin_tone_guard,
 )
+from .engines.local import apply_heal_strokes, apply_local_layers
 from .engines.noise import reduce_skin_noise
 from .engines.redness import reduce_redness
 from .engines.under_eye import soften_under_eye_texture
@@ -317,6 +321,10 @@ def render(
     tool_multipliers = (detector_multiplier(adj, "acneRemoval"), detector_multiplier(adj, "darkSpotRemoval"))
     adj, spot_multiplier = resolve_adjustments(adj)
     src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
+    # 0b. Healing and clone strokes (v0.10) on the original pixels: every later stage, and the
+    #     sharpening detail, work from the cleaned photo.
+    if adj.localRetouch.heal:
+        src = apply_heal_strokes(src, adj.localRetouch.heal)
     h, w = src.shape[:2]
     L = float(max(h, w))
     low0 = blur(src, S0 * L)
@@ -447,6 +455,11 @@ def render(
         dy = (yy + 0.5) / h - 0.5
         d = np.sqrt(dx * dx + dy * dy) / np.sqrt(0.5)
         c = c * (1.0 + (adj.vignette / 100.0) * 0.6 * smoothstep(0.35, 1.0, d))[..., None]
+
+    # 10. Local retouch layers (v0.10): frequency separation, dodge & burn and correction
+    #     brushes, each through its own mask (applied before the lens blur, as in the preview).
+    if adj.localRetouch.layers:
+        c = apply_local_layers(np.clip(c, 0.0, 1.0).astype(np.float32), adj.localRetouch, skin_w)
 
     # 9. Depth-of-field.
     b = adj.depthBokeh

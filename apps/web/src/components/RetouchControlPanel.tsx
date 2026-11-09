@@ -155,7 +155,7 @@ function SkinMask({ photo, hasFace }: { photo: Photo; hasFace: boolean }) {
             ['add', 'Add skin'],
             ['erase', 'Protect'],
           ]}
-          onChange={(v) => setView({ maskBrush: v === 'off' ? null : v, showMask: v === 'off' ? view.showMask : true })}
+          onChange={(v) => setView({ maskBrush: v === 'off' ? null : v, proTool: v === 'off' ? view.proTool : null, showMask: v === 'off' ? view.showMask : true })}
         />
         <RangeRow
           label="Brush size"

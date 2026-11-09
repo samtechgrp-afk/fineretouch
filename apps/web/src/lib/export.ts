@@ -8,6 +8,7 @@ import { ensureDepth, hairRoiFor } from './depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from './studio';
 import { fitSize, getCachedEdit, getCachedMask, getParse, setCachedEdit, setCachedMask } from './images';
 import { noiseLevelOf } from './noise';
+import { LAYER_LONG_EDGE, applyHealForExport, syncLayerMasks } from './localRetouch';
 import { drawWatermark, watermarkActive, type WatermarkSettings } from './watermark';
 
 export const MASK_LONG_EDGE = 1536;
@@ -95,6 +96,8 @@ export async function renderFullRes(
     const [w, h] = fitSize(bmp.width, bmp.height, limit);
     const source = w === bmp.width && h === bmp.height ? bmp : await createImageBitmap(bmp, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
     renderer.setSource(source, w, h);
+    // Heal / clone strokes at the export size (same code as the preview, stage 0b).
+    if (adjustments.localRetouch.heal.length) renderer.setHealedSource(applyHealForExport(source, adjustments.localRetouch.heal));
     const noiseLevel = adjustments.skinNoise > 0 ? noiseLevelOf(`${ctx.id}:full:${w}x${h}`, source) : undefined;
     if (source !== bmp) source.close();
     if (adjustments.skinMask.useSegmentation && ctx.analysis?.faces.length) await ensureParse(ctx.id);
@@ -102,6 +105,7 @@ export async function renderFullRes(
     if (mask) renderer.setMask(mask.data, mask.width, mask.height);
     const edit = editMaskFor(ctx.id, adjustments.skinMask, w, h);
     if (edit) renderer.setEdit(edit.data, edit.width, edit.height);
+    syncLayerMasks(renderer, `${ctx.id}:export`, adjustments.localRetouch, fitSize(w, h, LAYER_LONG_EDGE), mask, edit, `export:${mask ? 'face' : 'none'}:${adjustments.skinMask.strokes.length}:${adjustments.skinMask.feather}:${adjustments.skinMask.useSegmentation}:${adjustments.skinMask.includeBodySkin}`);
     if (adjustments.strayHairRemoval.enabled) {
       const roi = hairRoiFor(ctx.id, ctx.analysis, w, h);
       if (roi) renderer.setHairRoi(roi.data, roi.width, roi.height);
