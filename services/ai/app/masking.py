@@ -96,6 +96,15 @@ def apply_mask_edits(skin: np.ndarray, settings: SkinMaskSettings) -> np.ndarray
     return (np.maximum(skin, add) * (1.0 - erase)).astype(np.float32)
 
 
+def protect_weight(settings: SkinMaskSettings, h: int, w: int) -> np.ndarray | None:
+    """1 - erase strokes (HxW), for landmark tools outside the skin mask (under-eye); None
+    when there are no erase strokes."""
+    if not any(s.mode == "erase" for s in settings.strokes):
+        return None
+    _, erase = rasterize_strokes(settings.strokes, h, w, settings.feather)
+    return 1.0 - erase
+
+
 def face_zone(boxes_px: list[tuple[float, float, float, float]], h: int, w: int) -> np.ndarray:
     """Soft region within FACE_REACH face widths of each face centre (limits semantic face skin
     to people whose face was detected, e.g. not a poster in the background)."""

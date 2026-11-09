@@ -7,6 +7,7 @@ import { buildEditMask, buildFaceMask } from '@/engine/masks';
 import { ensureDepth, hairRoiFor } from './depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from './studio';
 import { fitSize, getCachedEdit, getCachedMask, getParse, setCachedEdit, setCachedMask } from './images';
+import { noiseLevelOf } from './noise';
 import { drawWatermark, watermarkActive, type WatermarkSettings } from './watermark';
 
 export const MASK_LONG_EDGE = 1536;
@@ -94,6 +95,7 @@ export async function renderFullRes(
     const [w, h] = fitSize(bmp.width, bmp.height, limit);
     const source = w === bmp.width && h === bmp.height ? bmp : await createImageBitmap(bmp, { resizeWidth: w, resizeHeight: h, resizeQuality: 'high' });
     renderer.setSource(source, w, h);
+    const noiseLevel = adjustments.skinNoise > 0 ? noiseLevelOf(`${ctx.id}:full:${w}x${h}`, source) : undefined;
     if (source !== bmp) source.close();
     if (adjustments.skinMask.useSegmentation && ctx.analysis?.faces.length) await ensureParse(ctx.id);
     const mask = faceMaskFor(ctx.id, ctx.analysis, w, h, adjustments.skinMask);
@@ -116,7 +118,7 @@ export async function renderFullRes(
       const d = await ensureDepth(ctx.id);
       if (d) renderer.setDepth(d.source, d.width, d.height);
     }
-    renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats });
+    renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats, noiseLevel });
     const pixels = renderer.readPixels();
     const out = new OffscreenCanvas(w, h);
     const ctx2d = out.getContext('2d')!;

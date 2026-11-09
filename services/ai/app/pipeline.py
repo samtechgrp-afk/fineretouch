@@ -44,7 +44,7 @@ import numpy as np
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .effects import detector_multiplier, resolve_adjustments
-from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep
+from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep, protect_weight
 from .retouch_engine import (
     apply_boosted_skin_retouch,
     apply_depth_bokeh,
@@ -60,6 +60,9 @@ from .retouch_engine import (
     shift_clothing_color,
     skin_tone_guard,
 )
+from .engines.noise import reduce_skin_noise
+from .engines.redness import reduce_redness
+from .engines.under_eye import soften_under_eye_texture
 from .schemas import Adjustments, ColorStats, FaceAnalysis
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
@@ -240,6 +243,11 @@ def _skin_stages(
 ) -> np.ndarray:
     """Stages 3-5c on one crop (all arrays share its shape; faces normalised to it)."""
     c = c.copy()
+    # 2a. Skin noise reduction (v0.9) first: grain and colour noise would otherwise read as
+    #     texture to the spot detectors and the smoothing.
+    if adj.skinNoise > 0:
+        c = reduce_skin_noise(np.clip(c, 0.0, 1.0).astype(np.float32), skin_w, adj.skinNoise)
+        bands = None
     # 2b. Separate skin tools (v0.7): acne first (red spots, bumps, then post-acne redness), then
     #     dark spots (isolated marks healed, uneven pigmentation evened on the tone layer).
     if adj.acneRemoval > 0:
@@ -263,6 +271,12 @@ def _skin_stages(
             sigma_tone=sigma_tone, sigma_base=sigma_base, bands=bands,
         )
     base = bands[1] if bands is not None else blur(src, sigma_base)
+
+    # 4b. Redness reduction (v0.9): diffuse redness pulled to the person's surrounding skin tone.
+    if adj.rednessReduction > 0:
+        h_, w_ = c.shape[:2]
+        face_w = max((f.box[2] * w_ for f in faces), default=0.0) or 0.4 * max(h_, w_)
+        c = reduce_redness(np.clip(c, 0.0, 1.0).astype(np.float32), skin_w, adj.rednessReduction, sigma_tone=sigma_tone, face_width=face_w)
 
     # 5. Skin tone unification.
     if adj.skinToneUnify > 0:
@@ -323,6 +337,10 @@ def render(
         skin = p * 0.8
     # User mask strokes: "add" paints skin in, "erase" protects an area from every skin tool.
     skin = apply_mask_edits(skin.astype(np.float32), sm)
+    if masks.has_face and (adj.darkCircles > 0 or adj.underEyeTexture > 0):
+        keep = protect_weight(sm, h, w)
+        if keep is not None:
+            masks.under_eye = masks.under_eye * keep
     skin = skin[..., None]
 
     c = src.copy()
@@ -333,7 +351,7 @@ def render(
     # the frame, and every pixel outside it would come back unchanged anyway.
     skin_work = (
         adj.skinSmoothing > 0 or adj.blemishRemoval > 0 or adj.skinToneUnify > 0 or adj.skinMultiplier > 1
-        or adj.acneRemoval > 0 or adj.darkSpotRemoval > 0
+        or adj.acneRemoval > 0 or adj.darkSpotRemoval > 0 or adj.rednessReduction > 0 or adj.skinNoise > 0
     )
     if skin_work:
         sigma_tone, sigma_base = S1 * L, S2 * L
@@ -379,6 +397,14 @@ def render(
             cb2, cr2 = cbcr(low2)
             y = y + np.maximum(0.0, luma(low2) * 1.06 - y) * d
             c = from_ycbcr(y, cb + (cb2 - cb) * 0.5 * d, cr + (cr2 - cr) * 0.5 * d)
+        # 6b. Under-eye texture (v0.9): the crease band (S0..S1, capped by face width) faded,
+        #     pores and the tone layer kept.
+        if adj.underEyeTexture > 0:
+            sig_line = min(S1 * L, TONE_SIGMA_FACE * masks.face_width)
+            c = soften_under_eye_texture(
+                np.clip(c, 0.0, 1.0).astype(np.float32), masks.under_eye, adj.underEyeTexture,
+                sigma_fine=min(S0 * L, 0.3 * sig_line), sigma_line=sig_line,
+            )
         if adj.teethWhiten > 0 or adj.teethStainRemoval > 0:
             c = correct_teeth(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.teethWhiten, adj.teethStainRemoval)
 

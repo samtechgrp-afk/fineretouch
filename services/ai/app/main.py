@@ -178,6 +178,7 @@ def _needs_skin_parse(adj: Adjustments) -> bool:
     skin_tools = (
         a.skinSmoothing > 0 or a.blemishRemoval > 0 or a.acneRemoval > 0 or a.darkSpotRemoval > 0
         or a.skinToneUnify > 0 or a.skinMultiplier > 1 or a.sharpen > 0
+        or a.rednessReduction > 0 or a.skinNoise > 0
     )
     return skin_tools and a.skinMask.useSegmentation
 

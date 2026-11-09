@@ -1,4 +1,4 @@
-# Retouch control system (v0.7), skin masks (v0.8) and upgrade audit
+# Retouch control system (v0.7), skin masks (v0.8), skin engine (v0.9) and upgrade audit
 
 This document has two parts: the Phase 1 audit of FineRetouch against the professional
 portrait-retouching specification, and the Phase 2 deliverable (per-effect strength,
@@ -46,7 +46,7 @@ portrait-retouching specification, and the Phase 2 deliverable (per-effect stren
 
 1. **Phase 2 (this change):** retouch control system.
 2. **Phase 3 (done, see Part 3):** face parsing for semantic masks, editable masks. The licence check ruled out the public BiSeNet / CelebAMask-HQ weights (non-commercial), so the bundled MediaPipe selfie multiclass model (Apache-2.0) is used.
-3. **Phase 4:** split the skin engine; dedicated dark-spot (pigmentation) and redness tools, noise reduction, under-eye texture.
+3. **Phase 4 (done, see Part 4):** split the skin engine; dedicated dark-spot (pigmentation, done in v0.7) and redness tools, noise reduction, under-eye texture.
 4. **Later phases:** brushes (heal, clone, dodge and burn), project files, presets per style, the NL plan engine, tiled rendering, optional DirectML after testing on the target hardware.
 
 ## Part 1b: separate skin tools
@@ -198,3 +198,55 @@ Limits: 200 strokes, 4,000 points per stroke. Old edits get the defaults.
 - `apps/web/src/engine/skinMask.test.ts`: the TypeScript port of the parse branch (extension, poster ignored, hair cut, body skin) and of the stroke rasteriser.
 - `apps/web/src/lib/skinMask.store.test.ts`: one undo step per stroke, clear and undo, copy / paste / sync / presets never move strokes.
 - Browser check (Chromium, SwiftShader WebGL2, the real engine on the MediaPipe sample portrait): the preview fetches `/v1/parse`, the panel reports "Skin from AI face parsing", a Protect stroke across the cheeks clears the mask overlay there, an Add stroke adds the flag area, Ctrl+Z removes the last stroke.
+
+## Part 4: skin engine (v0.9)
+
+### Engine layout
+
+`services/ai/app/retouch_engine.py` is now a thin facade over `app/engines/`:
+
+| Module | Contents |
+| :--- | :--- |
+| `common.py` | colour conversions, blurs, masked blur, inpainting helpers |
+| `boost.py` | 2x/3x boosted retouch |
+| `spots.py` | spot detection (LoG, bumps, strands, beauty marks) and healing |
+| `skin.py` | natural retouch, acne and dark-spot tools, pigmentation, skin-tone guard |
+| `redness.py`, `noise.py`, `under_eye.py` | the new v0.9 tools |
+| `hair.py`, `bokeh.py`, `style.py`, `studio.py`, `clothing.py` | stray hair, bokeh, style sync, glare and teeth, clothing |
+
+### New tools
+
+| Tool | Slider | What it does | What it never touches |
+| :--- | :--- | :--- | :--- |
+| Redness reduction | `rednessReduction` | Tone layer (sigma S1) compared with a skin-only average 0.2 face widths wide, computed twice so the red areas don't raise their own reference. Excess Cr above 0.004 (full at 0.025) is pulled back 90%, and Cb follows the reference by 40% | Luma (shading, contour), pores, non-skin |
+| Skin noise reduction | `skinNoise` | Noise level = 1.045 x MAD of the Cb/Cr fine bands on skin (capped by the luma band's MAD). The finest luma band (0.9 px) is soft-thresholded at 2.5x that level; chroma is averaged over 2 px on skin, except at strong colour edges | Pores and fine hair stronger than the noise; clean files (low measured level) |
+| Under-eye texture | `underEyeTexture` | Inside the under-eye region, the luma band between S0 and S1 (capped at 0.012 face widths) is reduced: dark creases fully at 100%, light ridges by 35% | The finest band (pores) and the tone layer (shape, shading); everything outside the region |
+
+Order in the export: noise reduction first (so grain doesn't read as spots or texture), then acne, dark spots, natural retouch, redness, tone correction, boost, tone guard. Under-eye texture runs with the face-feature tools, after under-eye correction.
+
+Preview (`shaders.ts`):
+- Noise reduction uses 3x3 and 5x5 neighbourhoods and a noise level measured from a centre crop of the proxy (`engine/noise.ts`, the same estimator). The export measures its own full-size source.
+- Redness compares with the redder of the two broad bands, because those bands also average background and clothes. On the test portrait the preview's a* change is within 0.1 of the export's.
+
+### Status
+
+| Requirement | Status |
+| :--- | :--- |
+| Engine split by tool | Implemented (no behaviour change) |
+| Redness reduction, separate from acne | Implemented |
+| Skin noise reduction with texture kept | Implemented |
+| Under-eye fine lines | Implemented for the landmark under-eye region |
+| Crow's feet and forehead lines | Planned: outside the under-eye region; needs its own region and an oriented line detector |
+| Per-tool advanced controls (sensitivity, radius, thresholds) | Planned: the constants live at the top of each engine module now, so each can become a validated control |
+
+### Tests
+
+`services/ai/tests/test_skin_engine.py`:
+- Redness: a red patch loses at least 60% of its excess redness while an equal neutral shadow barely changes, luma is unchanged (< 0.001), and pores correlate > 0.99.
+- Noise: error to the clean image falls below 55% and chroma noise below 50%. Pores keep > 70% of their contrast. A clean image changes less than a third as much as a noisy one, and strong luma-only pores do not read as noise.
+- Under-eye: crease depth more than halves, nothing changes outside the region, pores keep > 75% of their contrast, and 40 < 100 in effect.
+- Render: 1x < 3x, off equals the slider at 0 for all three tools, and a Protect stroke leaves the under-eye area untouched.
+
+`apps/web/src/engine/noise.test.ts` pins the browser estimator to the same behaviour.
+
+Real-photo check (MediaPipe sample portrait, 820 x 1024): each tool takes 0.2 to 0.35 s for the whole render on CPU. Noise reduction removes added sensor noise and leaves the clean file nearly unchanged (mean change 0.05/255).

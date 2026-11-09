@@ -5,6 +5,7 @@
  * for the viewport, and lazily built face masks. The store only keeps ids.
  */
 
+import { forgetNoiseLevel } from './noise';
 import { isRawFileName, parseRawFile, type RawExif, type RawFormat } from './rawParser';
 
 export const PROXY_LONG_EDGE = 2560;
@@ -177,6 +178,7 @@ export const getCachedLensRoi = (id: string) => lensRois.get(id);
 export const setCachedLensRoi = (id: string, m: Uint8Array) => lensRois.set(id, m);
 
 export function forgetImage(id: string) {
+  forgetNoiseLevel(id);
   segmentations.get(id)?.close();
   segmentations.delete(id);
   lensRois.delete(id);

@@ -49,6 +49,8 @@ export interface RenderInfo {
   hasFace: boolean;
   /** L*a*b* stats of the unedited image; needed for colour matching. */
   sourceStats: ColorStats | null;
+  /** Measured luma noise level of the source (engine/noise.ts), for skin noise reduction. */
+  noiseLevel?: number;
 }
 
 /**
@@ -281,6 +283,10 @@ export class Renderer {
     u('uTexture', adj.skinTexture / 100);
     u('uBlemish', adj.blemishRemoval / 100);
     u('uUnify', adj.skinToneUnify / 100);
+    u('uRedness', adj.rednessReduction / 100);
+    u('uNoise', adj.skinNoise / 100);
+    u('uNoiseLevel', info.noiseLevel ?? 0.004);
+    u('uUnderEyeTex', adj.underEyeTexture / 100);
     u('uEye', adj.eyeBrighten / 100);
     u('uDark', adj.darkCircles / 100);
     u('uTeeth', adj.teethWhiten / 100);
