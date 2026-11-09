@@ -73,6 +73,16 @@ void main() {
   outColor = vec4(acc / wsum, 1.0);
 }`;
 
+/**
+ * Tiled export (v0.12): a tile covers part of the photo. Masks, depth, segmentation and layer
+ * masks are whole-photo textures, so they are sampled at fuv(vUv). uFrame = (x0, y0, w, h) of
+ * the tile in whole-photo UV; (0, 0, 1, 1) when rendering the whole photo.
+ */
+export const FRAME = /* glsl */ `
+uniform vec4 uFrame;
+vec2 fuv(vec2 uv) { return uFrame.xy + uv * uFrame.zw; }
+`;
+
 const COMMON = /* glsl */ `
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 float luma(vec3 c) { return dot(c, LUMA); }
@@ -164,6 +174,7 @@ uniform bool uGrade;            // colour grading active
 uniform vec3 uGradeOff[3];      // shadows / midtones / highlights RGB offsets (see gradeUniforms)
 uniform vec3 uGradeBounds;      // shadow pivot, highlight pivot, crossover width
 ${COMMON}
+${FRAME}
 const float HUE_C[9] = ${HUE_CENTERS_GLSL};
 // Skin-tone guard (retouch_engine.skin_tone_guard): chroma floor and hue lock in CIELAB.
 float wrapDeg(float d) { return mod(d + 180.0, 360.0) - 180.0; }
@@ -216,12 +227,12 @@ void main() {
   vec3 low1 = texture(uLow1, vUv).rgb;
   vec3 low2 = texture(uLow2, vUv).rgb;
   vec3 low3 = texture(uLow3, vUv).rgb;
-  vec4 m = texture(uMask, vUv); // r = face skin, g = eyes, b = under-eye, a = mouth
+  vec4 m = texture(uMask, fuv(vUv)); // r = face skin, g = eyes, b = under-eye, a = mouth
 
   float p = skinProb(low0);
   float skin = uHasFace ? m.r * (0.35 + 0.65 * p) : p * 0.8;
   // Brush strokes are absolute: "add" paints skin in, "erase" protects it from every skin tool.
-  vec2 e = uHasEdit ? texture(uEdit, vUv).rg : vec2(0.0);
+  vec2 e = uHasEdit ? texture(uEdit, fuv(vUv)).rg : vec2(0.0);
   skin = max(skin, e.r) * (1.0 - e.g);
   float faceArea = max(m.r, e.r) * (1.0 - e.g);
 
@@ -341,7 +352,7 @@ void main() {
   }
   // Stray hair: thin strands that differ from their surroundings inside the face-outline band.
   if (uHair) {
-    float roi = texture(uHairRoi, vUv).r;
+    float roi = texture(uHairRoi, fuv(vUv)).r;
     if (roi > 0.0) {
       float d = luma(low1) - luma(src);
       float thin = max(d, -0.8 * d);
@@ -410,7 +421,7 @@ void main() {
   if (uSharpen > 0.0) c += uSharpen * 1.2 * (src - low0) * (1.0 - 0.8 * skin * uSmooth);
 
   if (uVignette != 0.0) {
-    float d = length(vUv - 0.5) / sqrt(0.5);
+    float d = length(fuv(vUv) - 0.5) / sqrt(0.5);
     c *= 1.0 + uVignette * 0.6 * smoothstep(0.35, 1.0, d);
   }
   outColor = vec4(clamp(c, 0.0, 1.0), 1.0);
@@ -512,6 +523,7 @@ uniform float uDb;            // dodge & burn strength 0..1
 uniform int uRange;           // 0 all, 1 shadows, 2 midtones, 3 highlights
 uniform float uExposure, uContrast, uSat, uTemp, uTint; // -1..1
 ${COMMON}
+${FRAME}
 float lumaGate(float y) {
   if (uLuma.x <= 0.0 && uLuma.y >= 1.0) return 1.0;
   float s = max(0.005, uLuma.z * 0.25);
@@ -528,7 +540,7 @@ float rangeWeight(float y) {
 }
 void main() {
   vec3 c = clamp(texture(uImg, vUv).rgb, 0.0, 1.0);
-  vec4 L = texture(uLayer, vUv);
+  vec4 L = texture(uLayer, fuv(vUv));
   float gate = lumaGate(luma(c)) * uGain;
   if (uDodgeBurn) {
     float stops = 1.5 * uDb * (L.g - L.b) * gate * rangeWeight(luma(c));
@@ -587,7 +599,8 @@ uniform float uRadiusScale;   // 1.0 then 0.45
 uniform float uGain;          // highlight boost 0..1
 uniform vec2 uKernel[${BOKEH_TAPS}];  // unit disk or hexagon
 ${COMMON}
-float coc(vec2 uv) { return uMaxCoc * uRadiusScale * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, uv).r); }
+${FRAME}
+float coc(vec2 uv) { return uMaxCoc * uRadiusScale * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, fuv(uv)).r); }
 vec3 boosted(vec3 srgb) {
   vec3 lin = toLinear(srgb);
   return lin * (1.0 + uGain * 6.0 * smoothstep(0.55, 0.95, luma(lin)));
@@ -615,8 +628,9 @@ in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uSharp, uBlur, uDepth;
 uniform float uMaxCocFull; // pixels at the output resolution
+${FRAME}
 void main() {
-  float coc = uMaxCocFull * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, vUv).r);
+  float coc = uMaxCocFull * smoothstep(${FOCUS_START}, ${FOCUS_END}, texture(uDepth, fuv(vUv)).r);
   float a = smoothstep(0.35, 1.5, coc);
   outColor = vec4(mix(texture(uSharp, vUv).rgb, texture(uBlur, vUv).rgb, a), 1.0);
 }`;

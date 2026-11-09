@@ -4,7 +4,7 @@ import { buildLensRoiMask } from '@/engine/masks';
 import type { ImageAnalysis } from '@fineretouch/shared';
 import { parseMap, segmentMap } from './ai';
 import { proxyJpeg } from './depth';
-import { fitSize, getCachedLensRoi, getParse, getProxy, getSegmentation, setCachedLensRoi, setParse, setSegmentation } from './images';
+import { fitSize, getCachedLensRoi, getParse, getSegmentation, hasImage, setCachedLensRoi, setParse, setSegmentation } from './images';
 import { useEditor } from './store';
 
 const LENS_ROI_LONG_EDGE = 1024;
@@ -32,7 +32,7 @@ export function ensureSegmentation(id: string): Promise<ImageBitmap | null> {
   const cached = getSegmentation(id);
   if (cached) return Promise.resolve(cached);
   const st = useEditor.getState();
-  if (!st.aiOnline || !getProxy(id)) {
+  if (!st.aiOnline || !hasImage(id)) {
     st.setSegmentState(id, 'unavailable');
     return Promise.resolve(null);
   }
@@ -64,7 +64,7 @@ export function ensureParse(id: string): Promise<ImageBitmap | null> {
   const cached = getParse(id);
   if (cached) return Promise.resolve(cached);
   const st = useEditor.getState();
-  if (!st.aiOnline || !getProxy(id)) {
+  if (!st.aiOnline || !hasImage(id)) {
     st.setParseState(id, 'unavailable');
     return Promise.resolve(null);
   }

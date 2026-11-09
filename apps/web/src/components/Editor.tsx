@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { profileFromRgba } from '@/engine/style';
 import { aiHealth, analyze, pool } from '@/lib/ai';
 import { proxyJpeg } from '@/lib/depth';
-import { bitmapPixels, clearCachedMask, fitSize, forgetImage, isImportable, loadImage, newId } from '@/lib/images';
+import { bitmapPixels, clearCachedMask, fitSize, forgetImage, isImportable, loadImage, newId, trimProxies } from '@/lib/images';
 import { IMPORT_ACCEPT } from '@/lib/rawParser';
 import { fileFingerprint } from '@/lib/editPersistence';
 import { selectActivePhoto, useEditor, type CompareMode } from '@/lib/store';
@@ -92,6 +92,8 @@ export function Editor() {
         useEditor.getState().setLocalStats(id, profile.stats);
         useEditor.getState().setProfile(id, profile);
         loaded.add(id);
+        // Keep only the most recent previews decoded (memory management, v0.12).
+        trimProxies();
       } catch (e) {
         console.warn(`Could not open ${file.name}`, e);
         failures.push(`${file.name}: ${(e as Error).message}`);

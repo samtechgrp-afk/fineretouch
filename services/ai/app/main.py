@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import ValidationError
 from starlette.concurrency import run_in_threadpool
 
-from . import batch_engine, imageio, raw_engine, storage
+from . import batch_engine, imageio, memory, raw_engine, storage
 from .color import color_stats
 from .depth import DepthEstimator
 from .landmarks import FaceLandmarkService
@@ -141,7 +141,16 @@ def analyze_array(rgb: np.ndarray, width: int, height: int) -> ImageAnalysis:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "faceBackend": faces_service.backend, "depthBackend": depth_service.backend}
+    g = memory.render_gate.stats()
+    return {
+        "status": "ok",
+        "faceBackend": faces_service.backend,
+        "depthBackend": depth_service.backend,
+        # CPU engine facts for the editor's processing settings (v0.12).
+        "cpuThreads": os.cpu_count() or 1,
+        "renderMemoryBudgetMb": g.budget // 2**20 if g.budget else None,
+        "rendersInFlight": g.in_flight,
+    }
 
 
 @app.post("/v1/analyze", response_model=ImageAnalysis)
@@ -188,6 +197,22 @@ def _render_bytes(
     data: bytes, adj: Adjustments | Callable[[np.ndarray], Adjustments], out: OutputSpec
 ) -> tuple[bytes, str, CullFlags]:
     """adj may be a function of a small proxy of the decoded photo (batch smart sync)."""
+    try:
+        w, h = imageio.oriented_size(data)
+    except Exception:
+        w, h = 6000, 4000  # unknown header: assume a 24 MP camera file
+    if out.maxLongEdge and max(w, h) > out.maxLongEdge:
+        s = out.maxLongEdge / max(w, h)
+        w, h = round(w * s), round(h * s)
+    # Memory admission (app/memory.py): waits while other renders would push the machine
+    # past its render budget.
+    with memory.render_gate.admit(memory.render_estimate(w, h)):
+        return _render_admitted(data, adj, out)
+
+
+def _render_admitted(
+    data: bytes, adj: Adjustments | Callable[[np.ndarray], Adjustments], out: OutputSpec
+) -> tuple[bytes, str, CullFlags]:
     try:
         hq = imageio.decode_hq(data, out.maxLongEdge)  # uint16 for camera RAW
     except Exception as exc:

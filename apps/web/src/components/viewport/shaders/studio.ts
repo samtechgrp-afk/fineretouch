@@ -14,6 +14,7 @@ import { GLARE_GLSL } from './glareReduction';
 import { IRON_GLSL } from './clothingIron';
 import { LUT_GLSL } from './lut3d';
 import { TEXTURE_RETENTION_GLSL } from './textureRetention';
+import { FRAME } from '@/engine/shaders';
 
 export type StudioOverlay = 'none' | 'glare' | 'texture' | 'clothing';
 export const OVERLAY_MODES: Record<StudioOverlay, number> = { none: 0, glare: 1, texture: 2, clothing: 3 };
@@ -27,14 +28,15 @@ uniform sampler2D uImg, uLow0, uLow1, uLow3, uLens, uSeg;
 uniform sampler3D uLut;
 uniform bool uGlare, uIron, uRecolour, uLutOn;
 uniform float uGlareStrength, uIronStrength, uHue, uSatShift, uLutSize, uLutAmount;
+${FRAME}
 ${GLARE_GLSL}
 ${IRON_GLSL}
 ${LUT_GLSL}
 void main() {
   vec3 c = texture(uImg, vUv).rgb;
   vec3 l0 = texture(uLow0, vUv).rgb, l1 = texture(uLow1, vUv).rgb, l3 = texture(uLow3, vUv).rgb;
-  if (uGlare) c = removeGlare(c, glareVeil(l1, l3, texture(uLens, vUv).r, uGlareStrength), uGlareStrength);
-  float garment = texture(uSeg, vUv).r;
+  if (uGlare) c = removeGlare(c, glareVeil(l1, l3, texture(uLens, fuv(vUv)).r, uGlareStrength), uGlareStrength);
+  float garment = texture(uSeg, fuv(vUv)).r;
   if (uIron && garment > 1e-3) c = clamp(c * ironRatio(l0, l1, l3, garment, uIronStrength), 0.0, 1.0);
   if (uRecolour) c = recolour(c, garment, uHue, uSatShift);
   if (uLutOn) c = applyLut(uLut, uLutSize, c, uLutAmount);

@@ -6,7 +6,7 @@ import { Renderer, type DisplayView } from '@/engine/renderer';
 import { ensureDepth, hairRoiFor } from '@/lib/depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
 import { editMaskFor, faceMaskFor } from '@/lib/export';
-import { fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
+import { ensureProxy, fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
 import { autoHealSource } from '@/engine/heal';
 import { noiseLevelOf } from '@/lib/noise';
@@ -44,6 +44,8 @@ export function PhotoEditorViewport() {
   const frameRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [renderMs, setRenderMs] = useState<number | null>(null);
+  // Render stages the last frame ran (0 = served from the stage cache, e.g. while panning).
+  const [stagesRun, setStagesRun] = useState<number | null>(null);
 
   const photo = useEditor(selectActivePhoto);
   const view = useEditor((s) => s.view);
@@ -86,7 +88,11 @@ export function PhotoEditorViewport() {
       // The pending assistant plan is previewed here only (never saved or exported until approved).
       const adj = displayAdjustments(st, p);
       const proxy = getProxy(p.id);
-      if (!proxy) return;
+      if (!proxy) {
+        // Evicted from the preview cache: decode it again, then draw.
+        void ensureProxy(p.id).then((b) => b && draw());
+        return;
+      }
       const t0 = performance.now();
       if (loadedIdRef.current !== p.id) {
         r.setSource(proxy, proxy.width, proxy.height);
@@ -163,6 +169,7 @@ export function PhotoEditorViewport() {
       r.display(display, adj.glareReduction / 100);
       displayRef.current = display;
       setRenderMs(performance.now() - t0);
+      setStagesRun(r.lastStages.length);
     });
   }, [geometry]);
 
@@ -474,7 +481,7 @@ export function PhotoEditorViewport() {
       )}
       {photo && (
         <div className="pointer-events-none absolute bottom-3 right-3 rounded bg-black/60 px-2 py-1 font-mono text-[11px] text-ink-300">
-          {pct}% {renderMs !== null && `· ${renderMs.toFixed(1)} ms`}
+          {pct}% {renderMs !== null && `· ${renderMs.toFixed(1)} ms`}{stagesRun === 0 ? ' · cached' : stagesRun ? ` · ${stagesRun}/4 stages` : ''}
         </div>
       )}
     </div>

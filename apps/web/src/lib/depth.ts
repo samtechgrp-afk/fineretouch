@@ -3,7 +3,7 @@
 import { buildDepthPrior, buildHairRoiMask } from '@/engine/masks';
 import type { ImageAnalysis } from '@fineretouch/shared';
 import { depthMap } from './ai';
-import { fitSize, getCachedHairRoi, getDepth, getProxy, setCachedHairRoi, setDepth, type DepthData } from './images';
+import { ensureProxy, fitSize, getCachedHairRoi, getDepth, getProxy, hasImage, setCachedHairRoi, setDepth, type DepthData } from './images';
 import { useEditor } from './store';
 
 const PRIOR_LONG_EDGE = 256;
@@ -12,7 +12,8 @@ const inflight = new Map<string, Promise<DepthData | null>>();
 
 /** Downscaled JPEG of the proxy: what the AI service analyses (landmarks/depth don't need full res). */
 export async function proxyJpeg(id: string, longEdge = 1280): Promise<Blob> {
-  const proxy = getProxy(id)!;
+  const proxy = await ensureProxy(id);
+  if (!proxy) throw new Error('Photo is no longer loaded');
   const [w, h] = fitSize(proxy.width, proxy.height, longEdge);
   const c = new OffscreenCanvas(w, h);
   c.getContext('2d')!.drawImage(proxy, 0, 0, w, h);
@@ -43,7 +44,8 @@ export function ensureDepth(id: string): Promise<DepthData | null> {
   st.setDepthState(id, 'pending');
   const job = (async () => {
     let d: DepthData | null = null;
-    if (online && getProxy(id)) {
+    await ensureProxy(id);
+    if (online && hasImage(id)) {
       try {
         const bmp = await createImageBitmap(await depthMap(await proxyJpeg(id)));
         d = { source: bmp, width: bmp.width, height: bmp.height, kind: 'model' };

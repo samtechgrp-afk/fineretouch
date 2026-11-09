@@ -131,6 +131,7 @@ export async function loadImage(id: string, file: File): Promise<LoadedImage> {
     const blob = await new Promise<Blob>((res, rej) => canvas.toBlob((b) => (b ? res(b) : rej(new Error('thumb'))), 'image/jpeg', 0.8));
     files.set(id, file);
     proxies.set(id, proxy);
+    touch(id);
     if (preview) rawPreviews.set(id, preview);
     return { file, width: full.width, height: full.height, proxy, thumbUrl: URL.createObjectURL(blob), raw };
   } finally {
@@ -139,7 +140,80 @@ export async function loadImage(id: string, file: File): Promise<LoadedImage> {
 }
 
 export const getFile = (id: string) => files.get(id);
-export const getProxy = (id: string) => proxies.get(id);
+/**
+ * Memory management (v0.12): decoded previews (about 20 MB each at 2560 px) and the pixel
+ * caches built from them are kept for the PROXY_CACHE_SIZE most recently used photos only. An
+ * evicted preview is decoded again from the original when the photo is opened. Results from
+ * the engine (depth, segmentation, parsing) are small and kept.
+ */
+export const PROXY_CACHE_SIZE = 12;
+const recent = new Map<string, true>();
+const touch = (id: string) => {
+  recent.delete(id);
+  recent.set(id, true);
+};
+
+/** The photo's preview bitmap if it is in memory (marks it recently used). */
+export const getProxy = (id: string) => {
+  const p = proxies.get(id);
+  if (p) touch(id);
+  return p;
+};
+export const hasImage = (id: string) => files.has(id);
+export const proxyCount = () => proxies.size;
+
+/** Free a photo's preview and everything derived from its pixels (rebuilt on demand). */
+function evictProxy(id: string) {
+  proxies.get(id)?.close();
+  proxies.delete(id);
+  recent.delete(id);
+  masks.delete(id);
+  edits.delete(id);
+  hairRois.delete(id);
+  lensRois.delete(id);
+  forgetLocalRetouch(id);
+}
+
+/** Keep at most `keep` previews in memory, dropping the least recently used. Returns how many were freed. */
+export function trimProxies(keep = PROXY_CACHE_SIZE): number {
+  let n = 0;
+  for (const id of recent.keys()) {
+    if (proxies.size <= keep) break;
+    evictProxy(id);
+    n++;
+  }
+  return n;
+}
+
+const proxyLoads = new Map<string, Promise<ImageBitmap | null>>();
+
+/** The preview bitmap, decoded again from the original if it was evicted. */
+export function ensureProxy(id: string): Promise<ImageBitmap | null> {
+  const p = getProxy(id);
+  if (p) return Promise.resolve(p);
+  if (!files.has(id)) return Promise.resolve(null);
+  const running = proxyLoads.get(id);
+  if (running) return running;
+  const job = (async () => {
+    const full = await decodeOriginal(id);
+    try {
+      const [pw, ph] = fitSize(full.width, full.height, PROXY_LONG_EDGE);
+      const proxy = await createImageBitmap(full, { resizeWidth: pw, resizeHeight: ph, resizeQuality: 'high' });
+      if (!files.has(id)) {
+        proxy.close();
+        return null;
+      }
+      proxies.set(id, proxy);
+      touch(id);
+      trimProxies();
+      return proxy;
+    } finally {
+      full.close();
+    }
+  })().finally(() => proxyLoads.delete(id));
+  proxyLoads.set(id, job);
+  return job;
+}
 /** Face mask cache; `key` names what it was built from (size, parsing, body skin). */
 export const getCachedMask = (id: string, key: string) => (masks.get(id)?.key === key ? masks.get(id)!.data : undefined);
 export const setCachedMask = (id: string, key: string, data: Uint8Array) => masks.set(id, { key, data });
@@ -186,6 +260,7 @@ export function forgetImage(id: string) {
   lensRois.delete(id);
   proxies.get(id)?.close();
   proxies.delete(id);
+  recent.delete(id);
   files.delete(id);
   rawPreviews.delete(id);
   masks.delete(id);
