@@ -65,6 +65,9 @@ from .spots import _best_donor, face_width_px, faces_in_crop, feature_protection
 # --- A. analysis scale and tiling ----------------------------------------------------------
 WORK_FACE = 1100.0  # analysis resolution: face width in px (old detector: 420)
 TILE = 1024  # tile core, work px
+NATIVE_SCALES = 3  # the finest scales run on full-resolution pixels when the face is shrunk for analysis ...
+NATIVE_BELOW = 0.9  # ... by more than 10%
+NATIVE_KOFS = 200  # kidx offset of native-pass candidates (their response statistics are their own)
 # Marks are looked for at these LoG sigmas (share of face width F). Blob radius ~ sigma * sqrt 2,
 # so the finest scale finds marks ~0.35% of the face wide (a blackhead), the coarsest ~6%.
 SIGMAS = (0.0012, 0.002, 0.0032, 0.005, 0.008, 0.012, 0.018, 0.026)
@@ -89,6 +92,21 @@ BODY_MAX_D = 0.03  # largest body mark (share of F)
 TINY_MIN_REL = 0.06  # a pore-sized dark dot must be at least this dark to be a blackhead / dot
 MAX_CANDIDATES_PER_TILE = 6000
 PORE_RATIO = 2.0  # a pore-sized mark must be this many times the typical pore's contrast (at 100% sensitivity)
+# Tone fairness (v0.13 phase 2B). Marks are compared with this person's own skin texture, measured
+# separately for dark texture (pores), bright texture (sheen between pores) and colour texture (a*),
+# each with the measured sensor noise taken out. Deep skin has the same marks at the same relative
+# contrast, but more relative noise and texture; one shared dark-pore reference held whiteheads and
+# red acne there to a standard set by the pores.
+# Tone-fair texture tests (bright texture, colour texture) are an alternative to the strict pore
+# test, and only for a clearly significant mark outside lit texture (FAIR_MARGIN, FIELD_*):
+BRIGHT_PORE_RELIEF = 0.5  # a bright dot beats bright texture with this much less margin than a dark dot beats pores
+RED_REF_MIN = 1.5  # a* texture reference floor (a* units), so smooth even-toned skin does not make every red dot "strong"
+CLEAR_RED_A = 2.0 * RED_A  # colour contrast only counts for the texture test when the mark is clearly red
+LUMA_REF_MIN = 0.01  # luma texture reference floor (relative)
+RIM_MIN_RATIO = 1.5  # a bright dot this much fainter than a dark mark right beside it is that mark's rim ...
+FAIR_MARGIN = 2.0  # ... and only for a mark at least this many times over its detection threshold
+FIELD_REACH, FIELD_DOTS = 0.1, 20  # this many light dots within this reach (share of F) = lit texture or shimmer
+RIM_MAX_PORE = 3.0  # ... unless it clearly beats the bright texture (a rim is faint; a whitehead beside a spot is not)
 
 # --- F/G. correction ------------------------------------------------------------------------
 HEAL_KINDS = ("acne", "pimple", "blackhead", "whitehead", "blemish", "manual")
@@ -102,6 +120,8 @@ MULTIPLIER_AREA = {1: 1.0, 2: 1.35, 3: 1.6}  # area tools (redness, tone, textur
 VERIFY_RATIO = 0.4  # a mark is gone when its contrast fell below this share of the original ...
 MAX_ATTEMPTS = 2  # ... and no mark is corrected more than this many times
 REVIEW_BAND = 0.15  # confidence this far below the threshold -> "needs review", not corrected
+RESIDUE_REACH = 1.8  # a residual hit within this many radii of a corrected mark is that mark's residue ...
+RESIDUE_GROW = 1.5  # ... and widens it by at most this factor
 
 
 def _fast_gauss(img: np.ndarray, sigma: float) -> np.ndarray:
@@ -154,6 +174,7 @@ class Mark:
     attempts: int = 0
     residual: bool = False  # first found by a residual scan
     after: float | None = None  # relative contrast after the last correction
+    r0: float | None = None  # radius when first found (residue may widen r up to RESIDUE_GROW x this)
 
 
 @dataclass
@@ -222,7 +243,7 @@ class _Cand:
     brown: np.ndarray  # b* above the skin
     iso: np.ndarray  # ring isotropy 0..1
     aniso: np.ndarray  # Hessian eigenvalue ratio 0..1 (1 = round)
-    pore: np.ndarray  # contrast / typical pore contrast on the tile
+    pore: np.ndarray  # contrast / typical pore contrast on the tile (dark pore reference, as in PR #13)
     edge: np.ndarray  # structure gradient around the mark (relative)
     body: np.ndarray  # bool: outside the face skin
     resp: np.ndarray  # raw LoG response
@@ -231,12 +252,17 @@ class _Cand:
     kidx: np.ndarray  # scale index (bright scales offset by 100)
     shine: np.ndarray  # 0..1 specular / oily highlight zone
     inskin: np.ndarray  # share of the context ring that lies on skin
+    cpore: np.ndarray  # redness / typical a* texture peak on the tile (colour contrast against this person's skin)
+    tpore: np.ndarray  # contrast / typical texture peak of the same polarity (bright marks: bright texture)
+
+
+_BOOL_FIELDS, _INT_FIELDS = ("bright", "body"), ("kidx",)
 
 
 def _cat(parts: list[_Cand]) -> _Cand:
     if not parts:
-        z = np.zeros(0, np.float32)
-        return _Cand(z, z, z, z, z.astype(bool), z, z, z, z, z, z, z, z.astype(bool), z, z, z, z.astype(np.int32), z, z)
+        return _Cand(**{f: np.zeros(0, bool if f in _BOOL_FIELDS else np.int32 if f in _INT_FIELDS else np.float32)
+                        for f in _Cand.__dataclass_fields__})
     return _Cand(*[np.concatenate([getattr(p, f) for p in parts]) for f in _Cand.__dataclass_fields__])
 
 
@@ -266,16 +292,52 @@ def _robust_baseline(v: np.ndarray, core: np.ndarray, sigma: float, outlier: np.
     return base
 
 
+def _noise_sigma(v: np.ndarray, core: np.ndarray) -> float:
+    """Per-pixel sensor noise of v on core (Immerkaer's Laplacian-difference estimator, with the
+    median instead of the mean so pores and marks do not count as noise)."""
+    r = np.abs(cv2.filter2D(np.ascontiguousarray(v, np.float32), -1, _NOISE_K, borderType=cv2.BORDER_REFLECT))[core]
+    return float(np.median(r)) / (0.6745 * 6.0) if r.size else 0.0
+
+
+_NOISE_K = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
+_NOISE_FIELD: list[np.ndarray] = []
+_NOISE_PEAK: dict[float, float] = {}
+
+
+def _noise_peak(sigma: float) -> float:
+    """Typical (75th percentile) positive peak of unit white noise blurred at sigma."""
+    key = round(sigma, 2)
+    if key not in _NOISE_PEAK:
+        if not _NOISE_FIELD:
+            _NOISE_FIELD.append(np.random.default_rng(7).normal(0.0, 1.0, (256, 256)).astype(np.float32))
+        g = cv2.GaussianBlur(_NOISE_FIELD[0], (0, 0), sigmaX=key, borderType=cv2.BORDER_REFLECT)
+        pk = (g >= cv2.dilate(g, np.ones((3, 3), np.uint8))) & (g > 0)
+        _NOISE_PEAK[key] = float(np.percentile(g[pk], 75))
+    return _NOISE_PEAK[key]
+
+
+def _texture_ref(f: np.ndarray, core: np.ndarray, noise_peak: float, floor: float, default: float) -> float:
+    """The typical texture peak of f on core (upper quartile of its positive local maxima), with
+    the part sensor noise explains taken out in quadrature (never below half of the raw value)."""
+    peaks = (f >= cv2.dilate(f, np.ones((3, 3), np.uint8))) & core & (f > 0)
+    if peaks.sum() <= 50:
+        return default
+    raw = float(np.percentile(f[peaks], 75))
+    return max(floor, math.sqrt(max(raw * raw - noise_peak * noise_peak, 0.25 * raw * raw)))
+
+
 def _detect_tile(
     rgb: np.ndarray, skin: np.ndarray, body: np.ndarray, protect: np.ndarray, Fw: float,
-    core_box: tuple[int, int, int, int],
-) -> tuple[_Cand, list[tuple[float, float]], list[tuple[float, float]]]:
-    """Candidates whose centre is in core_box (tile-local x0, y0, x1, y1), plus per-scale (median,
-    spread, skin pixels) of the dark and bright responses on this tile's skin."""
+    core_box: tuple[int, int, int, int], dark_scales: tuple[int, ...] = tuple(range(len(SIGMAS))),
+    bright_scales: tuple[int, ...] = tuple(range(len(BRIGHT_SIGMAS))), kofs: int = 0,
+) -> tuple[_Cand, dict[int, tuple[float, float, float]]]:
+    """Candidates whose centre is in core_box (tile-local x0, y0, x1, y1) at the given scale
+    indices, plus per-scale (median, spread, skin pixels) of the responses on this tile's skin,
+    keyed by the candidates' kidx (scale index, +100 for bright, + kofs for the native pass)."""
     cx0, cy0, cx1, cy1 = core_box
     core = (skin > 0.5) & (protect == 0)
     if core.sum() < 64:
-        return _cat([]), [], []
+        return _cat([]), {}
     lab = cv2.cvtColor(np.ascontiguousarray(rgb, np.float32), cv2.COLOR_RGB2Lab)
     y = _luma(rgb).astype(np.float32)
     ctx = max(4.0, BASE_CONTEXT * Fw)
@@ -293,11 +355,18 @@ def _detect_tile(
     brown = lab[..., 2] - base_b
     sig_dark = (dark + 0.012 * np.maximum(red, 0.0)).astype(np.float32)
     sig_bright = (-dark).astype(np.float32)
-    # Pore contrast: pores are by far the most numerous pore-sized dark peaks, so the upper
+    # Texture references. Pores are by far the most numerous pore-sized dark peaks, so the upper
     # quartile of all such peaks on this tile's skin is the "typical pore" a blackhead must beat.
-    gp = _gauss(dark, max(0.6, 0.5 * SIGMAS[0] * math.sqrt(2.0) * Fw))
-    peaks = (gp >= cv2.dilate(gp, np.ones((3, 3), np.uint8))) & core & (gp > 0)
-    pore_ref = max(0.01, float(np.percentile(gp[peaks], 75))) if peaks.sum() > 50 else 0.03
+    # A light dot is held to the bright texture (sheen between pores) and a red dot also to the
+    # a* texture: three independent references, each with the sensor noise taken out, so a deep,
+    # noisier skin tone is not held to a stricter standard than a light one.
+    gs = max(0.6, 0.5 * SIGMAS[0] * math.sqrt(2.0) * Fw)
+    gp = _gauss(dark, gs)
+    n_luma = _noise_peak(gs) * _noise_sigma(y, core) * float(rel)
+    pore_ref = _texture_ref(gp, core, n_luma, LUMA_REF_MIN, 0.03)
+    bright_ref = _texture_ref(-gp, core, n_luma, LUMA_REF_MIN, 0.03)
+    # Colour noise is not taken out: a red dot has to beat whatever a* speckle this skin shows.
+    red_ref = _texture_ref(_gauss(red, gs), core, 0.0, RED_REF_MIN, 3.0)
     # Specular / oily highlight zones (forehead, nose, chin shine): the tone there is well above
     # the person's skin, and the bright dots inside are skin texture lit by the shine.
     # Local, not global: a key light makes one side of the face brighter, a highlight is a
@@ -308,11 +377,16 @@ def _detect_tile(
     edge = np.hypot(cv2.Sobel(ys, cv2.CV_32F, 1, 0), cv2.Sobel(ys, cv2.CV_32F, 0, 1)) / 8.0 * rel * max(1.0, 0.006 * Fw)
 
     parts: list[_Cand] = []
-    stats_d: list[tuple[float, float]] = []
-    stats_b: list[tuple[float, float]] = []
+    stats: dict[int, tuple[float, float, float]] = {}
     sub = core[::3, ::3]
-    for signal, sigmas, is_bright, stats in ((sig_dark, SIGMAS, False, stats_d), (sig_bright, BRIGHT_SIGMAS, True, stats_b)):
-        sp = [max(0.7, s * Fw) for s in sigmas]
+    for signal, emit, is_bright in ((sig_dark, dark_scales, False), (sig_bright, bright_scales, True)):
+        if not emit:
+            continue
+        # One guard scale on each side of the emitted ones (not emitted), so a pass that covers
+        # only part of the scale range finds the same scale-space maxima as the whole range.
+        n_sc = len(BRIGHT_SIGMAS) if is_bright else len(SIGMAS)
+        scales = tuple(range(max(0, min(emit) - 1), min(n_sc, max(emit) + 2)))
+        sp = [max(0.7, SIGMAS[k] * Fw) for k in scales]
         resp = []
         blurred = []
         for sg in sp:
@@ -321,9 +395,12 @@ def _detect_tile(
             resp.append(-(sg * sg) * cv2.Laplacian(g, cv2.CV_32F, ksize=3))
         spatial = [cv2.dilate(r, np.ones((3, 3), np.uint8)) for r in resp]
         for k, sg in enumerate(sp):
+            if scales[k] not in emit:
+                continue
             r = resp[k]
             med, spread = _robust(r[::3, ::3][sub])
-            stats.append((med, spread, float(sub.sum())))
+            kidx = kofs + scales[k] + (100 if is_bright else 0)
+            stats[kidx] = (med, spread, float(sub.sum()))
             is_max = r >= spatial[k]
             if k > 0:
                 is_max &= r >= spatial[k - 1]
@@ -373,9 +450,11 @@ def _detect_tile(
                 (np.abs(c_dark) / pore_ref).astype(np.float32),
                 _sample(edge, fx, fy).astype(np.float32), body[yy, xx] > 0.5,
                 r[yy, xx].astype(np.float32), np.full(yy.size, med, np.float32), np.full(yy.size, spread, np.float32),
-                np.full(yy.size, k + (100 if is_bright else 0), np.int32), shine[yy, xx], inside / 12.0,
+                np.full(yy.size, kidx, np.int32), shine[yy, xx], inside / 12.0,
+                (np.maximum(c_red, 0.0) / red_ref).astype(np.float32),
+                (np.abs(c_dark) / (bright_ref if is_bright else pore_ref)).astype(np.float32),
             ))
-    return _cat(parts), stats_d, stats_b
+    return _cat(parts), stats
 
 
 def _neighbour_counts(x: np.ndarray, y: np.ndarray, sel: np.ndarray, reach: float) -> np.ndarray:
@@ -471,6 +550,10 @@ def _classify(
     kinds[c.bright & (c.red > RED_A)] = "pimple"
     # Shine: light dots inside an oily highlight, or a dense field of them, are lit skin texture.
     bright_dots = c.bright & (diam < WHITEHEAD_MAX_D) & (rel >= 0.8 * WHITEHEAD_MIN_REL) & (c.score >= _k_for(70, 1))
+    # Lit texture: on real skin, sheen, oil and body shimmer make wide fields of light dots. The
+    # tone-fair tests below (bright texture, colour texture, pimple fusion) never apply inside such
+    # a field; there a mark has to pass the strict pore test alone.
+    in_field = _neighbour_counts(c.x, c.y, bright_dots, FIELD_REACH * Fw) >= FIELD_DOTS
     glossy = bright_dots & ((c.shine > 0.4) | (_neighbour_counts(c.x, c.y, bright_dots, FOLLICLE_REACH * Fw) >= 4))
     kinds[glossy & (c.red <= RED_A)] = "shine"
     # Dark / red family.
@@ -506,6 +589,40 @@ def _classify(
     kinds[fol | edge_dots] = "follicle"
     kinds[darkish & tiny & (c.aniso < 0.25)] = "follicle"  # a short hair stub
 
+    rad = c.sigma * math.sqrt(2.0)
+    # Rims: a mark darker than the skin baseline leaves a faint light ring where the baseline meets
+    # it (most visibly beside moles on deep skin). A light dot right at a much darker mark is
+    # that rim, not a whitehead.
+    strong_dark = np.nonzero(darkish & (rel >= 0.1))[0]
+    light = c.bright & (rel >= 0.5 * WHITEHEAD_MIN_REL) & (c.tpore < RIM_MAX_PORE)
+    if strong_dark.size and light.any():
+        li = np.nonzero(light & (c.red <= RED_A))[0]
+        li = li[np.argsort(c.x[li])]
+        lx, rmax = c.x[li], float(rad[li].max(initial=0.0))
+        for j in strong_dark:
+            reach = 2.0 * rad[j] + rmax
+            a, b = np.searchsorted(lx, c.x[j] - reach), np.searchsorted(lx, c.x[j] + reach)
+            if a == b:
+                continue
+            w = li[a:b]
+            hit = ((c.x[w] - c.x[j]) ** 2 + (c.y[w] - c.y[j]) ** 2 < (2.0 * rad[j] + rad[w]) ** 2) & (rel[j] >= RIM_MIN_RATIO * rel[w])
+            kinds[w[hit]] = "rim"
+    # Pimples: a light head on a red dome. The head breaks the dome's ring test (the centre is not
+    # darker than the ring), so a red dome with a light, red head at its centre is one pimple and
+    # its roundness is judged with the head counted in.
+    fused = np.zeros(n, bool)
+    heads = np.nonzero(c.bright & (c.red > RED_A) & (c.iso >= 0.5) & ~in_field)[0]
+    domes = np.nonzero(darkish & is_red)[0]
+    domes = domes[np.argsort(c.x[domes])]
+    dx, dmax = c.x[domes], float(rad[domes].max(initial=0.0))
+    for i in heads if domes.size else ():
+        a, b = np.searchsorted(dx, c.x[i] - 0.5 * dmax), np.searchsorted(dx, c.x[i] + 0.5 * dmax)
+        w = domes[a:b]
+        inside = ((c.x[w] - c.x[i]) ** 2 + (c.y[w] - c.y[i]) ** 2 < (0.5 * rad[w]) ** 2) & (rad[w] > 1.5 * rad[i])
+        if inside.any():
+            fused[w[inside][np.argmax(c.score[w[inside]])]] = True
+    kinds[fused] = "pimple"
+
     # Threshold per category (and body sensitivity on body skin).
     accepted = np.zeros(n, bool)
     conf = np.zeros(n, np.float32)
@@ -513,27 +630,36 @@ def _classify(
     min_aniso = 0.18 + 0.3 * ep
     for i in range(n):
         kind = kinds[i]
-        if kind == "shine":
+        if kind in ("shine", "rim"):
             continue
         cat = settings.category("acne" if kind in ("mole", "freckle", "birthmark", "follicle") else kind)
         if kind in PROTECTED_KINDS:
             # Protected marks are judged with the general dark-mark sensitivity of their family.
             cat = settings.category("darkSpot" if kind != "follicle" else "blackhead")
         sens = cat.sensitivity
-        if diam[i] > 0.03:
-            # Large marks are where shading lives (between the brows, beside the nose): only
-            # clearly round, isolated ones away from structure edges count.
-            ok &= c.iso[i] >= 0.9 and c.edge[i] < 0.25 and c.shine[i] < 0.3
         if c.body[i]:
             sens = min(100.0, sens * settings.bodySensitivity / 70.0)
-        k = _k_for(sens + sens_boost, settings.multiplier)
-        floor = MIN_REL_CONTRAST * (1.6 - 0.9 * min(sens + sens_boost, 100.0) / 100.0)
+        # Colourless marks carry no colour evidence: the more sensitive residual scan does not
+        # lower their bar (on its own it finds skin relief, most of all on deep skin).
+        boost = 0.0 if kind == "blemish" else sens_boost
+        k = _k_for(sens + boost, settings.multiplier)
+        floor = MIN_REL_CONTRAST * (1.6 - 0.9 * min(sens + boost, 100.0) / 100.0)
         margin = c.score[i] / k
         ok = margin >= 1.0 and contrast[i] >= floor and cat.enabled
         if diam[i] < 1.6 * TINY:
-            ok &= c.pore[i] >= (PORE_RATIO + 1.5 - 1.5 * min(sens + sens_boost, 100.0) / 100.0)
+            # Texture test against this skin's own texture of the same kind (see _detect_tile):
+            # light dots against bright texture, red dots against luma or colour texture.
+            need = PORE_RATIO + 1.5 - 1.5 * min(sens + boost, 100.0) / 100.0
+            texture_ok = c.pore[i] >= need
+            if not in_field[i] and margin >= FAIR_MARGIN:
+                if c.bright[i]:
+                    texture_ok |= c.tpore[i] >= need - BRIGHT_PORE_RELIEF
+                if is_red[i] and c.red[i] >= CLEAR_RED_A:
+                    texture_ok |= c.cpore[i] >= need
+            ok &= texture_ok
+        iso = max(c.iso[i], 0.75) if fused[i] else c.iso[i]
         # Shape: blobs only. Lines, hairs and shading edges fail isotropy or anisotropy.
-        shape = min(1.0, c.iso[i] / 0.75) * min(1.0, c.aniso[i] / max(min_aniso, 1e-3))
+        shape = min(1.0, iso / 0.75) * min(1.0, c.aniso[i] / max(min_aniso, 1e-3))
         ok &= c.iso[i] >= 0.5 and c.aniso[i] >= min_aniso * 0.8
         # The whole context ring must be skin: a dark blob where a finger meets the next one, a
         # nail or the edge of a sleeve is a boundary, not a mark.
@@ -541,12 +667,12 @@ def _classify(
         if diam[i] > 0.03:
             # Large marks are where shading lives (between the brows, beside the nose): only
             # clearly round, isolated ones away from structure edges count.
-            ok &= c.iso[i] >= 0.9 and c.edge[i] < 0.25 and c.shine[i] < 0.3
+            ok &= (c.iso[i] >= 0.6 if fused[i] else c.iso[i] >= 0.9) and c.edge[i] < 0.25 and c.shine[i] < 0.3
         if c.body[i]:
             # Body skin folds (knuckles, elbows, creases) and shading are long or large; body
             # marks must be compact, round and of moderate size.
             ok &= diam[i] <= BODY_MAX_D and c.iso[i] >= 0.65 and c.aniso[i] >= min_aniso
-        sfac = 1.25 - 0.5 * min(sens + sens_boost, 100.0) / 100.0
+        sfac = 1.25 - 0.5 * min(sens + boost, 100.0) / 100.0
         if kind == "blemish":
             # Colourless marks: compact, clearly darker, and never inside an oily highlight
             # (there a "dark blob" is the gap between two shine patches).
@@ -585,11 +711,12 @@ def _analyse(
     y0, y1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1)
     x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
     s = min(1.0, WORK_FACE / max(F, 1.0))
-    crop = image[y0:y1, x0:x1]
-    sk = skin[y0:y1, x0:x1]
-    bd = body[y0:y1, x0:x1]
-    ch, cw = crop.shape[:2]
+    crop_full = image[y0:y1, x0:x1]
+    sk_full = skin[y0:y1, x0:x1]
+    bd_full = body[y0:y1, x0:x1]
+    ch, cw = crop_full.shape[:2]
     size = (max(1, round(cw * s)), max(1, round(ch * s)))
+    crop, sk, bd = crop_full, sk_full, bd_full
     if s < 1:
         crop = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
         sk = cv2.resize(sk, size, interpolation=cv2.INTER_AREA)
@@ -604,30 +731,44 @@ def _analyse(
     sk = np.maximum(cv2.morphologyEx(face_part, cv2.MORPH_CLOSE, _ellipse(max(3, int(0.05 * Fw) | 1))),
                     cv2.morphologyEx(bd.astype(np.float32), cv2.MORPH_CLOSE, _ellipse(max(3, int(0.01 * Fw) | 1))))
 
-    apron = int(math.ceil(3.0 * max(SIGMAS) * Fw + RING * max(SIGMAS) * math.sqrt(2) * Fw + BASE_CONTEXT * Fw)) + 4
-    H, W = size[1], size[0]
+    # Native resolution for the finest scales: when the face is wider than the analysis scale,
+    # the smallest marks (blackheads, whiteheads, pore-sized dots) are looked for on the
+    # full-resolution pixels, not on the shrunk copy, so a large photo loses no detail there.
+    native = s < NATIVE_BELOW
+    fine = tuple(range(NATIVE_SCALES)) if native else ()
+    passes = [(crop, sk, bd, protect, Fw, 1.0, tuple(k for k in range(len(SIGMAS)) if k not in fine),
+               tuple(k for k in range(len(BRIGHT_SIGMAS)) if k not in fine), 0)]
+    if native:
+        sk_n = cv2.resize(sk, (cw, ch), interpolation=cv2.INTER_LINEAR)  # the closed mask, not a second closing
+        protect_n = feature_protection_mask(local, ch, cw)
+        passes.append((crop_full, sk_n, bd_full, protect_n, F, s, fine, fine, NATIVE_KOFS))
     parts: list[_Cand] = []
-    sd: list[list[tuple[float, float]]] = []
-    sb: list[list[tuple[float, float]]] = []
+    stats: list[dict[int, tuple[float, float, float]]] = []
     tiles = 0
-    for ty in range(0, H, TILE):
-        for tx in range(0, W, TILE):
-            cy0, cy1, cx0, cx1 = ty, min(H, ty + TILE), tx, min(W, tx + TILE)
-            if not (sk[cy0:cy1, cx0:cx1] > 0.5).any():
-                continue
-            ay0, ay1, ax0, ax1 = max(0, cy0 - apron), min(H, cy1 + apron), max(0, cx0 - apron), min(W, cx1 + apron)
-            cand, st_d, st_b = _detect_tile(
-                crop[ay0:ay1, ax0:ax1], sk[ay0:ay1, ax0:ax1], bd[ay0:ay1, ax0:ax1], protect[ay0:ay1, ax0:ax1], Fw,
-                (cx0 - ax0, cy0 - ay0, cx1 - ax0, cy1 - ay0),
-            )
-            tiles += 1
-            if st_d:
-                sd.append(st_d)
-                sb.append(st_b)
-            if cand.x.size:
-                cand.x += ax0
-                cand.y += ay0
-                parts.append(cand)
+    for p_crop, p_sk, p_bd, p_prot, p_F, p_s, ks, kb, kofs in passes:
+        smax = SIGMAS[min(len(SIGMAS) - 1, max(ks + kb) + 1)]  # + the guard scale
+        apron = int(math.ceil(3.0 * smax * p_F + RING * smax * math.sqrt(2) * p_F + BASE_CONTEXT * p_F)) + 4
+        PH, PW = p_crop.shape[:2]
+        for ty in range(0, PH, TILE):
+            for tx in range(0, PW, TILE):
+                cy0, cy1, cx0, cx1 = ty, min(PH, ty + TILE), tx, min(PW, tx + TILE)
+                if not (p_sk[cy0:cy1, cx0:cx1] > 0.5).any():
+                    continue
+                ay0, ay1, ax0, ax1 = max(0, cy0 - apron), min(PH, cy1 + apron), max(0, cx0 - apron), min(PW, cx1 + apron)
+                cand, st = _detect_tile(
+                    p_crop[ay0:ay1, ax0:ax1], p_sk[ay0:ay1, ax0:ax1], p_bd[ay0:ay1, ax0:ax1], p_prot[ay0:ay1, ax0:ax1], p_F,
+                    (cx0 - ax0, cy0 - ay0, cx1 - ax0, cy1 - ay0), ks, kb, kofs,
+                )
+                tiles += 1
+                if st:
+                    stats.append(st)
+                if cand.x.size:
+                    # Into analysis (work) coordinates, so all candidates share one frame.
+                    cand.x = (cand.x + ax0) * p_s
+                    cand.y = (cand.y + ay0) * p_s
+                    cand.sigma = cand.sigma * p_s
+                    parts.append(cand)
+    H, W = size[1], size[0]
     ana = _Analysis(x0, y0, s, Fw, tiles)
     c = _cat(parts)
     if c.x.size == 0:
@@ -636,9 +777,7 @@ def _analyse(
     # deflated on very clean skin) may differ from the photo's skin-weighted median for that
     # scale by at most -20% / +25%, so every tile is held to about the same standard.
     for kidx in np.unique(c.kidx):
-        bright = kidx >= 100
-        k = int(kidx - 100 if bright else kidx)
-        st = np.array([t[k] for t in (sb if bright else sd) if len(t) > k])
+        st = np.array([t[int(kidx)] for t in stats if int(kidx) in t])
         if st.size == 0:
             continue
         order_s = np.argsort(st[:, 1])
@@ -1040,6 +1179,19 @@ def perfect_skin(
             near = [m for m in marks if (m.x - x) ** 2 + (m.y - y) ** 2 <= (max(m.r, r) * 1.2) ** 2]
             if near:
                 # A known mark: its status comes from measuring it (m.after), not from this hit.
+                continue
+            # Residue: a hit at the edge of a mark that was already corrected (the rest of a
+            # pimple's halo, a dark rim the repair left) is that mark, not a new one. The mark
+            # is widened to cover it and goes back for another pass, or is reported remaining.
+            owners = [m for m in marks if m.attempts > 0 and m.kind not in PROTECTED_KINDS
+                      and (m.x - x) ** 2 + (m.y - y) ** 2 <= (RESIDUE_REACH * m.r + r) ** 2]
+            if owners:
+                m = min(owners, key=lambda o: (o.x - x) ** 2 + (o.y - y) ** 2)
+                if m.r0 is None:
+                    m.r0 = m.r
+                m.r = min(RESIDUE_GROW * m.r0, max(m.r, math.hypot(m.x - x, m.y - y) + r))
+                if m.status == "corrected":
+                    m.status = "remaining"
                 continue
             st = "detected" if conf >= thr else "review"
             if p + 1 >= settings.passes and st == "detected":

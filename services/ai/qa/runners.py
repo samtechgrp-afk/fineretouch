@@ -47,13 +47,20 @@ def _scene_id(i: int, sc: dict) -> str:
     return f"syn{i:02d}-{sc['tone']}-{sc['density']}-{light}-{sc['size']}"
 
 
-def run_synthetic(quick: bool = False, settings: SkinPerfectionSettings | None = None, old: bool = False, log=print) -> list[dict]:
+DEV_SEED_OFFSET = 1000  # tuning scenes: same configurations, different seeds (benchmark seeds stay held out)
+
+
+def run_synthetic(
+    quick: bool = False, settings: SkinPerfectionSettings | None = None, old: bool = False, log=print, dev: bool = False,
+) -> list[dict]:
+    """dev=True runs the tuning scenes (seeds + DEV_SEED_OFFSET). Thresholds are tuned there and the
+    benchmark scenes only confirm, so a change is not fitted to the scenes it is scored on."""
     s = settings or SkinPerfectionSettings(enabled=True)
     rows = []
     for i, sc in enumerate(SYNTHETIC_SCENES):
         if quick and i not in QUICK:
             continue
-        img, truths, F = make_scene(seed=i, **sc)
+        img, truths, F = make_scene(seed=i + (DEV_SEED_OFFSET if dev else 0), **sc)
         h, w = img.shape[:2]
         mask, faces = oval_mask(w, h), [oval_face(w, h)]
         with peak_memory() as mem:
@@ -64,7 +71,7 @@ def run_synthetic(quick: bool = False, settings: SkinPerfectionSettings | None =
         labels = [Label(t.x, t.y, t.r, t.kind) for t in truths]
         score = score_photo(img, out, labels, marks, mask > 0.9, F, ms=ms, peak_mb=mem.peak_mb)
         score["addedMB"] = mem.added_mb
-        row = {"id": _scene_id(i, sc), "tone": FITZ[sc["tone"]], "density": sc["density"],
+        row = {"id": ("dev-" if dev else "") + _scene_id(i, sc), "tone": FITZ[sc["tone"]], "density": sc["density"],
                "lighting": "hard" if sc["lighting"] > 0.3 else "soft", "size": sc["size"], "score": score}
         if old:
             from .legacy import run_old

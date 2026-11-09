@@ -1,4 +1,4 @@
-# Skin Perfection quality assurance (phase 2A)
+# Skin Perfection quality assurance (phases 2A–2B)
 
 This is how Skin Perfection is measured. Each phase of the v0.13 upgrade (2B–2E) has to beat
 the baseline below without a regression.
@@ -11,8 +11,9 @@ accuracy on real photographs. Any general claim waits for the real-photo test sp
 
 ```
 cd services/ai
-python -m scripts.perfection_benchmark --html report.html --json report.json --baseline qa/baselines/synthetic.json
+python -m scripts.perfection_benchmark --html report.html --json report.json --baseline qa/baselines/synthetic-2B.json
 python -m scripts.perfection_benchmark --quick                       # 4 scenes, ~25 s (CI runs this as a test)
+python -m scripts.perfection_benchmark --dev                         # tuning scenes (other seeds)
 python -m scripts.perfection_benchmark --suite real --dataset D:\qa-photos --split validation --html real.html
 python -m scripts.perfection_benchmark --suite real --dataset D:\qa-photos --coverage
 python -m scripts.perfection_benchmark --perf D:\photos\IMG_0012.jpg --json perf.json
@@ -20,6 +21,10 @@ python -m scripts.perfection_benchmark --perf D:\photos\IMG_0012.jpg --json perf
 
 - `--baseline` prints every regression and exits with code 1 when there is one.
 - `tests/test_perfection_qa.py::test_quick_suite_matches_its_baseline` is the same gate in the test suite.
+  Its baseline (`synthetic-quick.json`) is the latest accepted phase, so a later phase cannot
+  give back what an earlier one gained. `synthetic.json` stays the PR #13 reference.
+- **Tuning vs scoring.** `--dev` runs the same 12 configurations with other seeds. Thresholds
+  are tuned on those scenes only; the benchmark scenes confirm the result.
 - `--perf` times one full-resolution render through the export path. It does one warm-up run,
   then two timed runs, and needs no labels. Run it on the target computer (Ryzen 3 7330U) for
   the phase 2E before/after comparison.
@@ -167,3 +172,72 @@ The coverage matrix is:
 - **Phase 2B (tone fairness).** On type VI, whitehead recall must reach ≥ 0.85 (from 0.56) and
   pimple recall ≥ 0.95 (from 0.82). The worst tone's recall must be ≥ 0.9 × the best tone's.
   No tone may lose more than 0.02 precision.
+
+## 6. Phase 2B results: tone-fair detection
+
+### What changed
+
+These are engine changes in `services/ai/app/engines/perfection.py`; the details are in `SKIN_PERFECTION.md`, stages A, D, E and H.
+
+- **Independent texture references.** There is a bright reference for light marks and an a* reference for red marks. Sensor noise is taken out of the luma references.
+- **Tone-fair texture test.** Clearly significant marks outside lit texture can pass against their own kind of texture.
+- **Native-resolution finest scales.** These run when the face is wider than 1100 px.
+- **Pimple head + dome fusion.**
+- **Rim rejection.**
+- **Rescan changes.** Rescan residue now joins its mark. Colourless marks are not boosted in the rescan.
+
+### Root cause, re-measured on the tuning scenes
+
+The dark pore reference grows from 0.013 (tone I) to 0.032 (tone VI) relative luma, while the marks have the same relative contrast. Deep-skin whiteheads (pore ratio 1.8–2.2) and red acne (1.4–2.3) failed the ≥ 2.45 pore test even at 10–25 spreads above the detection threshold.
+
+### Synthetic benchmark (held-out scenes) against the PR #13 baseline
+
+There are no regressions (`--baseline qa/baselines/synthetic.json` exits 0). The full report is saved as `qa/baselines/synthetic-2B.json`.
+
+| Tone | Precision | Recall | Removal | False pos. | Natural kept |
+|---|---|---|---|---|---|
+| **All** | 0.961 → **0.984** | 0.943 → **0.967** | 0.937 → **0.958** | 30 → **12** | 0.995 → 0.995 |
+| I | 1.000 → 1.000 | 0.978 → 0.978 | 0.957 → 0.957 | 0 → 0 | 1.000 |
+| II | 0.952 → 0.975 | 0.969 → 0.969 | 0.963 → 0.963 | 8 → 4 | 0.968 |
+| III | 0.989 → 1.000 | 0.978 → 0.978 | 0.978 → 0.978 | 1 → 0 | 1.000 |
+| IV | 0.988 → 0.988 | 0.963 → 0.981 | 0.956 → 0.975 | 2 → 2 | 1.000 |
+| V | 0.989 → 1.000 | 0.967 → 0.978 | 0.946 → 0.957 | 1 → 0 | 1.000 |
+| **VI** | 0.910 → **0.970** | 0.874 → **0.942** | 0.874 → **0.932** | 18 → **6** | 1.000 |
+
+Type VI by category: whitehead 15 → **24** of 27, pimple 18 → **22** of 22, acne 44 → 45 of 45, dark spot 33 → 33 of 36, blackhead 48 → 48 of 54.
+
+The phase 2B targets are all met on the synthetic benchmark:
+
+| Target | Result | Met |
+|---|---|---|
+| Type VI whitehead recall ≥ 0.85 | 0.89 | ✓ |
+| Type VI pimple recall ≥ 0.95 | 1.00 | ✓ |
+| Worst tone recall ≥ 0.9 × best | 0.942 / 0.981 = 0.96 | ✓ |
+| No tone loses more than 0.02 precision | none loses any | ✓ |
+
+### Real-photo check (no labels yet)
+
+Five already-retouched 30 MP portraits (deep skin, faces 350–740 px wide) were run through first-pass detection. These photos have few real marks left, so extra detections there are mostly false.
+
+| Engine | Marks detected (5 photos) | Change |
+|---|---|---|
+| PR #13 | 976 | |
+| First 2B version, without the lit-texture guard | 1,999 | +105%, mostly sheen and shimmer read as whiteheads and acne |
+| Phase 2B as committed | 989 | +1.3% |
+
+This check is why the guard and the significance condition exist. It does not measure accuracy; the labelled real test set will.
+
+### Time and memory
+
+- **Synthetic:** the mean engine time is 5.4 s → 6.8 s per scene. The native fine-scale pass costs most on the 1600 and 2400 px scenes.
+- **30 MP export path** (CRPixels-1, face 712 px, so no native pass): the median is 47.4 s → **51.1 s** (+8%), with the engine at 33–36 s → 37 s. Peak memory is 6.07 → 6.12 GB.
+
+Phase 2E owns the ≤ 25 s / ≤ 4 GB target.
+
+### Remaining limitations
+
+- **Type VI dark spots.** 3 of 36 are classified as freckles: they are brown, faint and clustered. These go to phase 2C, through cluster separation and Needs Review.
+- **Type VI blackheads.** 6 of 54 are inside the stubble-field logic. These go to phase 2C.
+- **Colourless blemishes on real photos.** The retouched photos still show about 540 "blemish" detections in both PR #13 and 2B. These are likely skin relief. Phase 2C (review state) and 2D (quality checks) address them, and the real validation labels will settle it.
+- **Real-photo evidence.** The native-resolution pass has not run on a real photo yet: none of the available photos has a face wider than 1100 px.
+

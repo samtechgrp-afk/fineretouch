@@ -128,6 +128,7 @@ def main() -> None:
     ap.add_argument("--quick", action="store_true", help="synthetic: 4 scenes (light, deep, deep dense, deep hard light)")
     ap.add_argument("--dataset", help="real: folder with manifest.json, photos and .labels.json files")
     ap.add_argument("--split", choices=("validation", "test"), help="real: score one split only")
+    ap.add_argument("--dev", action="store_true", help="synthetic: the tuning scenes (other seeds), not the benchmark scenes")
     ap.add_argument("--old", action="store_true", help="synthetic: also score the pre-v0.13 tools")
     ap.add_argument("--json", help="write the report as JSON")
     ap.add_argument("--html", help="write the report as HTML")
@@ -160,7 +161,7 @@ def main() -> None:
             return
         rows = run_real(a.dataset, a.split)
     else:
-        rows = run_synthetic(quick=a.quick, old=a.old)
+        rows = run_synthetic(quick=a.quick, old=a.old, dev=a.dev)
     rep = qa_report.build(a.suite, rows, a.label)
     o = rep["overall"]
     print(f"\n{a.suite} ({o['photos']} photos): P {o['precision']:.3f} R {o['recall']:.3f} F1 {o['f1']:.3f} "

@@ -25,6 +25,19 @@
   - breaks results down by skin tone, by category, and by tone × category
   - is compared against a committed baseline (`qa/baselines/`), and a regression fails CI
 - **Synthetic and real reports are separate.** The suite has 12 synthetic scenes. The real-photo suite reads `.labels.json` files and a manifest, splits by subject, and accepts only consented photos. `--coverage` lists the empty cells of the coverage matrix, and `--perf` times a full-resolution render on the current computer.
+- **Phase 2B: tone-fair detection.** The engine now has:
+  - **Separate texture references.** Bright-texture and colour-texture references sit beside the pore reference, with sensor noise taken out.
+  - **Native-resolution finest scales.** These run for faces wider than 1100 px.
+  - **Pimple fusion.** A light head on a red dome is one pimple.
+  - **Rim rejection.**
+  - **Rescan changes.** Rescan residue joins its mark, and colourless relief is not boosted.
+  - **A lit-texture guard.** It keeps sheen and shimmer from passing the new tests on real photos.
+
+  Results on the synthetic benchmark (held-out scenes):
+  - **Type VI:** whiteheads 15 → 24 of 27, pimples 18 → 22 of 22, recall 0.874 → 0.942.
+  - **Overall false positives:** 30 → 12, with no regression on any tone.
+
+  On five already-retouched real photos, detections changed by +1.3%. Thresholds are tuned on separate `--dev` scenes. The 30 MP render is +8% slower (51 s), and phase 2E addresses that.
 - **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)

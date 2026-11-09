@@ -39,9 +39,11 @@ All stages run in the local AI engine on the full-resolution image (CPU, OpenCV 
 new dependencies or models).
 
 - **A. High-resolution analysis.** The skin bounding box is cropped. Faces up to 1100 px wide
-  (`WORK_FACE`) are analysed at native resolution. **Wider faces are currently scaled down to
-  1100 px** (an earlier version of this document said the opposite; corrected in phase 2A and
-  scheduled to change in phase 2B). Body-only photos use the skin area. The crop is processed in 1024 px tiles
+  (`WORK_FACE`) are analysed at native resolution. Wider faces are analysed at 1100 px, **except
+  the 3 finest scales** (blackheads, whiteheads, pore-sized dots), which run on the
+  full-resolution pixels whenever the face is shrunk by more than 10% (phase 2B,
+  `NATIVE_SCALES`). Each pass computes one guard scale beyond its range, so splitting the scales
+  finds the same maxima. Body-only photos use the skin area. The crop is processed in 1024 px tiles
   with an apron, so a mark on a seam is found once (a test covers this).
 - **B. Skin segmentation.** Face skin (MediaPipe landmarks + face parsing) and body skin (selfie
   multiclass segmenter: body skin × not-hair × skin probability), with clothing, hair and
@@ -60,6 +62,10 @@ new dependencies or models).
   - a local shine map, which rejects specular highlights
   - an edge map
   - a pore reference (75th percentile of fine dark peaks), so pores stay pores
+  - since phase 2B, two more texture references measured on the same skin: bright texture (the
+    sheen between pores) and colour texture (a* speckle). Measured sensor noise is taken out of
+    the luma references (Immerkaer estimator), so a noisier deep-skin tile is not held to a
+    stricter standard
   - neighbour density (clusters mean freckles or stubble)
 - **E. Classification.** Each candidate is sorted into one of these:
   - repaired: acne, pimple, blackhead, whitehead, blemish, dark spot, post-acne, small dot
@@ -68,6 +74,17 @@ new dependencies or models).
   - rejected: shine
   Each category has its own sensitivity, and confidence comes from the margin over the threshold.
   Marks below the confidence threshold become "review" and are not corrected automatically.
+  Phase 2B rules (tone fairness):
+  - **Texture test.** A pore-sized mark must beat the dark pore reference (as before), **or**,
+    if it is clearly significant (≥ 2× its detection threshold) and not inside lit texture,
+    a light mark may instead beat the bright texture and a clearly red mark (a* ≥ 4.4) the
+    colour texture.
+  - **Lit-texture guard.** 20 or more light dots within 0.1 × face width is sheen, oil or body
+    shimmer. There only the strict pore test applies and no pimple is fused. Without this guard
+    the new tests doubled detections on real, already-retouched photos.
+  - **Pimple fusion.** A light, red head at the centre of a red dome makes the dome a pimple,
+    and its roundness is judged with the head counted in.
+  - **Rims.** A faint light dot right beside a much darker mark is that mark's rim, not a whitehead.
 - **F. Targeted correction.** Heal-type marks get a push-pull membrane fill from the
   surrounding ring. It is capped so it is never lighter than the ring's median, which prevents
   pale blobs. Pigment-type marks get a pigment-only correction above the pore scale. Acne also
@@ -78,7 +95,10 @@ new dependencies or models).
 - **H. Residual scan.** After every pass, each mark's contrast is measured again. A mark counts as
   corrected only if its contrast fell below 40% of the original (`VERIFY_RATIO`). The scan
   then runs detection again with extra sensitivity (residual slider) to find marks that are
-  still visible. Each mark is attempted at most twice and there are at most 4 passes, so the
+  still visible. Colourless "blemish" marks do not get the extra sensitivity (on its own it
+  finds skin relief). A hit within 1.8 radii of a mark already corrected is that mark's residue:
+  the mark is widened (at most 1.5× its first radius) and corrected again or reported
+  remaining, instead of being counted as a new mark. Each mark is attempted at most twice and there are at most 4 passes, so the
   loop always ends.
 - **I. Quality verification and report.** The report gives:
   - detected, corrected, remaining, review, protected and ignored counts
@@ -173,8 +193,9 @@ Real photo (4480×6720 full-body portrait, face 712 px wide), at defaults:
 
 ### Known limits
 
-- Whiteheads on very deep skin (type VI) are found about half the time, because their bright
-  heads have very low contrast. They show up as "remaining" rather than being missed silently.
+- Whiteheads on very deep skin (type VI) were found about half the time in PR #13. Phase 2B
+  raised this to 24 of 27 on the synthetic benchmark (see `SKIN_PERFECTION_QA.md`); real-photo
+  figures wait for the labelled test set.
 - The 30 MP full-resolution render takes about 40 s on a 4-core CPU. The preview uses the
   2560 px proxy.
 - Synthetic metrics are an upper bound. Real skin needs the review overlay for edge cases.

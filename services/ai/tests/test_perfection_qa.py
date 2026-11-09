@@ -140,10 +140,15 @@ def test_coverage_gaps_and_required_size():
 
 
 def test_memory_probe_sees_an_allocation():
+    import mmap
+
     with peak_memory() as p:
-        a = np.ones((64, 1024, 1024), np.uint8)  # 64 MB, touched
+        # 64 MB of fresh pages, touched (an anonymous mapping: a NumPy array could reuse memory
+        # the allocator already holds from earlier tests, which would not raise the resident set).
+        a = mmap.mmap(-1, 64 * 2**20)
+        a[:: mmap.PAGESIZE] = b"\x01" * len(range(0, 64 * 2**20, mmap.PAGESIZE))
         time.sleep(0.1)  # the probe samples every 10 ms
-        del a
+        a.close()
     assert p.method in ("sampled", "lifetime-peak", "unavailable")
     if p.method == "sampled":
         assert p.added_mb is not None and p.added_mb >= 40
