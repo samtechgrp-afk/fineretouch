@@ -126,7 +126,7 @@ function applyParse(skin: Float32Array, faces: FaceAnalysis[], w: number, h: num
 }
 
 /** Stroke feather at feather = 100, as a share of the stroke radius (masking.STROKE_FEATHER_MAX). */
-const STROKE_FEATHER_MAX = 1.0;
+export const STROKE_FEATHER_MAX = 1.0;
 
 /**
  * User brush strokes as (add, erase) masks, port of masking.rasterize_strokes: size is a radius as

@@ -1,5 +1,5 @@
 import type { Adjustments, ColorStats } from '@fineretouch/shared';
-import { gradingIsDefault, hslIsDefault, resolveAdjustments } from '@fineretouch/shared';
+import { gradingIsDefault, hslIsDefault, layerIsActive, resolveAdjustments, splitSigma } from '@fineretouch/shared';
 import { matchMatrix, toneCurveKnots } from './color';
 import { gradeBounds, gradeUniform, hslUniform } from './colorMixer';
 import {
@@ -12,6 +12,8 @@ import {
   COMPOSITE_FRAG,
   DISPLAY_FRAG,
   DOWNSAMPLE_FRAG,
+  FS_SMOOTH_RATIO,
+  LOCAL_FRAG,
   RETOUCH_FRAG,
   VERT,
   apertureKernel,
@@ -41,6 +43,8 @@ export interface DisplayView {
   showMask: boolean;
   /** Pro studio QA overlay (glare veil, texture retention, garment mask); display only. */
   overlay?: StudioOverlay;
+  /** With showMask: show this local retouch layer's mask instead of the skin mask. */
+  layerMask?: { id: string; dodgeBurn: boolean } | null;
   dpr: number;
   background: [number, number, number];
 }
@@ -68,6 +72,13 @@ export class Renderer {
   private compositeProg: WebGLProgram;
   private studioProg: WebGLProgram;
   private overlayProg: WebGLProgram;
+  private localProg: WebGLProgram;
+  /** The photo as loaded; `src` is the same texture, or the photo with heal / clone strokes. */
+  private orig: WebGLTexture | null = null;
+  /** Local retouch layer masks by layer id (r coverage, g dodge, b burn) and the data uploaded. */
+  private layerTex = new Map<string, { tex: WebGLTexture; data: Uint8Array }>();
+  /** Ping-pong targets for the layer passes and the frequency-separation blurs. */
+  private localTargets: Target[] = [];
   /** Lens region (single channel) for glare reduction, from the eye landmarks. */
   private lens: WebGLTexture | null = null;
   /** Engine segmentation (r clothes, g hair, b person) for the clothing tools. */
@@ -112,6 +123,7 @@ export class Renderer {
     this.compositeProg = this.program(VERT, COMPOSITE_FRAG);
     this.studioProg = this.program(VERT, STUDIO_FRAG);
     this.overlayProg = this.program(VERT, OVERLAY_FRAG);
+    this.localProg = this.program(VERT, LOCAL_FRAG);
     this.vao = gl.createVertexArray()!;
     gl.bindVertexArray(this.vao);
     const buf = gl.createBuffer();
@@ -133,7 +145,7 @@ export class Renderer {
   }
 
   private programs(): WebGLProgram[] {
-    return [this.blurProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg, this.studioProg, this.overlayProg];
+    return [this.blurProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg, this.studioProg, this.overlayProg, this.localProg];
   }
 
   /** Upload a new photo and precompute its four Gaussian bands. */
@@ -142,7 +154,7 @@ export class Renderer {
     this.disposeImageResources();
     this.width = width;
     this.height = height;
-    this.src = this.texture(width, height, image);
+    this.src = this.orig = this.texture(width, height, image);
     this.tmp = this.target(width, height);
     this.bands = [0, 1, 2, 3].map(() => this.target(width, height));
     this.out = this.target(width, height);
@@ -156,7 +168,23 @@ export class Renderer {
     this.setDepth(null);
     this.setLensRoi(null);
     this.setSegmentation(null);
+    this.computeBands();
+  }
 
+  /**
+   * The photo with its heal / clone strokes (RGBA, same size as the source), or null for the
+   * photo as loaded. Every retouch stage then works on it; 'Original' still shows the photo.
+   */
+  setHealedSource(pixels: Uint8Array | Uint8ClampedArray | null): void {
+    if (!this.orig) return;
+    if (this.src && this.src !== this.orig) this.gl.deleteTexture(this.src);
+    this.src = pixels ? this.texture(this.width, this.height, null, new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength)) : this.orig;
+    this.computeBands();
+  }
+
+  private computeBands(): void {
+    const gl = this.gl;
+    const { width, height } = this;
     const L = Math.max(width, height);
     const sigmas = [BLUR_SIGMAS.s0, BLUR_SIGMAS.s1, BLUR_SIGMAS.s2, BLUR_SIGMAS.s3].map((s) => Math.max(s * L, 0.6));
     gl.useProgram(this.blurProg);
@@ -165,6 +193,24 @@ export class Renderer {
       this.blurPass(this.src!, this.tmp!, [1 / width, 0], sigma);
       this.blurPass(this.tmp!.tex, this.bands[i], [0, 1 / height], sigma);
     });
+  }
+
+  /** Upload a local retouch layer's mask (re-uploaded only when the data changed). */
+  setLayerMask(id: string, data: Uint8Array, width: number, height: number): void {
+    const hit = this.layerTex.get(id);
+    if (hit?.data === data) return;
+    if (hit) this.gl.deleteTexture(hit.tex);
+    this.layerTex.set(id, { tex: this.texture(width, height, null, data), data });
+  }
+
+  /** Drop the masks of layers that are gone or inactive. */
+  pruneLayerMasks(keep: Set<string>): void {
+    for (const [id, t] of this.layerTex) {
+      if (!keep.has(id)) {
+        this.gl.deleteTexture(t.tex);
+        this.layerTex.delete(id);
+      }
+    }
   }
 
   /**
@@ -334,6 +380,7 @@ export class Renderer {
     gl.drawArrays(gl.TRIANGLES, 0, 3);
 
     this.base = this.studioPass(adj, info.hasFace) ? this.studio! : this.out;
+    this.base = this.localPass(adj, this.base);
     const b = adj.depthBokeh;
     const maxCoc = (b.blurRadius / 100) * BOKEH_RADIUS_SHARE * Math.max(this.width, this.height) * (b.bokehMultiplier / 100);
     this.shown = b.enabled && this.depth && maxCoc >= 0.75 ? this.bokeh(maxCoc, b.apertureShape, b.highlightBoost / 100) : this.base;
@@ -375,6 +422,60 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE6);
     gl.bindTexture(gl.TEXTURE_3D, null);
     return true;
+  }
+
+  /**
+   * Local retouch layers (v0.10), bottom first, one pass each (ping-pong). Frequency separation
+   * blurs the current image at the layer's split radius (and FS_SMOOTH_RATIO times it) first.
+   */
+  private localPass(adj: Adjustments, input: Target): Target {
+    const layers = adj.localRetouch.layers.filter((l) => layerIsActive(l) && this.layerTex.has(l.id));
+    if (!layers.length) return input;
+    const gl = this.gl;
+    const { width, height } = this;
+    if (!this.localTargets.length) this.localTargets = [0, 1, 2, 3].map(() => this.target(width, height));
+    const [a, b, lowA, lowB] = this.localTargets;
+    let cur = input;
+    for (const l of layers) {
+      const dodgeBurn = l.kind === 'dodgeBurn';
+      const fs = !dodgeBurn && (l.toneSmoothing > 0 || l.texture !== 100);
+      const corr = !dodgeBurn && (l.exposure !== 0 || l.contrast !== 0 || l.saturation !== 0 || l.temperature !== 0 || l.tint !== 0);
+      if (fs) {
+        const sigma = splitSigma(l.splitRadius, Math.max(width, height));
+        gl.useProgram(this.blurProg);
+        gl.viewport(0, 0, width, height);
+        this.blurPass(cur.tex, this.tmp!, [1 / width, 0], sigma);
+        this.blurPass(this.tmp!.tex, lowA, [0, 1 / height], sigma);
+        this.blurPass(cur.tex, this.tmp!, [1 / width, 0], sigma * FS_SMOOTH_RATIO);
+        this.blurPass(this.tmp!.tex, lowB, [0, 1 / height], sigma * FS_SMOOTH_RATIO);
+      }
+      const out = cur === a ? b : a;
+      const p = this.localProg;
+      gl.useProgram(p);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
+      gl.viewport(0, 0, width, height);
+      this.bindTex(p, 'uImg', cur.tex, 0);
+      this.bindTex(p, 'uLowA', lowA.tex, 1);
+      this.bindTex(p, 'uLowB', lowB.tex, 2);
+      this.bindTex(p, 'uLayer', this.layerTex.get(l.id)!.tex, 3);
+      gl.uniform1i(this.loc(p, 'uDodgeBurn'), dodgeBurn ? 1 : 0);
+      gl.uniform1i(this.loc(p, 'uFs'), fs ? 1 : 0);
+      gl.uniform1i(this.loc(p, 'uCorr'), corr ? 1 : 0);
+      gl.uniform1f(this.loc(p, 'uGain'), (l.mask.density / 100) * (l.opacity / 100));
+      gl.uniform3f(this.loc(p, 'uLuma'), l.mask.lumaMin / 100, l.mask.lumaMax / 100, l.mask.lumaSoftness / 100);
+      gl.uniform1f(this.loc(p, 'uSmooth'), l.toneSmoothing / 100);
+      gl.uniform1f(this.loc(p, 'uTexture'), l.texture / 100);
+      gl.uniform1f(this.loc(p, 'uDb'), l.dodgeBurnStrength / 100);
+      gl.uniform1i(this.loc(p, 'uRange'), { all: 0, shadows: 1, midtones: 2, highlights: 3 }[l.dodgeBurnRange]);
+      gl.uniform1f(this.loc(p, 'uExposure'), l.exposure / 100);
+      gl.uniform1f(this.loc(p, 'uContrast'), l.contrast / 100);
+      gl.uniform1f(this.loc(p, 'uSat'), l.saturation / 100);
+      gl.uniform1f(this.loc(p, 'uTemp'), l.temperature / 100);
+      gl.uniform1f(this.loc(p, 'uTint'), l.tint / 100);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      cur = out;
+    }
+    return cur;
   }
 
   /** Render the QA overlay into its own target (display only), or drop it. */
@@ -463,8 +564,11 @@ export class Renderer {
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, cw, ch);
     this.bindTex(p, 'uProcessed', (this.shown ?? this.out).tex, 0);
-    this.bindTex(p, 'uOriginal', this.src, 1);
+    this.bindTex(p, 'uOriginal', this.orig ?? this.src, 1);
     this.bindTex(p, 'uMask', this.mask!, 2);
+    const lm = view.layerMask ? this.layerTex.get(view.layerMask.id) : undefined;
+    gl.uniform1i(this.loc(p, 'uLayerShow'), lm ? (view.layerMask!.dodgeBurn ? 2 : 1) : 0);
+    this.bindTex(p, 'uLayerMask', lm?.tex ?? this.mask!, 5);
     gl.uniform2f(this.loc(p, 'uCanvas'), cw, ch);
     gl.uniform2f(this.loc(p, 'uImage'), this.width, this.height);
     gl.uniform1f(this.loc(p, 'uScale'), view.scale);
@@ -528,8 +632,13 @@ export class Renderer {
 
   private disposeImageResources() {
     const gl = this.gl;
+    if (this.orig && this.orig !== this.src) gl.deleteTexture(this.orig);
     for (const t of [this.src, this.mask, this.edit, this.hairRoi, this.depth, this.lens, this.seg]) if (t) gl.deleteTexture(t);
-    this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.bokehTargets]);
+    for (const t of this.layerTex.values()) gl.deleteTexture(t.tex);
+    this.layerTex.clear();
+    this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.bokehTargets, ...this.localTargets]);
+    this.localTargets = [];
+    this.orig = null;
     this.src = this.mask = this.edit = this.hairRoi = this.depth = this.lens = this.seg = null;
     this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = null;
     this.bands = [];

@@ -10,6 +10,15 @@ import {
   sanitizeAdjustments,
   smartSyncAdjustments,
   withOwnStrokes,
+  createLayer,
+  MAX_LAYERS,
+  DEFAULT_LOCAL_RETOUCH,
+  type HealStroke,
+  type LayerKind,
+  type LayerMask,
+  type LayerStroke,
+  type LocalRetouch,
+  type RetouchLayer,
   type AdjustmentKey,
   type Adjustments,
   type ColorMatch,
@@ -102,6 +111,19 @@ export interface ViewState {
   maskBrush: 'add' | 'erase' | null;
   /** Brush radius as a share of the photo's long edge. */
   brushSize: number;
+  /** Pro tool brush in the viewport (v0.10): healing, clone, or painting the active layer. */
+  proTool: 'heal' | 'clone' | 'layer' | null;
+  /** What a layer brush paints: mask add / erase, or dodge / burn on a dodge & burn layer. */
+  layerBrush: LayerStroke['mode'];
+  activeLayerId: string | null;
+  /** Heal / clone brush hardness and opacity, layer brush flow (0..100). */
+  brushHardness: number;
+  brushOpacity: number;
+  brushFlow: number;
+  /** Clone / heal source point (Alt-click), normalised; null = spot healing picks one. */
+  cloneSource: [number, number] | null;
+  /** Aligned source: the offset of the first stroke from cloneSource, kept for later strokes. */
+  cloneOffset: [number, number] | null;
   /** Pro studio QA overlay in the viewport (never exported). */
   overlay: StudioOverlay;
 }
@@ -147,6 +169,22 @@ export interface EditorState {
   addMaskStroke(stroke: MaskStroke): void;
   /** Remove the active photo's brush strokes (one undo step). */
   clearMaskStrokes(): void;
+  /** Pro tools (v0.10): one heal / clone stroke on the active photo (one undo step). */
+  addHealStroke(stroke: HealStroke): void;
+  clearHealStrokes(): void;
+  /** New local retouch layer on top of the active photo's stack; returns its id. */
+  addLayer(kind: LayerKind): string | null;
+  /** Layer settings and mask options (strokes go through addLayerStroke). `live` skips history. */
+  updateLayer(
+    id: string,
+    patch: Partial<Omit<RetouchLayer, 'id' | 'kind' | 'mask'>> & { mask?: Partial<Omit<LayerMask, 'strokes'>> },
+    opts?: { live?: boolean },
+  ): void;
+  removeLayer(id: string): void;
+  /** Move a layer up (+1, applied later) or down (-1) the stack. */
+  moveLayer(id: string, dir: 1 | -1): void;
+  addLayerStroke(id: string, stroke: LayerStroke): void;
+  clearLayerStrokes(id: string): void;
   setStrayHairRemoval(patch: Partial<StrayHairSettings>, opts?: { live?: boolean; ids?: string[] }): void;
   setDepthBokeh(patch: Partial<DepthBokehSettings>, opts?: { live?: boolean; ids?: string[] }): void;
   setStyleReference(ref: Pick<StyleSyncState, 'referenceImageId' | 'referenceName' | 'referenceUrl' | 'profile' | 'matchedPalette'> | null): void;
@@ -215,6 +253,20 @@ function targets(s: EditorState, ids?: string[]): string[] {
   return s.activeId ? [s.activeId] : [];
 }
 
+/** Change the active photo's local retouch (pro tools); one undo step unless `live`. */
+function editLocal(
+  get: () => EditorState,
+  set: (partial: Partial<EditorState>) => void,
+  fn: (l: LocalRetouch) => LocalRetouch,
+  live = false,
+): void {
+  const s = get();
+  const p = selectActivePhoto(s);
+  if (!p) return;
+  const next = sanitizeAdjustments({ ...p.adjustments, localRetouch: fn(p.adjustments.localRetouch) });
+  set({ photos: mapPhotos(s, [p.id], (q) => (live ? { ...q, adjustments: next } : withHistory(q, next))) });
+}
+
 function mapPhotos(s: EditorState, ids: string[], fn: (p: Photo) => Photo): Record<string, Photo> {
   const photos = { ...s.photos };
   for (const id of ids) if (photos[id]) photos[id] = fn(photos[id]);
@@ -226,7 +278,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   order: [],
   activeId: null,
   selected: [],
-  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false, maskBrush: null, brushSize: 0.03, overlay: 'none' },
+  view: { mode: 'edited', split: 0.5, zoom: 1, panX: 0, panY: 0, showMask: false, maskBrush: null, brushSize: 0.03, overlay: 'none', proTool: null, layerBrush: 'add', activeLayerId: null, brushHardness: 50, brushOpacity: 100, brushFlow: 30, cloneSource: null, cloneOffset: null },
   clipboard: null,
   customPresets: loadCustomPresets(),
   aiOnline: null,
@@ -416,6 +468,69 @@ export const useEditor = create<EditorState>()((set, get) => ({
     set({ photos: mapPhotos(s, [p.id], (q) => withHistory(q, { ...q.adjustments, skinMask: { ...q.adjustments.skinMask, strokes: [] } })) });
   },
 
+  addHealStroke(stroke) {
+    if (stroke.points.length < 2) return;
+    editLocal(get, set, (l) => ({ ...l, heal: [...l.heal, stroke] }));
+  },
+
+  clearHealStrokes() {
+    const p = selectActivePhoto(get());
+    if (!p?.adjustments.localRetouch.heal.length) return;
+    editLocal(get, set, (l) => ({ ...l, heal: [] }));
+  },
+
+  addLayer(kind) {
+    const p = selectActivePhoto(get());
+    if (!p || p.adjustments.localRetouch.layers.length >= MAX_LAYERS) return null;
+    const id = `layer-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e4).toString(36)}`;
+    const same = p.adjustments.localRetouch.layers.filter((l) => l.kind === kind).length;
+    const layer = createLayer(kind, id);
+    if (same) layer.name = `${layer.name} ${same + 1}`;
+    editLocal(get, set, (l) => ({ ...l, layers: [...l.layers, layer] }));
+    set({ view: { ...get().view, activeLayerId: id } });
+    return id;
+  },
+
+  updateLayer(id, patch, opts) {
+    const { mask, ...rest } = patch;
+    editLocal(get, set, (l) => ({
+      ...l,
+      layers: l.layers.map((x) => (x.id === id ? { ...x, ...rest, mask: { ...x.mask, ...mask } } : x)),
+    }), opts?.live);
+  },
+
+  removeLayer(id) {
+    editLocal(get, set, (l) => ({ ...l, layers: l.layers.filter((x) => x.id !== id) }));
+    const v = get().view;
+    if (v.activeLayerId === id) set({ view: { ...v, activeLayerId: null, proTool: v.proTool === 'layer' ? null : v.proTool } });
+  },
+
+  moveLayer(id, dir) {
+    editLocal(get, set, (l) => {
+      const i = l.layers.findIndex((x) => x.id === id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= l.layers.length) return l;
+      const layers = [...l.layers];
+      [layers[i], layers[j]] = [layers[j], layers[i]];
+      return { ...l, layers };
+    });
+  },
+
+  addLayerStroke(id, stroke) {
+    if (stroke.points.length < 2) return;
+    editLocal(get, set, (l) => ({
+      ...l,
+      layers: l.layers.map((x) => (x.id === id ? { ...x, mask: { ...x.mask, strokes: [...x.mask.strokes, stroke] } } : x)),
+    }));
+  },
+
+  clearLayerStrokes(id) {
+    editLocal(get, set, (l) => ({
+      ...l,
+      layers: l.layers.map((x) => (x.id === id ? { ...x, mask: { ...x.mask, strokes: [] } } : x)),
+    }));
+  },
+
   setStrayHairRemoval(patch, opts) {
     const s = get();
     if (opts?.live) {
@@ -582,7 +697,11 @@ export const useEditor = create<EditorState>()((set, get) => ({
       name: name.trim().slice(0, 60),
       description: 'Saved from your edits',
       // Brush strokes belong to this photo's pixels, not to a reusable preset.
-      adjustments: { ...s.photos[s.activeId].adjustments, skinMask: { ...s.photos[s.activeId].adjustments.skinMask, strokes: [] } },
+      adjustments: {
+        ...s.photos[s.activeId].adjustments,
+        skinMask: { ...s.photos[s.activeId].adjustments.skinMask, strokes: [] },
+        localRetouch: DEFAULT_LOCAL_RETOUCH,
+      },
     };
     const customPresets = [...s.customPresets, preset];
     persistCustomPresets(customPresets);

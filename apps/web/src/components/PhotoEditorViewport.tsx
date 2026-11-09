@@ -1,11 +1,14 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { LayerKind, LayerStroke, RetouchLayer } from '@fineretouch/shared';
 import { Renderer, type DisplayView } from '@/engine/renderer';
 import { ensureDepth, hairRoiFor } from '@/lib/depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
 import { editMaskFor, faceMaskFor } from '@/lib/export';
-import { getDepth, getProxy, getSegmentation } from '@/lib/images';
+import { fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
+import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
+import { autoHealSource } from '@/engine/heal';
 import { noiseLevelOf } from '@/lib/noise';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 
@@ -35,6 +38,7 @@ export function PhotoEditorViewport() {
   const lensKeyRef = useRef<string>('');
   const segKeyRef = useRef<string>('');
   const editKeyRef = useRef<unknown>(null);
+  const healRef = useRef<Uint8ClampedArray | null>(null);
   const displayRef = useRef<DisplayView | null>(null);
   const brushCanvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
@@ -86,6 +90,14 @@ export function PhotoEditorViewport() {
         loadedIdRef.current = p.id;
         maskKeyRef.current = hairKeyRef.current = depthKeyRef.current = lensKeyRef.current = segKeyRef.current = '';
         editKeyRef.current = null;
+        healRef.current = null;
+      }
+      // Pro tools: heal / clone strokes replayed on the proxy pixels (stage 0b of the engine).
+      const lr = p.adjustments.localRetouch;
+      const healed = lr.heal.length ? healedPixels(`${p.id}:proxy`, pixelsOf(`${p.id}:proxy`, proxy), proxy.width, proxy.height, lr.heal) : null;
+      if (healRef.current !== healed) {
+        r.setHealedSource(healed);
+        healRef.current = healed;
       }
       const sm = p.adjustments.skinMask;
       const faceKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
@@ -100,6 +112,7 @@ export function PhotoEditorViewport() {
         r.setEdit(edit?.data ?? null, edit?.width, edit?.height);
         editKeyRef.current = edit?.data ?? null;
       }
+      syncLayerMasks(r, p.id, lr, fitSize(proxy.width, proxy.height, LAYER_LONG_EDGE), mask, edit, `${maskKey}:${sm.strokes.length}:${sm.feather}`);
       const hairOn = p.adjustments.strayHairRemoval.enabled;
       const hairKey = `${faceKey}:${hairOn}`;
       if (hairKeyRef.current !== hairKey) {
@@ -140,6 +153,7 @@ export function PhotoEditorViewport() {
         split: v.split,
         showMask: v.showMask,
         overlay: v.overlay,
+        layerMask: v.proTool === 'layer' && v.activeLayerId ? layerView(lr.layers, v.activeLayerId) : null,
         dpr: g.dpr,
         background: BG,
       };
@@ -257,7 +271,22 @@ export function PhotoEditorViewport() {
 
   const drag = useRef<{ kind: 'pan' | 'split'; x: number; y: number; panX: number; panY: number } | null>(null);
   /** Stroke being painted: normalised image points (committed as one undo step on release). */
-  const stroke = useRef<{ points: number[] } | null>(null);
+  const stroke = useRef<{ points: number[]; offset: [number, number] | null } | null>(null);
+  const activeLayer = photo && view.activeLayerId ? photo.adjustments.localRetouch.layers.find((l) => l.id === view.activeLayerId) : undefined;
+  /** Which brush the pointer paints with, if any. */
+  const brush: BrushKind | null = view.maskBrush
+    ? view.maskBrush
+    : view.proTool === 'heal' || view.proTool === 'clone'
+      ? view.proTool
+      : view.proTool === 'layer' && activeLayer
+        ? layerStrokeMode(activeLayer.kind, view.layerBrush)
+        : null;
+  /** Source offset for the next heal / clone stroke starting at pt (aligned once set). */
+  const sourceOffsetFor = (pt: [number, number]): [number, number] | null => {
+    if (view.cloneOffset) return view.cloneOffset;
+    if (view.cloneSource) return [view.cloneSource[0] - pt[0], view.cloneSource[1] - pt[1]];
+    return null;
+  };
 
   /** CSS px in the viewport -> normalised image coordinates (null outside the photo). */
   const toImage = (cssX: number, cssY: number): [number, number] | null => {
@@ -291,7 +320,25 @@ export function PhotoEditorViewport() {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     if (!painting) g.clearRect(0, 0, c.width, c.height);
     const rad = brushCssRadius();
-    const colour = view.maskBrush === 'erase' ? 'rgba(80,160,255,0.35)' : 'rgba(255,64,90,0.35)';
+    const colour = BRUSH_COLOURS[brush ?? 'add'];
+    // Heal / clone: where the source is sampled from (follows the brush once aligned).
+    const d = displayRef.current;
+    const r = rendererRef.current;
+    if ((brush === 'heal' || brush === 'clone') && d && r && !painting) {
+      const pt = toImage(x, y);
+      const off = pt ? (stroke.current?.offset ?? sourceOffsetFor(pt)) : null;
+      g.strokeStyle = 'rgba(120,255,170,0.9)';
+      g.setLineDash([4, 3]);
+      g.beginPath();
+      if (off) g.arc(x + (off[0] * r.width * d.scale) / d.dpr, y + (off[1] * r.height * d.scale) / d.dpr, rad, 0, Math.PI * 2);
+      else if (view.cloneSource) {
+        const sx = (view.cloneSource[0] * r.width * d.scale + d.offsetX) / d.dpr;
+        const sy = (view.cloneSource[1] * r.height * d.scale + d.offsetY) / d.dpr;
+        g.arc(sx, sy, rad, 0, Math.PI * 2);
+      }
+      g.stroke();
+      g.setLineDash([]);
+    }
     if (painting) {
       g.fillStyle = colour;
       g.beginPath();
@@ -312,10 +359,21 @@ export function PhotoEditorViewport() {
 
   const onPointerDown = (e: React.PointerEvent) => {
     const rect = wrapRef.current!.getBoundingClientRect();
-    if (view.maskBrush && photo && e.button === 0) {
+    if (brush && photo && e.button === 0) {
       const pt = toImage(e.clientX - rect.left, e.clientY - rect.top);
       if (!pt) return;
-      stroke.current = { points: [pt[0], pt[1]] };
+      if ((brush === 'heal' || brush === 'clone') && e.altKey) {
+        // Alt-click sets the source; the first stroke after it fixes the (aligned) offset.
+        setView({ cloneSource: pt, cloneOffset: null });
+        return;
+      }
+      let offset: [number, number] | null = null;
+      if (brush === 'heal' || brush === 'clone') {
+        offset = sourceOffsetFor(pt);
+        if (!offset && brush === 'clone') return; // clone needs a source (Alt-click)
+        if (offset && !view.cloneOffset) setView({ cloneOffset: offset });
+      }
+      stroke.current = { points: [pt[0], pt[1]], offset };
       (e.target as Element).setPointerCapture(e.pointerId);
       clearBrush();
       drawBrush(e.clientX - rect.left, e.clientY - rect.top, true);
@@ -330,7 +388,7 @@ export function PhotoEditorViewport() {
   };
   const onPointerMove = (e: React.PointerEvent) => {
     const rect = wrapRef.current!.getBoundingClientRect();
-    if (view.maskBrush) {
+    if (brush) {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const st = stroke.current;
@@ -354,10 +412,30 @@ export function PhotoEditorViewport() {
     drag.current = null;
     const st = stroke.current;
     stroke.current = null;
-    if (st && view.maskBrush) {
-      useEditor.getState().addMaskStroke({ mode: view.maskBrush, size: view.brushSize, points: st.points.map((v) => Math.round(v * 1e4) / 1e4) });
-      clearBrush();
+    if (!st || !brush || !photo) return;
+    const points = st.points.map((v) => Math.round(v * 1e4) / 1e4);
+    const store = useEditor.getState();
+    if (brush === 'heal' || brush === 'clone') {
+      let offset = st.offset;
+      if (!offset) {
+        // Spot healing: no source set, so pick one around the stroke on the current pixels.
+        const proxy = getProxy(photo.id);
+        if (proxy) {
+          const base = pixelsOf(`${photo.id}:proxy`, proxy);
+          const cur = healedPixels(`${photo.id}:proxy`, base, proxy.width, proxy.height, photo.adjustments.localRetouch.heal) ?? base;
+          offset = autoHealSource(cur, proxy.width, proxy.height, view.brushSize, points);
+        }
+      }
+      if (offset) {
+        const o: [number, number] = [Math.round(offset[0] * 1e5) / 1e5, Math.round(offset[1] * 1e5) / 1e5];
+        store.addHealStroke({ mode: brush, size: view.brushSize, hardness: view.brushHardness, opacity: view.brushOpacity, offset: o, points });
+      }
+    } else if (view.maskBrush) {
+      store.addMaskStroke({ mode: view.maskBrush, size: view.brushSize, points });
+    } else if (activeLayer) {
+      store.addLayerStroke(activeLayer.id, { mode: brush, size: view.brushSize, flow: view.brushFlow, points });
     }
+    clearBrush();
   };
 
   const pct = photo ? Math.round(zoomPercent(view.zoom)) : null;
@@ -366,13 +444,13 @@ export function PhotoEditorViewport() {
     <div
       ref={wrapRef}
       className="relative h-full w-full touch-none select-none overflow-hidden bg-ink-950"
-      style={{ cursor: view.maskBrush ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
+      style={{ cursor: brush ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onPointerLeave={() => !stroke.current && clearBrush()}
-      onDoubleClick={() => !view.maskBrush && (view.zoom === 1 ? zoomAt(100 / zoomPercent(1)) : setView({ zoom: 1, panX: 0, panY: 0 }))}
+      onDoubleClick={() => !brush && (view.zoom === 1 ? zoomAt(100 / zoomPercent(1)) : setView({ zoom: 1, panX: 0, panY: 0 }))}
       data-testid="viewport"
     >
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-label="Photo preview" />
@@ -396,6 +474,28 @@ export function PhotoEditorViewport() {
       )}
     </div>
   );
+}
+
+type BrushKind = 'add' | 'erase' | 'dodge' | 'burn' | 'heal' | 'clone';
+
+const BRUSH_COLOURS: Record<BrushKind, string> = {
+  add: 'rgba(255,64,90,0.35)',
+  erase: 'rgba(80,160,255,0.35)',
+  dodge: 'rgba(255,220,90,0.35)',
+  burn: 'rgba(60,80,200,0.4)',
+  heal: 'rgba(120,255,170,0.3)',
+  clone: 'rgba(190,120,255,0.3)',
+};
+
+/** A dodge & burn layer paints dodge / burn (or erases); other layers paint their mask. */
+function layerStrokeMode(kind: LayerKind, mode: LayerStroke['mode']): LayerStroke['mode'] {
+  if (kind === 'dodgeBurn') return mode === 'add' ? 'dodge' : mode;
+  return mode === 'dodge' || mode === 'burn' ? 'add' : mode;
+}
+
+function layerView(layers: readonly RetouchLayer[], id: string): DisplayView['layerMask'] {
+  const l = layers.find((x) => x.id === id);
+  return l ? { id: l.id, dodgeBurn: l.kind === 'dodgeBurn' } : null;
 }
 
 function Tag({ children, className }: { children: React.ReactNode; className: string }) {

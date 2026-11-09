@@ -11,6 +11,7 @@
 
 import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControls } from './effects.js';
 import { DEFAULT_SKIN_MASK, sanitizeSkinMask, skinMaskIsDefault, withOwnStrokes, type SkinMaskSettings } from './skinMask.js';
+import { DEFAULT_LOCAL_RETOUCH, localRetouchIsDefault, sanitizeLocalRetouch, type LocalRetouch } from './localRetouch.js';
 
 export interface SliderSpec {
   key: AdjustmentKey;
@@ -251,6 +252,8 @@ export interface Adjustments {
   globalStrength: number;
   /** v0.8 skin mask refinement: AI face parsing and the user's add / erase brush strokes. */
   skinMask: SkinMaskSettings;
+  /** v0.10 pro tools: healing / clone strokes and local retouch layers (localRetouch.ts). */
+  localRetouch: LocalRetouch;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -270,6 +273,7 @@ export type AdjustmentKey = Exclude<
   | 'effects'
   | 'globalStrength'
   | 'skinMask'
+  | 'localRetouch'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -327,6 +331,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   effects: DEFAULT_EFFECTS,
   globalStrength: 100,
   skinMask: DEFAULT_SKIN_MASK,
+  localRetouch: DEFAULT_LOCAL_RETOUCH,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -456,6 +461,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   out.effects = sanitizeEffects(src.effects);
   out.globalStrength = num(src.globalStrength, 0, 100, 100);
   out.skinMask = sanitizeSkinMask(src.skinMask);
+  out.localRetouch = sanitizeLocalRetouch(src.localRetouch);
   return out;
 }
 
@@ -530,7 +536,8 @@ export function isDefault(adj: Adjustments): boolean {
     adj.lut === null &&
     adj.globalStrength === 100 &&
     effectsAreDefault(adj.effects) &&
-    skinMaskIsDefault(adj.skinMask)
+    skinMaskIsDefault(adj.skinMask) &&
+    localRetouchIsDefault(adj.localRetouch)
   );
 }
 
@@ -720,3 +727,4 @@ export * from './style.js';
 export * from './lut.js';
 export * from './effects.js';
 export * from './skinMask.js';
+export * from './localRetouch.js';

@@ -75,8 +75,15 @@ export function skinMaskIsDefault(m: SkinMaskSettings): boolean {
 
 /**
  * Brush strokes belong to one photo's pixels. When settings are copied, synced or applied as a
- * preset, the target keeps its own strokes and only the mask options travel.
+ * preset, the target keeps its own strokes and only the mask options travel. The pro tools
+ * (healing, clone and local retouch layers, localRetouch.ts) are all pixel-specific, so the
+ * target keeps its own localRetouch whole.
  */
-export function withOwnStrokes<T extends { skinMask: SkinMaskSettings }>(next: T, target: { skinMask: SkinMaskSettings }): T {
-  return { ...next, skinMask: { ...next.skinMask, strokes: target.skinMask.strokes } };
+export function withOwnStrokes<T extends { skinMask: SkinMaskSettings; localRetouch?: unknown }>(
+  next: T,
+  target: { skinMask: SkinMaskSettings; localRetouch?: unknown },
+): T {
+  const out = { ...next, skinMask: { ...next.skinMask, strokes: target.skinMask.strokes } };
+  if (target.localRetouch !== undefined) out.localRetouch = target.localRetouch as T['localRetouch'];
+  return out;
 }
