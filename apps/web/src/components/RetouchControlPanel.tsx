@@ -7,7 +7,7 @@ import { extractPalette } from '@/engine/color';
 import { profileFromRgba } from '@/engine/style';
 import { bitmapPixels, decodeUpright, fitSize, newId } from '@/lib/images';
 import { IMPORT_ACCEPT, isRawFileName } from '@/lib/rawParser';
-import { useEditor, type DepthState, type Photo } from '@/lib/store';
+import { useEditor, type DepthState, type Photo, type SegmentState } from '@/lib/store';
 import { Heading, Metric, RangeRow, Segmented, Toggle } from './panels/controls';
 
 /**
@@ -20,6 +20,7 @@ export function RetouchControlPanel({ photo }: { photo: Photo }) {
     <div className="space-y-5">
       <AiAssist photo={photo} />
       <SkinBoost photo={photo} />
+      <SkinMask photo={photo} hasFace={hasFace} />
       <StrayHair photo={photo} hasFace={hasFace} />
       <Bokeh photo={photo} />
       <StyleSync />
@@ -95,6 +96,98 @@ function SkinBoost({ photo }: { photo: Photo }) {
           Protect skin tone
         </span>
         <Toggle checked={guard} onChange={(v) => updateAdjustments({ skinToneGuard: v })} label="Protect skin tone" />
+      </div>
+    </section>
+  );
+}
+
+const PARSE_NOTE: Record<SegmentState, string> = {
+  none: 'AI face parsing finds skin to the hairline, ears and jaw and keeps hair out.',
+  pending: 'Parsing the face…',
+  ready: 'Skin from AI face parsing (face, hairline, ears; hair excluded).',
+  unavailable: 'AI face parsing needs the engine and its segmentation model; using face landmarks only.',
+};
+
+/** Skin mask refinement: AI face parsing, neck & body skin, and an add / erase brush. */
+function SkinMask({ photo, hasFace }: { photo: Photo; hasFace: boolean }) {
+  const setSkinMask = useEditor((s) => s.setSkinMask);
+  const clearStrokes = useEditor((s) => s.clearMaskStrokes);
+  const beginEdit = useEditor((s) => s.beginEdit);
+  const view = useEditor((s) => s.view);
+  const setView = useEditor((s) => s.setView);
+  const sm = photo.adjustments.skinMask;
+  const brush = view.maskBrush ?? 'off';
+  return (
+    <section>
+      <Heading
+        title="Skin mask"
+        hint={
+          hasFace
+            ? sm.useSegmentation
+              ? PARSE_NOTE[photo.parseState]
+              : 'Face landmarks and skin colour only.'
+            : 'No face found: the skin tools follow skin colour. Paint with Add to include an area.'
+        }
+      />
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-ink-300" title="Use the AI face parsing model for the skin mask (runs on this computer's engine; nothing is uploaded elsewhere).">
+            AI face parsing
+          </span>
+          <Toggle checked={sm.useSegmentation} disabled={!hasFace} onChange={(v) => setSkinMask({ useSegmentation: v }, { ids: [photo.id] })} label="AI face parsing" />
+        </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-ink-300" title="Also retouch the neck, chest and arms found by face parsing.">
+            Include neck &amp; body
+          </span>
+          <Toggle
+            checked={sm.includeBodySkin}
+            disabled={!hasFace || !sm.useSegmentation}
+            onChange={(v) => setSkinMask({ includeBodySkin: v }, { ids: [photo.id] })}
+            label="Include neck and body"
+          />
+        </div>
+        <Segmented<'off' | 'add' | 'erase'>
+          label="Mask brush"
+          value={brush}
+          options={[
+            ['off', 'No brush'],
+            ['add', 'Add skin'],
+            ['erase', 'Protect'],
+          ]}
+          onChange={(v) => setView({ maskBrush: v === 'off' ? null : v, showMask: v === 'off' ? view.showMask : true })}
+        />
+        <RangeRow
+          label="Brush size"
+          value={view.brushSize * 100}
+          min={0.5}
+          max={15}
+          step={0.5}
+          format={(v) => `${v.toFixed(1)}%`}
+          hint="Brush radius as a share of the photo's long edge"
+          onStart={() => undefined}
+          onChange={(v) => setView({ brushSize: v / 100 })}
+        />
+        <RangeRow
+          label="Stroke feather"
+          value={sm.feather}
+          min={0}
+          max={100}
+          hint="Softness of the brush strokes' edges"
+          onStart={() => beginEdit()}
+          onChange={(v) => setSkinMask({ feather: v }, { live: true })}
+        />
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] text-ink-400" data-testid="stroke-count">
+            {sm.strokes.length ? `${sm.strokes.length} stroke${sm.strokes.length === 1 ? '' : 's'} on this photo` : 'No brush strokes'}
+          </span>
+          <button className="btn" disabled={!sm.strokes.length} onClick={() => clearStrokes()}>
+            Clear strokes
+          </button>
+        </div>
+        <p className="text-[11px] leading-snug text-ink-400">
+          Add skin paints in areas the AI missed; Protect keeps an area untouched by every skin tool. Strokes stay with this photo and are not copied by presets or sync. Press M to show the mask, Esc to put the brush down.
+        </p>
       </div>
     </section>
   );

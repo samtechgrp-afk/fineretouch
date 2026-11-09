@@ -1,4 +1,4 @@
-# Retouch control system (v0.7) and upgrade audit
+# Retouch control system (v0.7), skin masks (v0.8) and upgrade audit
 
 This document has two parts: the Phase 1 audit of FineRetouch against the professional
 portrait-retouching specification, and the Phase 2 deliverable (per-effect strength,
@@ -45,7 +45,7 @@ portrait-retouching specification, and the Phase 2 deliverable (per-effect stren
 ### Plan
 
 1. **Phase 2 (this change):** retouch control system.
-2. **Phase 3:** face parsing for semantic masks (a BiSeNet-class ONNX model, run on CPU through `cv2.dnn` or ONNX Runtime, after a licence check of the weights), editable masks.
+2. **Phase 3 (done, see Part 3):** face parsing for semantic masks, editable masks. The licence check ruled out the public BiSeNet / CelebAMask-HQ weights (non-commercial), so the bundled MediaPipe selfie multiclass model (Apache-2.0) is used.
 3. **Phase 4:** split the skin engine; dedicated dark-spot (pigmentation) and redness tools, noise reduction, under-eye texture.
 4. **Later phases:** brushes (heal, clone, dodge and burn), project files, presets per style, the NL plan engine, tiled rendering, optional DirectML after testing on the target hardware.
 
@@ -147,3 +147,54 @@ strength. Every change is one undo step; opacity and global strength drags are o
 - `services/ai/tests/test_effects.py`: the same vectors and curve table (TS/Python parity), resolve, and render tests: 2x/3x increase the change monotonically, 30%×2 renders identically to 60%×1, disabling equals the slider at 0, 50% opacity equals 50% global, global 0 equals no retouch, the spot multiplier heals more spots.
 - `apps/web/src/lib/effects.store.test.ts` and `editPersistence.test.ts`: store actions, undo, reset of structured effects, presets carrying controls, autosave round-trip, eviction and corrupt storage.
 - Browser check (Chromium, SwiftShader WebGL2, real MediaPipe face analysis): 2× and 3× change the rendered preview, the readout shows the effective value, and edits come back after a reload and re-import.
+
+## Part 3: face parsing and editable skin masks (v0.8)
+
+### Model
+
+MediaPipe selfie multiclass segmenter (`selfie_multiclass_256x256.tflite`, Apache-2.0), already bundled for bokeh and stray hair. Classes: background, hair, body skin, face skin, clothes, accessories. It runs on CPU on a ≤512 px proxy: 0.57 s on the test portrait in the cloud container (not yet timed on the Ryzen 3 7330U). Face-parsing models with separate brow / eye / lip / beard classes (BiSeNet on CelebAMask-HQ) were not used because their weights are licensed for non-commercial use only.
+
+### How the skin mask is built
+
+1. Landmark mask (unchanged): face oval minus eyes, brows and lips, feathered.
+2. With parsing (`skinMask.useSegmentation`, default on): `skin = max(landmark, blur(faceSkin × faceZone) × featureCut)`. `faceZone` is an ellipse one face width around each detected face, so a face on a poster in the background is not retouched. `featureCut` keeps eyes, brows and lips out.
+3. `includeBodySkin`: adds the body-skin class (neck, chest, arms) the same way.
+4. Hair: `skin × (1 − smoothstep(0.35, 0.75, hair))`.
+5. The skin-colour gate runs as before, then the user's strokes: `skin = max(skin, add) × (1 − erase)`. Strokes are absolute: Protect wins over everything, Add works on any colour.
+
+Engine: `services/ai/app/masking.py`, `pipeline.build_masks` and `render`. Preview: `apps/web/src/engine/masks.ts` (`buildFaceMask` with parse pixels, `rasterizeMaskStrokes`, `buildEditMask`), a stroke texture (`uEdit`, r = add, g = erase) in the retouch shader, and in the mask overlay.
+
+### Data model
+
+```ts
+skinMask: {
+  useSegmentation: boolean;  // default true
+  includeBodySkin: boolean;  // default false
+  feather: number;           // 0..100, stroke edge softness up to the stroke radius
+  strokes: { mode: 'add' | 'erase'; size: number /* radius, share of long edge */; points: number[] /* normalised x,y */ }[];
+}
+```
+
+Limits: 200 strokes, 4,000 points per stroke. Old edits get the defaults.
+
+### Status
+
+| Requirement | Status |
+| :--- | :--- |
+| Face detection and landmarks | Implemented (unchanged, MediaPipe Face Landmarker) |
+| Semantic skin: face skin, neck / body skin, hair excluded | Implemented (engine and preview) |
+| Clothing class | Implemented earlier for the clothing tools; not part of the skin mask |
+| Eyes, brows, lips, teeth, nostrils protected | Implemented through landmarks (the segmenter has no such classes) |
+| Beard / facial hair as its own class | Partial: dark facial hair usually reads as hair and is excluded; light stubble may stay in the skin mask. Use Protect |
+| Mask brush: add, erase (protect), size, feather, clear, show | Implemented |
+| Strokes saved with the edit, one undo step each | Implemented (autosave, undo / redo) |
+| Invert mask, per-tool masks, lasso / gradient masks | Planned (comes with the operation-node layer system) |
+| Strokes on the cloud batch worker | Implemented: the worker posts the same `Adjustments` to the engine |
+
+### Tests
+
+- `services/ai/tests/test_masking.py`: stroke rasterising and feathering, erase wins over add, an erase stroke keeps an area pixel-identical under five skin tools, an add stroke retouches a grey (non-skin) area, parsing extends skin and removes hair, body skin only when asked, parsing ignored when switched off.
+- `packages/shared/src/skinMask.test.ts`: sanitising and limits, `isDefault`, presets keep the photo's own strokes.
+- `apps/web/src/engine/skinMask.test.ts`: the TypeScript port of the parse branch (extension, poster ignored, hair cut, body skin) and of the stroke rasteriser.
+- `apps/web/src/lib/skinMask.store.test.ts`: one undo step per stroke, clear and undo, copy / paste / sync / presets never move strokes.
+- Browser check (Chromium, SwiftShader WebGL2, the real engine on the MediaPipe sample portrait): the preview fetches `/v1/parse`, the panel reports "Skin from AI face parsing", a Protect stroke across the cheeks clears the mask overlay there, an Add stroke adds the flag area, Ctrl+Z removes the last stroke.

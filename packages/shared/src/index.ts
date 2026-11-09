@@ -10,6 +10,7 @@
  */
 
 import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControls } from './effects.js';
+import { DEFAULT_SKIN_MASK, sanitizeSkinMask, skinMaskIsDefault, withOwnStrokes, type SkinMaskSettings } from './skinMask.js';
 
 export interface SliderSpec {
   key: AdjustmentKey;
@@ -242,6 +243,8 @@ export interface Adjustments {
   effects: EffectControls;
   /** 0..100: scales every retouch effect's contribution (not light / colour). */
   globalStrength: number;
+  /** v0.8 skin mask refinement: AI face parsing and the user's add / erase brush strokes. */
+  skinMask: SkinMaskSettings;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -260,6 +263,7 @@ export type AdjustmentKey = Exclude<
   | 'lut'
   | 'effects'
   | 'globalStrength'
+  | 'skinMask'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -313,6 +317,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   lut: null,
   effects: DEFAULT_EFFECTS,
   globalStrength: 100,
+  skinMask: DEFAULT_SKIN_MASK,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -429,6 +434,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   out.lut = sanitizeLookLut(src.lut);
   out.effects = sanitizeEffects(src.effects);
   out.globalStrength = num(src.globalStrength, 0, 100, 100);
+  out.skinMask = sanitizeSkinMask(src.skinMask);
   return out;
 }
 
@@ -502,7 +508,8 @@ export function isDefault(adj: Adjustments): boolean {
     !adj.clothing.enabled &&
     adj.lut === null &&
     adj.globalStrength === 100 &&
-    effectsAreDefault(adj.effects)
+    effectsAreDefault(adj.effects) &&
+    skinMaskIsDefault(adj.skinMask)
   );
 }
 
@@ -589,7 +596,8 @@ export const BUILT_IN_PRESETS: readonly Preset[] = [
 /** Apply a preset on top of a photo's adjustments. `replace` starts from defaults first. */
 export function applyPreset(current: Adjustments, preset: Preset, mode: 'merge' | 'replace' = 'replace'): Adjustments {
   const base = mode === 'replace' ? { ...DEFAULT_ADJUSTMENTS } : { ...current };
-  return sanitizeAdjustments({ ...base, ...preset.adjustments });
+  // Brush strokes belong to the photo, never to the preset.
+  return withOwnStrokes(sanitizeAdjustments({ ...base, ...preset.adjustments }), current);
 }
 
 // ---------------------------------------------------------------------------
@@ -690,3 +698,4 @@ export const MAX_BATCH_ITEMS = 5000;
 export * from './style.js';
 export * from './lut.js';
 export * from './effects.js';
+export * from './skinMask.js';

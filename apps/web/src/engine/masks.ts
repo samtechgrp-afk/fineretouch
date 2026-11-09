@@ -1,4 +1,4 @@
-import type { FaceAnalysis, Point } from '@fineretouch/shared';
+import type { FaceAnalysis, MaskStroke, Point } from '@fineretouch/shared';
 
 /**
  * Rasterise the AI service's normalised face regions into one RGBA mask
@@ -8,7 +8,19 @@ import type { FaceAnalysis, Point } from '@fineretouch/shared';
  * Pure CPU (scanline fill + 3x box blur) so it runs in workers, tests and
  * browsers without Canvas `filter` support.
  */
-export function buildFaceMask(faces: FaceAnalysis[], width: number, height: number): Uint8Array {
+/** Face parsing from the engine (POST /v1/parse) at the mask's size: RGBA, r face skin, g body skin, b hair. */
+export interface FaceParsePixels {
+  data: Uint8Array | Uint8ClampedArray;
+  /** Add neck / chest / arm skin (SkinMaskSettings.includeBodySkin). */
+  includeBody: boolean;
+}
+
+/** Semantic face skin only counts within this many face widths of a face (masking.FACE_REACH). */
+const FACE_REACH = 1.0;
+/** Hair probability ramp that removes skin (masking.HAIR_CUT). */
+const HAIR_CUT: [number, number] = [0.35, 0.75];
+
+export function buildFaceMask(faces: FaceAnalysis[], width: number, height: number, parse?: FaceParsePixels | null): Uint8Array {
   const n = width * height;
   const skin = new Float32Array(n);
   const eyes = new Float32Array(n);
@@ -41,6 +53,7 @@ export function buildFaceMask(faces: FaceAnalysis[], width: number, height: numb
 
   if (faces.length) {
     gaussianApprox(skin, width, height, faceW * 0.025);
+    if (parse && parse.data.length === n * 4) applyParse(skin, faces, width, height, faceW, parse);
     gaussianApprox(eyes, width, height, faceW * 0.006);
     gaussianApprox(under, width, height, faceW * 0.02);
     gaussianApprox(mouth, width, height, faceW * 0.004);
@@ -57,6 +70,133 @@ export function buildFaceMask(faces: FaceAnalysis[], width: number, height: numb
 }
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const smoothstep = (e0: number, e1: number, x: number) => {
+  const t = clamp01((x - e0) / (e1 - e0));
+  return t * t * (3 - 2 * t);
+};
+
+/**
+ * Port of the parse branch of pipeline.build_masks: semantic face skin near each face (and body
+ * skin when asked) extends the landmark mask, eyes / brows / lips stay cut out, and hair lying
+ * across the face removes skin.
+ */
+function applyParse(skin: Float32Array, faces: FaceAnalysis[], w: number, h: number, faceW: number, parse: FaceParsePixels) {
+  const n = w * h;
+  const px = (pts: Point[]) => pts.map(([x, y]) => [x * w, y * h] as [number, number]);
+  const features = new Float32Array(n);
+  const zone = new Float32Array(n);
+  for (const f of faces) {
+    const r = f.regions;
+    for (const region of [r.leftEye, r.rightEye, r.leftBrow, r.rightBrow, r.lips]) {
+      if (region.length < 3) continue;
+      const poly = px(region);
+      fillPolygon(features, w, h, poly, 1);
+      strokePolygon(features, w, h, poly, Math.max(1, faceW * 0.03), 1); // dilate like cv2.dilate
+    }
+    const [bx, by, bw, bh] = f.box;
+    const cx = (bx + bw / 2) * w;
+    const cy = (by + bh / 2) * h;
+    const ax = Math.max(1, FACE_REACH * bw * w);
+    const ay = Math.max(1, FACE_REACH * bh * h * 1.1);
+    const ell: [number, number][] = Array.from({ length: 64 }, (_, i) => {
+      const t = (i / 64) * Math.PI * 2;
+      return [cx + Math.cos(t) * ax, cy + Math.sin(t) * ay];
+    });
+    fillPolygon(zone, w, h, ell, 1);
+  }
+  gaussianApprox(features, w, h, faceW * 0.006);
+  const face = new Float32Array(n);
+  const body = new Float32Array(n);
+  const hair = new Float32Array(n);
+  const d = parse.data;
+  for (let i = 0; i < n; i++) {
+    face[i] = (d[i * 4] / 255) * zone[i];
+    body[i] = parse.includeBody ? d[i * 4 + 1] / 255 : 0;
+    hair[i] = d[i * 4 + 2] / 255;
+  }
+  const s = faceW * 0.004;
+  gaussianApprox(face, w, h, s);
+  if (parse.includeBody) gaussianApprox(body, w, h, s);
+  gaussianApprox(hair, w, h, s);
+  for (let i = 0; i < n; i++) {
+    const cut = 1 - clamp01(features[i]);
+    const v = Math.max(skin[i], face[i] * cut, body[i] * cut);
+    skin[i] = v * (1 - smoothstep(HAIR_CUT[0], HAIR_CUT[1], hair[i]));
+  }
+}
+
+/** Stroke feather at feather = 100, as a share of the stroke radius (masking.STROKE_FEATHER_MAX). */
+const STROKE_FEATHER_MAX = 1.0;
+
+/**
+ * User brush strokes as (add, erase) masks, port of masking.rasterize_strokes: size is a radius as
+ * a share of the long edge, points are normalised; each kind is feathered by up to its radius.
+ */
+export function rasterizeMaskStrokes(strokes: readonly MaskStroke[], w: number, h: number, feather: number): { add: Float32Array; erase: Float32Array } {
+  const add = new Float32Array(w * h);
+  const erase = new Float32Array(w * h);
+  const L = Math.max(w, h);
+  const f = clamp01(feather / 100) * STROKE_FEATHER_MAX;
+  for (const [kind, canvas] of [['add', add], ['erase', erase]] as const) {
+    let sigma = 0;
+    for (const s of strokes) {
+      if (s.mode !== kind) continue;
+      const r = Math.max(0.5, s.size * L);
+      const pts: [number, number][] = [];
+      for (let i = 0; i + 1 < s.points.length; i += 2) pts.push([s.points[i] * w, s.points[i + 1] * h]);
+      if (!pts.length) continue;
+      if (pts.length === 1) stampDisc(canvas, w, h, pts[0][0], pts[0][1], r);
+      for (let i = 1; i < pts.length; i++) stampCapsule(canvas, w, h, pts[i - 1], pts[i], r);
+      sigma = Math.max(sigma, f * r * 0.5);
+    }
+    if (sigma >= 0.5) gaussianApprox(canvas, w, h, sigma);
+  }
+  for (let i = 0; i < add.length; i++) {
+    add[i] = clamp01(add[i]);
+    erase[i] = clamp01(erase[i]);
+  }
+  return { add, erase };
+}
+
+/** RGBA texture of the strokes for Renderer.setEdit (r = add, g = erase), or null without strokes. */
+export function buildEditMask(strokes: readonly MaskStroke[], w: number, h: number, feather: number): Uint8Array | null {
+  if (!strokes.length) return null;
+  const { add, erase } = rasterizeMaskStrokes(strokes, w, h, feather);
+  const out = new Uint8Array(w * h * 4);
+  for (let i = 0; i < add.length; i++) {
+    out[i * 4] = Math.round(add[i] * 255);
+    out[i * 4 + 1] = Math.round(erase[i] * 255);
+    out[i * 4 + 3] = 255;
+  }
+  return out;
+}
+
+function stampDisc(buf: Float32Array, w: number, h: number, cx: number, cy: number, r: number) {
+  stampCapsule(buf, w, h, [cx, cy], [cx, cy], r);
+}
+
+/** Anti-aliased capsule (segment of radius r), max-composited at pixel centres. */
+function stampCapsule(buf: Float32Array, w: number, h: number, a: [number, number], b: [number, number], r: number) {
+  const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0]) - r - 1));
+  const x1 = Math.min(w - 1, Math.ceil(Math.max(a[0], b[0]) + r + 1));
+  const y0 = Math.max(0, Math.floor(Math.min(a[1], b[1]) - r - 1));
+  const y1 = Math.min(h - 1, Math.ceil(Math.max(a[1], b[1]) + r + 1));
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  for (let y = y0; y <= y1; y++) {
+    const py = y + 0.5;
+    for (let x = x0; x <= x1; x++) {
+      const pxx = x + 0.5;
+      const t = len2 > 0 ? clamp01(((pxx - a[0]) * dx + (py - a[1]) * dy) / len2) : 0;
+      const ex = pxx - (a[0] + t * dx);
+      const ey = py - (a[1] + t * dy);
+      const cov = clamp01(r + 0.5 - Math.sqrt(ex * ex + ey * ey));
+      const i = y * w + x;
+      if (cov > buf[i]) buf[i] = cov;
+    }
+  }
+}
 
 /** Even-odd scanline fill, sampling at pixel centres. */
 export function fillPolygon(buf: Float32Array, w: number, h: number, pts: [number, number][], value: number): void {

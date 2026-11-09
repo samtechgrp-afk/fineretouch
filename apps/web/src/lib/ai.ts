@@ -49,6 +49,11 @@ export async function depthMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<B
   return (await postFile('/v1/depth', proxyJpeg, undefined, signal)).blob();
 }
 
+/** Face parsing PNG (r face skin, g body skin, b hair) of the proxy, for the preview's skin mask. */
+export async function parseMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<Blob> {
+  return (await postFile('/v1/parse', proxyJpeg, undefined, signal)).blob();
+}
+
 /** Segmentation PNG (r clothes, g hair, b person) of the proxy, for the clothing tools' preview. */
 export async function segmentMap(proxyJpeg: Blob, signal?: AbortSignal): Promise<Blob> {
   return (await postFile('/v1/segment', proxyJpeg, undefined, signal)).blob();

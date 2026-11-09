@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Renderer, type DisplayView } from '@/engine/renderer';
 import { ensureDepth, hairRoiFor } from '@/lib/depth';
-import { ensureSegmentation, lensRoiFor } from '@/lib/studio';
-import { faceMaskFor } from '@/lib/export';
+import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
+import { editMaskFor, faceMaskFor } from '@/lib/export';
 import { getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 
@@ -33,6 +33,9 @@ export function PhotoEditorViewport() {
   const depthKeyRef = useRef<string>('');
   const lensKeyRef = useRef<string>('');
   const segKeyRef = useRef<string>('');
+  const editKeyRef = useRef<unknown>(null);
+  const displayRef = useRef<DisplayView | null>(null);
+  const brushCanvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -81,15 +84,23 @@ export function PhotoEditorViewport() {
         r.setSource(proxy, proxy.width, proxy.height);
         loadedIdRef.current = p.id;
         maskKeyRef.current = hairKeyRef.current = depthKeyRef.current = lensKeyRef.current = segKeyRef.current = '';
+        editKeyRef.current = null;
       }
-      const maskKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
-      const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height);
+      const sm = p.adjustments.skinMask;
+      const faceKey = `${p.id}:${p.analysisState}:${p.analysis?.faces.length ?? 0}`;
+      const maskKey = `${faceKey}:${p.parseState}:${sm.useSegmentation}:${sm.includeBodySkin}`;
+      const mask = faceMaskFor(p.id, p.analysis, proxy.width, proxy.height, sm);
       if (maskKeyRef.current !== maskKey) {
         r.setMask(mask?.data ?? null, mask?.width, mask?.height);
         maskKeyRef.current = maskKey;
       }
+      const edit = editMaskFor(p.id, sm, proxy.width, proxy.height);
+      if (editKeyRef.current !== (edit?.data ?? null)) {
+        r.setEdit(edit?.data ?? null, edit?.width, edit?.height);
+        editKeyRef.current = edit?.data ?? null;
+      }
       const hairOn = p.adjustments.strayHairRemoval.enabled;
-      const hairKey = `${maskKey}:${hairOn}`;
+      const hairKey = `${faceKey}:${hairOn}`;
       if (hairKeyRef.current !== hairKey) {
         const roi = hairOn ? hairRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
         r.setHairRoi(roi?.data ?? null, roi?.width, roi?.height);
@@ -102,7 +113,7 @@ export function PhotoEditorViewport() {
         depthKeyRef.current = depthKey;
       }
       const glareOn = p.adjustments.glareReduction > 0 || st.view.overlay === 'glare';
-      const lensKey = `${maskKey}:${glareOn}`;
+      const lensKey = `${faceKey}:${glareOn}`;
       if (lensKeyRef.current !== lensKey) {
         const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
         r.setLensRoi(roi?.data ?? null, roi?.width, roi?.height);
@@ -131,6 +142,7 @@ export function PhotoEditorViewport() {
         background: BG,
       };
       r.display(display, p.adjustments.glareReduction / 100);
+      displayRef.current = display;
       setRenderMs(performance.now() - t0);
     });
   }, [geometry]);
@@ -138,7 +150,13 @@ export function PhotoEditorViewport() {
   // Redraw whenever the photo, its edits/analysis or the view change.
   useEffect(() => {
     draw();
-  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, view, draw]);
+  }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, photo?.parseState, view, draw]);
+
+  // AI face parsing for the semantic skin mask, once the photo has a face and the engine is up.
+  const parseWanted = Boolean(photo?.adjustments.skinMask.useSegmentation && photo?.analysis?.faces.length);
+  useEffect(() => {
+    if (photo && parseWanted && photo.parseState === 'none') void ensureParse(photo.id);
+  }, [photo?.id, parseWanted, photo?.parseState]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Fetch (or upgrade) the depth map once bokeh is switched on for this photo.
   const bokehOn = Boolean(photo?.adjustments.depthBokeh.enabled);
@@ -156,6 +174,7 @@ export function PhotoEditorViewport() {
   useEffect(() => {
     const p = selectActivePhoto(useEditor.getState());
     if (aiOnline && p?.segmentState === 'unavailable') useEditor.getState().setSegmentState(p.id, 'none');
+    if (aiOnline && p?.parseState === 'unavailable') useEditor.getState().setParseState(p.id, 'none');
   }, [aiOnline]);
 
   // Keep the drawing buffer at device resolution.
@@ -235,9 +254,71 @@ export function PhotoEditorViewport() {
   }, [setView, zoomAt, zoomPercent]);
 
   const drag = useRef<{ kind: 'pan' | 'split'; x: number; y: number; panX: number; panY: number } | null>(null);
+  /** Stroke being painted: normalised image points (committed as one undo step on release). */
+  const stroke = useRef<{ points: number[] } | null>(null);
+
+  /** CSS px in the viewport -> normalised image coordinates (null outside the photo). */
+  const toImage = (cssX: number, cssY: number): [number, number] | null => {
+    const d = displayRef.current;
+    const r = rendererRef.current;
+    if (!d || !r || !r.width) return null;
+    const canvas = canvasRef.current!;
+    let px = cssX * d.dpr;
+    if (d.mode === 'side') px %= canvas.width / 2;
+    const u = (px - d.offsetX) / d.scale / r.width;
+    const v = (cssY * d.dpr - d.offsetY) / d.scale / r.height;
+    return [u, v];
+  };
+  /** Brush radius in CSS px at the current zoom. */
+  const brushCssRadius = () => {
+    const d = displayRef.current;
+    const r = rendererRef.current;
+    if (!d || !r) return 0;
+    return (view.brushSize * Math.max(r.width, r.height) * d.scale) / d.dpr;
+  };
+  const drawBrush = (x: number, y: number, painting: boolean) => {
+    const c = brushCanvasRef.current;
+    const wrap = wrapRef.current;
+    if (!c || !wrap) return;
+    const dpr = window.devicePixelRatio || 1;
+    if (c.width !== Math.round(wrap.clientWidth * dpr) || c.height !== Math.round(wrap.clientHeight * dpr)) {
+      c.width = Math.round(wrap.clientWidth * dpr);
+      c.height = Math.round(wrap.clientHeight * dpr);
+    }
+    const g = c.getContext('2d')!;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!painting) g.clearRect(0, 0, c.width, c.height);
+    const rad = brushCssRadius();
+    const colour = view.maskBrush === 'erase' ? 'rgba(80,160,255,0.35)' : 'rgba(255,64,90,0.35)';
+    if (painting) {
+      g.fillStyle = colour;
+      g.beginPath();
+      g.arc(x, y, rad, 0, Math.PI * 2);
+      g.fill();
+    } else {
+      g.strokeStyle = 'rgba(255,255,255,0.9)';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.arc(x, y, rad, 0, Math.PI * 2);
+      g.stroke();
+    }
+  };
+  const clearBrush = () => {
+    const c = brushCanvasRef.current;
+    c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+  };
 
   const onPointerDown = (e: React.PointerEvent) => {
     const rect = wrapRef.current!.getBoundingClientRect();
+    if (view.maskBrush && photo && e.button === 0) {
+      const pt = toImage(e.clientX - rect.left, e.clientY - rect.top);
+      if (!pt) return;
+      stroke.current = { points: [pt[0], pt[1]] };
+      (e.target as Element).setPointerCapture(e.pointerId);
+      clearBrush();
+      drawBrush(e.clientX - rect.left, e.clientY - rect.top, true);
+      return;
+    }
     const v = useEditor.getState().view;
     const x = e.clientX - rect.left;
     const nearSplit = v.mode === 'split' && Math.abs(x - v.split * rect.width) < 24;
@@ -246,14 +327,35 @@ export function PhotoEditorViewport() {
     if (drag.current.kind === 'split') setView({ split: Math.min(1, Math.max(0, x / rect.width)) });
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const rect = wrapRef.current!.getBoundingClientRect();
+    if (view.maskBrush) {
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const st = stroke.current;
+      if (st) {
+        const pt = toImage(x, y);
+        const n = st.points.length;
+        // Skip points closer than a fifth of the brush radius (keeps strokes small).
+        if (pt && Math.hypot(pt[0] - st.points[n - 2], pt[1] - st.points[n - 1]) > view.brushSize * 0.2 && n < 7998) {
+          st.points.push(pt[0], pt[1]);
+          drawBrush(x, y, true);
+        }
+      } else drawBrush(x, y, false);
+      return;
+    }
     const d = drag.current;
     if (!d) return;
-    const rect = wrapRef.current!.getBoundingClientRect();
     if (d.kind === 'split') setView({ split: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)) });
     else setView({ panX: d.panX + e.clientX - d.x, panY: d.panY + e.clientY - d.y });
   };
   const onPointerUp = () => {
     drag.current = null;
+    const st = stroke.current;
+    stroke.current = null;
+    if (st && view.maskBrush) {
+      useEditor.getState().addMaskStroke({ mode: view.maskBrush, size: view.brushSize, points: st.points.map((v) => Math.round(v * 1e4) / 1e4) });
+      clearBrush();
+    }
   };
 
   const pct = photo ? Math.round(zoomPercent(view.zoom)) : null;
@@ -262,15 +364,17 @@ export function PhotoEditorViewport() {
     <div
       ref={wrapRef}
       className="relative h-full w-full touch-none select-none overflow-hidden bg-ink-950"
-      style={{ cursor: view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
+      style={{ cursor: view.maskBrush ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      onDoubleClick={() => (view.zoom === 1 ? zoomAt(100 / zoomPercent(1)) : setView({ zoom: 1, panX: 0, panY: 0 }))}
+      onPointerLeave={() => !stroke.current && clearBrush()}
+      onDoubleClick={() => !view.maskBrush && (view.zoom === 1 ? zoomAt(100 / zoomPercent(1)) : setView({ zoom: 1, panX: 0, panY: 0 }))}
       data-testid="viewport"
     >
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-label="Photo preview" />
+      <canvas ref={brushCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden data-testid="brush-layer" />
       {!photo && !error && (
         <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-ink-400">
           Drop photos anywhere or use Import to start.
