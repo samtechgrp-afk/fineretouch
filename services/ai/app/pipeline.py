@@ -64,10 +64,11 @@ from .retouch_engine import (
     skin_tone_guard,
 )
 from .engines.local import apply_heal_strokes, apply_local_layers
+from .engines.perfection import PerfectionReport, perfect_skin
 from .engines.noise import reduce_skin_noise
 from .engines.redness import reduce_redness
 from .engines.under_eye import soften_under_eye_texture
-from .schemas import Adjustments, ColorStats, FaceAnalysis
+from .schemas import Adjustments, ColorStats, FaceAnalysis, SkinPerfectionSettings
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
 # Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
@@ -308,12 +309,15 @@ def render(
     hair_prob: np.ndarray | None = None,
     clothes_prob: np.ndarray | None = None,
     parse: FaceParse | None = None,
+    report: list | None = None,
 ) -> np.ndarray:
     """rgb8: HxWx3 uint8 (or uint16, e.g. a demosaiced camera RAW) sRGB -> HxWx3 uint8 sRGB.
 
     depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
     hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
     parse: optional face parsing (face skin, body skin, hair; app/masking.py) for the skin mask.
+    report: optional list; the Skin Perfection report (engines/perfection.PerfectionReport) is
+    appended to it when that engine runs.
     clothes_prob: optional garment probability (HxW, the segmenter's clothes class) for the
     clothing iron and recolour; without it a portrait prior below the chin is used.
     """
@@ -354,6 +358,19 @@ def render(
         keep = protect_weight(sm, h, w)
         if keep is not None:
             masks.under_eye = masks.under_eye * keep
+    # 0c. Skin Perfection engine (v0.13): detect, classify, correct and verify imperfections at
+    #     full resolution on face and body skin. It edits the photo the rest of the chain starts
+    #     from (like the healing brush), so every later stage sees the cleaned skin.
+    sp = adj.skinPerfection
+    if sp.enabled and sp.strength > 0:
+        # Without a face the colour-only skin box would take in wood, sand and warm walls, so only
+        # semantic body skin and the user's own Add-skin strokes count then.
+        face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
+        src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
+        if report is not None:
+            report.append(rep)
+        low0 = blur(src, S0 * L)
+        bands.clear()
     skin = skin[..., None]
 
     c = src.copy()
@@ -453,6 +470,29 @@ def render(
 
 
 STRIP_ROWS = 256
+
+
+def perfect_photo(
+    src: np.ndarray, skin: np.ndarray, masks: FaceMasks, faces: list[FaceAnalysis], parse: FaceParse | None,
+    settings: SkinPerfectionSettings, protect: np.ndarray | None = None,
+) -> tuple[np.ndarray, PerfectionReport]:
+    """Stage 0c: the Skin Perfection engine on the photo (float32 sRGB), with face skin from the
+    renderer's skin weight and body skin from face parsing. Clothing, hair and background are
+    outside both; the user's Protect strokes are already in `skin` and are re-applied to body
+    skin here."""
+    h, w = src.shape[:2]
+    body = None
+    if settings.bodyCoverage and parse is not None:
+        p = parse.resized(h, w)
+        fw = masks.face_width or 0.25 * max(h, w)
+        body = blur(p.body_skin, fw * 0.003) * hair_keep(blur(p.hair, fw * 0.004))
+        body = body * (0.4 + 0.6 * skin_probability(blur(src, S0 * max(h, w))))
+        if protect is not None:
+            body = body * protect
+    return perfect_skin(
+        src.astype(np.float32), skin, faces, settings, body_skin=body,
+        under_eye=masks.under_eye if masks.has_face else None, face_skin=masks.skin if masks.has_face else skin,
+    )
 
 
 def _finish_strip(

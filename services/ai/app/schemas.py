@@ -244,6 +244,78 @@ class LocalRetouch(BaseModel):
     layers: list[RetouchLayer] = Field(default_factory=list, max_length=MAX_LAYERS)
 
 
+# --- Skin Perfection engine (v0.13, app/engines/perfection.py) -------------------------------
+
+PERFECTION_CATEGORIES = (
+    "acne", "pimple", "blackhead", "whitehead", "darkSpot", "postAcne", "smallDot", "blemish",
+    "discoloration", "scar", "texture", "redness", "underEye",
+)
+# Default (sensitivity, strength) per category. Discrete marks are removed at full strength;
+# area corrections (tone, redness, texture, under-eye) default lower so skin keeps its life.
+PERFECTION_DEFAULTS: dict[str, tuple[float, float]] = {
+    "acne": (75, 100), "pimple": (75, 100), "blackhead": (70, 100), "whitehead": (70, 100),
+    "darkSpot": (70, 100), "postAcne": (70, 90), "smallDot": (70, 100), "blemish": (75, 100),
+    "discoloration": (60, 50), "scar": (50, 25), "texture": (50, 20), "redness": (60, 50),
+    "underEye": (50, 35),
+}
+MAX_PERFECTION_OVERRIDES = 2000
+
+
+class PerfectionCategory(BaseModel):
+    """Detection sensitivity and correction strength of one imperfection category (0..100)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    sensitivity: float = Field(70, ge=0, le=100)
+    strength: float = Field(100, ge=0, le=100)
+
+
+def _default_categories() -> dict[str, PerfectionCategory]:
+    return {k: PerfectionCategory(sensitivity=s, strength=t) for k, (s, t) in PERFECTION_DEFAULTS.items()}
+
+
+class PerfectionOverride(BaseModel):
+    """A user decision on one spot: ignore a detected mark, or correct this spot regardless."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    x: float = Field(..., ge=0, le=1)  # normalised centre
+    y: float = Field(..., ge=0, le=1)
+    radius: float = Field(0.004, ge=0.0003, le=0.05)  # share of the long edge
+    action: Literal["ignore", "correct"] = "ignore"
+
+
+class SkinPerfectionSettings(BaseModel):
+    """Skin Perfection Studio (mirror of packages/shared/src/perfection.ts)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    strength: float = Field(100, ge=0, le=100)  # overall Skin Perfection strength
+    multiplier: int = Field(1, ge=1, le=3)  # 1x natural, 2x strong, 3x maximum
+    categories: dict[str, PerfectionCategory] = Field(default_factory=_default_categories)
+    bodyCoverage: bool = True  # neck, chest, shoulders, arms, hands, back, legs
+    bodySensitivity: float = Field(70, ge=0, le=100)
+    texturePreservation: float = Field(90, ge=0, le=100)
+    porePreservation: float = Field(90, ge=0, le=100)
+    correctionRadius: float = Field(50, ge=0, le=100)
+    edgeProtection: float = Field(60, ge=0, le=100)
+    confidenceThreshold: float = Field(50, ge=0, le=100)
+    residualIntensity: float = Field(70, ge=0, le=100)
+    passes: int = Field(2, ge=1, le=4)
+    preserveFreckles: bool = True
+    preserveMoles: bool = True
+    preserveBirthmarks: bool = True
+    overrides: list[PerfectionOverride] = Field(default_factory=list, max_length=MAX_PERFECTION_OVERRIDES)
+
+    def category(self, name: str) -> PerfectionCategory:
+        if name in self.categories:
+            return self.categories[name]
+        s, t = PERFECTION_DEFAULTS.get(name, (70, 100))
+        return PerfectionCategory(sensitivity=s, strength=t)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -294,6 +366,9 @@ class Adjustments(BaseModel):
     # v0.8 skin mask: face parsing + user brush strokes (app/masking.py).
     skinMask: SkinMaskSettings = SkinMaskSettings()
     localRetouch: LocalRetouch = LocalRetouch()
+    # v0.13 Skin Perfection engine: tiled multi-scale detection, classification, targeted
+    # correction and verified residual passes (app/engines/perfection.py).
+    skinPerfection: SkinPerfectionSettings = SkinPerfectionSettings()
 
 
 class StyleProfile(BaseModel):
