@@ -54,7 +54,10 @@ def _masked_blur(img: np.ndarray, mask: np.ndarray, sigma: float) -> np.ndarray:
     num = _gauss(img * m, sigma)
     den = _gauss(mask, sigma)
     den = den[..., None] if img.ndim == 3 else den
-    return np.where(den > 1e-4, num / np.maximum(den, 1e-4), img)
+    # In place (as np.where(den > 1e-4, num / max(den, 1e-4), img), without its full-size temporaries).
+    num /= np.maximum(den, 1e-4)
+    np.copyto(num, img, where=den <= 1e-4)
+    return num
 
 
 def _ellipse(size: int) -> np.ndarray:

@@ -253,8 +253,8 @@ Real photo (4480×6720 full-body portrait, face 712 px wide), at defaults:
 - Whiteheads on very deep skin (type VI) were found about half the time in PR #13. Phase 2B
   raised this to 24 of 27 on the synthetic benchmark (see `SKIN_PERFECTION_QA.md`); real-photo
   figures wait for the labelled test set.
-- The 30 MP full-resolution render takes about 40 s on a 4-core CPU. The preview uses the
-  2560 px proxy.
+- The 30 MP full-resolution render takes about 37 s on a 4-vCPU container (phase 2E). The
+  preview uses the 2560 px proxy.
 - Synthetic metrics are an upper bound. Real skin needs the review overlay for edge cases.
 
 ## 6. Performance and hardware
@@ -263,6 +263,16 @@ Real photo (4480×6720 full-body portrait, face 712 px wide), at defaults:
 - The engine is CPU-only (OpenCV + NumPy) and needs no GPU. Peak memory at 30 MP stays within
   the engine's render admission budget (`FINERETOUCH_RENDER_MEMORY_MB`).
 - Large blurs run at low resolution (`_lowres`), and detection runs tile by tile.
+- Since phase 2E, detection tiles run side by side on up to 4 CPU threads (never more than
+  OpenCV's thread count, which the batch thermal profile sets), with at most about 900 MB of
+  tiles in flight. The per-pixel finishing stages of the render run in parallel strips. Results
+  are gathered in order, so the output is the same as one tile or strip after the other (a test
+  checks this). The masks a residual scan needs (skin, body, protected features, zones) are made
+  once per render, and full-size temporaries are freed or reused in place.
+- Measured on a 4-vCPU Xeon (2.3 GHz) container, 16 GB: a 30 MP photo takes 37 s with a 4.1 GB
+  peak, and a 25 MP photo 40 s with 4.5 GB (2D: 63 s / 6.5 GB and 55 s / 6.3 GB). The 25 s /
+  4 GB target is for the Ryzen 3 7330U; run `--perf` there to check it (`SKIN_PERFECTION_QA.md`,
+  section 9).
 - New dependencies: **none**. Models: **none new**. It uses the existing MediaPipe face
   landmarker and selfie multiclass segmenter.
 

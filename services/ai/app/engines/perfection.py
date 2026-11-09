@@ -48,8 +48,12 @@ already ships (face landmarks, selfie multiclass segmentation); no new model or 
 
 from __future__ import annotations
 
+import ctypes
 import math
+import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 
 import cv2
@@ -170,7 +174,9 @@ def _lowres(fn, image: np.ndarray, maps: list[np.ndarray], F: float, target_face
     small = cv2.resize(image, size, interpolation=cv2.INTER_AREA)
     sm = [cv2.resize(np.ascontiguousarray(m, np.float32), size, interpolation=cv2.INTER_AREA) for m in maps]
     delta = fn(small, *sm, F * s) - small
-    return np.clip(image + cv2.resize(delta, (w, h), interpolation=cv2.INTER_LINEAR), 0.0, 1.0).astype(np.float32)
+    out = cv2.resize(delta, (w, h), interpolation=cv2.INTER_LINEAR).astype(np.float32, copy=False)
+    out += image  # one full-size array, not three (a 30 MP float copy is 345 MB)
+    return np.clip(out, 0.0, 1.0, out=out)
 
 
 @dataclass
@@ -324,11 +330,17 @@ def _noise_sigma(v: np.ndarray, core: np.ndarray) -> float:
 _NOISE_K = np.array([[1, -2, 1], [-2, 4, -2], [1, -2, 1]], np.float32)
 _NOISE_FIELD: list[np.ndarray] = []
 _NOISE_PEAK: dict[float, float] = {}
+_NOISE_LOCK = threading.Lock()
 
 
 def _noise_peak(sigma: float) -> float:
     """Typical (75th percentile) positive peak of unit white noise blurred at sigma."""
     key = round(sigma, 2)
+    with _NOISE_LOCK:  # tiles run in threads
+        return _noise_peak_locked(key)
+
+
+def _noise_peak_locked(key: float) -> float:
     if key not in _NOISE_PEAK:
         if not _NOISE_FIELD:
             _NOISE_FIELD.append(np.random.default_rng(7).normal(0.0, 1.0, (256, 256)).astype(np.float32))
@@ -346,6 +358,46 @@ def _texture_ref(f: np.ndarray, core: np.ndarray, noise_peak: float, floor: floa
         return default
     raw = float(np.percentile(f[peaks], 75))
     return max(floor, math.sqrt(max(raw * raw - noise_peak * noise_peak, 0.25 * raw * raw)))
+
+
+TILE_WORKERS = 4  # at most; never more than OpenCV's thread count (the batch thermal profile sets it)
+TILE_BUDGET_MB = 900.0  # working memory for tiles in flight (measured: about 200 bytes per tile pixel)
+TILE_BYTES_PER_PX = 200.0
+
+
+def _trim_heap() -> None:
+    """Give memory freed by worker threads back to the system. glibc keeps each thread's freed
+    tile buffers in that thread's own arena, which would add about 1 GB to a 30 MP render's
+    footprint; other platforms return it themselves."""
+    if _LIBC is not None:
+        _LIBC.malloc_trim(0)
+
+
+def _load_libc():
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        lib = ctypes.CDLL("libc.so.6")
+        lib.malloc_trim.argtypes = [ctypes.c_size_t]
+        return lib
+    except (OSError, AttributeError):
+        return None
+
+
+_LIBC = _load_libc()
+
+
+def _map_tiles(fn, jobs: list, px: int = 0) -> list:
+    """fn over jobs, in order; px: pixels of the largest job, to keep tiles in flight in budget."""
+    n = min(TILE_WORKERS, max(1, cv2.getNumThreads()), len(jobs))
+    if px:
+        n = min(n, max(1, int(TILE_BUDGET_MB * 2**20 // (px * TILE_BYTES_PER_PX))))
+    if n <= 1:
+        return [fn(j) for j in jobs]
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        res = list(ex.map(fn, jobs))
+    _trim_heap()
+    return res
 
 
 def _detect_tile(
@@ -527,8 +579,16 @@ def _neighbour_medians(
         cnt[q] = w.size
         if w.size:
             for v, m in zip(vals, meds):
-                m[q] = float(np.median(v[w]))
+                m[q] = _median(v[w])
     return cnt, meds
+
+
+def _median(v: np.ndarray) -> float:
+    """np.median of a small float32 array, without its per-call overhead (same result: the
+    middle value, or the float32 mean of the middle two)."""
+    s = np.sort(v)
+    h = s.size // 2
+    return float(s[h]) if s.size % 2 else float((s[h - 1] + s[h]) / s.dtype.type(2))
 
 
 def _nms(c: _Cand, order: np.ndarray, share: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
@@ -716,21 +776,29 @@ def _classify(
     conf = np.zeros(n, np.float32)
     ep = settings.edgeProtection / 100.0
     min_aniso = 0.18 + 0.3 * ep
+    cats: dict[str, object] = {}
+    ks: dict[float, float] = {}
+    edge_sm = _smoothstep(0.15, 0.45, c.edge)  # elementwise, as it was per candidate
     for i in range(n):
         kind = kinds[i]
         if kind in ("shine", "rim"):
             continue
-        cat = settings.category("acne" if kind in ("mole", "freckle", "birthmark", "follicle") else kind)
-        if kind in PROTECTED_KINDS:
-            # Protected marks are judged with the general dark-mark sensitivity of their family.
-            cat = settings.category("darkSpot" if kind != "follicle" else "blackhead")
+        cat = cats.get(kind)
+        if cat is None:
+            cat = settings.category("acne" if kind in ("mole", "freckle", "birthmark", "follicle") else kind)
+            if kind in PROTECTED_KINDS:
+                # Protected marks are judged with the general dark-mark sensitivity of their family.
+                cat = settings.category("darkSpot" if kind != "follicle" else "blackhead")
+            cats[kind] = cat
         sens = cat.sensitivity
         if c.body[i]:
             sens = min(100.0, sens * settings.bodySensitivity / 70.0)
         # Colourless marks carry no colour evidence: the more sensitive residual scan does not
         # lower their bar (on its own it finds skin relief, most of all on deep skin).
         boost = 0.0 if kind == "blemish" else sens_boost
-        k = _k_for(sens + boost, settings.multiplier)
+        k = ks.get(sens + boost)
+        if k is None:
+            k = ks[sens + boost] = _k_for(sens + boost, settings.multiplier)
         floor = MIN_REL_CONTRAST * (1.6 - 0.9 * min(sens + boost, 100.0) / 100.0)
         margin = c.score[i] / k
         ok = margin >= 1.0 and contrast[i] >= floor and cat.enabled
@@ -770,7 +838,7 @@ def _classify(
         if kind == "whitehead":
             ok &= rel[i] >= WHITEHEAD_MIN_REL * sfac and diam[i] <= WHITEHEAD_MAX_D
         # Next to a strong structure edge only clear marks count (edge protection).
-        edge_pen = 1.0 - ep * float(_smoothstep(0.15, 0.45, np.array(c.edge[i])))
+        edge_pen = 1.0 - ep * float(edge_sm[i])
         conf[i] = float(np.clip((1.0 - math.exp(-1.2 * max(margin, 0.0))) * shape * (0.4 + 0.6 * edge_pen), 0.0, 1.0))
         accepted[i] = bool(ok)
     # A feature in doubt is reported (for review) whenever it would have been kept as a feature;
@@ -788,39 +856,75 @@ class _Analysis:
     tiles: int
 
 
+def _zones(local: list[FaceAnalysis], H: int, W: int, Fw: float) -> np.ndarray | None:
+    """Zones from landmarks: 1 = nose (blackheads crowd there), 2 = beard area (below the nose)."""
+    zones = None
+    if any(len(f.regions.nose) >= 3 for f in local):
+        zones = np.zeros((H, W), np.uint8)
+        for f in local:
+            if len(f.regions.nose) < 3 or len(f.regions.faceOval) < 3:
+                continue
+            nose_pts = np.round(np.array(f.regions.nose, np.float32) * [W, H]).astype(np.int32)
+            oval = np.round(np.array(f.regions.faceOval, np.float32) * [W, H]).astype(np.int32)
+            lower = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(lower, [oval], 2)
+            lower[: max(0, int(nose_pts[:, 1].max())), :] = 0
+            zones = np.maximum(zones, cv2.dilate(lower, _ellipse(max(3, int(0.15 * Fw) | 1))))
+            nz = np.zeros((H, W), np.uint8)
+            cv2.fillPoly(nz, [nose_pts], 1)
+            nz = cv2.dilate(nz, _ellipse(max(3, int(0.08 * Fw) | 1)))
+            zones[nz > 0] = 1
+    return zones
+
+
 def _analyse(
     image: np.ndarray, skin: np.ndarray, body: np.ndarray, faces: list[FaceAnalysis], F: float,
-    settings: SkinPerfectionSettings, sens_boost: float = 0.0,
+    settings: SkinPerfectionSettings, sens_boost: float = 0.0, cache: dict | None = None,
 ) -> tuple[list[tuple], _Analysis | None]:
     """Run A-E on the skin's bounding box. Returns raw marks (x, y, r, kind, conf, body, contrast,
-    review reason or None) in full-resolution px, accepted or protected only."""
+    review reason or None) in full-resolution px, accepted or protected only.
+
+    cache: one dict per render. The residual scans see the same skin, body and faces as the
+    first detection (only the pixels change), so the masks built from them are made once."""
     h, w = image.shape[:2]
-    ys, xs = np.nonzero(skin > 0.3)
-    if ys.size < 64:
-        return [], None
-    pad = int(0.08 * F) + 8
-    y0, y1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1)
-    x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
+    geo = cache.get("geometry") if cache is not None else None
+    if geo is None:
+        ys, xs = np.nonzero(skin > 0.3)
+        if ys.size < 64:
+            return [], None
+        pad = int(0.08 * F) + 8
+        geo = (max(0, ys.min() - pad), min(h, ys.max() + pad + 1), max(0, xs.min() - pad), min(w, xs.max() + pad + 1))
+    y0, y1, x0, x1 = geo
     s = min(1.0, WORK_FACE / max(F, 1.0))
     crop_full = image[y0:y1, x0:x1]
-    sk_full = skin[y0:y1, x0:x1]
-    bd_full = body[y0:y1, x0:x1]
     ch, cw = crop_full.shape[:2]
     size = (max(1, round(cw * s)), max(1, round(ch * s)))
-    crop, sk, bd = crop_full, sk_full, bd_full
-    if s < 1:
-        crop = cv2.resize(crop, size, interpolation=cv2.INTER_AREA)
-        sk = cv2.resize(sk, size, interpolation=cv2.INTER_AREA)
-        bd = cv2.resize(bd, size, interpolation=cv2.INTER_AREA)
+    crop = crop_full if s >= 1 else cv2.resize(crop_full, size, interpolation=cv2.INTER_AREA)
     Fw = F * s
     local = faces_in_crop(faces, x0, y0, x1 - x0, y1 - y0, w, h)
-    protect = feature_protection_mask(local, size[1], size[0])
-    # Close the skin mask over spot-sized holes (a red pimple fails a colour skin test).
-    # Face skin is colour-gated, so close it over pimple-sized holes; semantic body skin has no
-    # such holes and is only closed a little, so the gap between two fingers stays open.
-    face_part = np.clip(sk - bd, 0.0, 1.0).astype(np.float32)
-    sk = np.maximum(cv2.morphologyEx(face_part, cv2.MORPH_CLOSE, _ellipse(max(3, int(0.05 * Fw) | 1))),
-                    cv2.morphologyEx(bd.astype(np.float32), cv2.MORPH_CLOSE, _ellipse(max(3, int(0.01 * Fw) | 1))))
+    masks = cache.get("masks") if cache is not None else None
+    if masks is None:
+        sk_full = skin[y0:y1, x0:x1]
+        bd_full = body[y0:y1, x0:x1]
+        sk, bd = sk_full, bd_full
+        if s < 1:
+            sk = cv2.resize(sk, size, interpolation=cv2.INTER_AREA)
+            bd = cv2.resize(bd, size, interpolation=cv2.INTER_AREA)
+        protect = feature_protection_mask(local, size[1], size[0])
+        # Close the skin mask over spot-sized holes (a red pimple fails a colour skin test).
+        # Face skin is colour-gated, so close it over pimple-sized holes; semantic body skin has no
+        # such holes and is only closed a little, so the gap between two fingers stays open.
+        face_part = np.clip(sk - bd, 0.0, 1.0).astype(np.float32)
+        sk = np.maximum(cv2.morphologyEx(face_part, cv2.MORPH_CLOSE, _ellipse(max(3, int(0.05 * Fw) | 1))),
+                        cv2.morphologyEx(bd.astype(np.float32), cv2.MORPH_CLOSE, _ellipse(max(3, int(0.01 * Fw) | 1))))
+        sk_n = protect_n = None
+        if s < NATIVE_BELOW:
+            sk_n = cv2.resize(sk, (cw, ch), interpolation=cv2.INTER_LINEAR)  # the closed mask, not a second closing
+            protect_n = feature_protection_mask(local, ch, cw)
+        masks = (sk, bd, bd_full, protect, sk_n, protect_n, _zones(local, size[1], size[0], Fw))
+        if cache is not None:
+            cache["geometry"], cache["masks"] = geo, masks
+    sk, bd, bd_full, protect, sk_n, protect_n, zones = masks
 
     # Native resolution for the finest scales: when the face is wider than the analysis scale,
     # the smallest marks (blackheads, whiteheads, pore-sized dots) are looked for on the
@@ -830,12 +934,10 @@ def _analyse(
     passes = [(crop, sk, bd, protect, Fw, 1.0, tuple(k for k in range(len(SIGMAS)) if k not in fine),
                tuple(k for k in range(len(BRIGHT_SIGMAS)) if k not in fine), 0)]
     if native:
-        sk_n = cv2.resize(sk, (cw, ch), interpolation=cv2.INTER_LINEAR)  # the closed mask, not a second closing
-        protect_n = feature_protection_mask(local, ch, cw)
         passes.append((crop_full, sk_n, bd_full, protect_n, F, s, fine, fine, NATIVE_KOFS))
     parts: list[_Cand] = []
     stats: list[dict[int, tuple[float, float, float]]] = []
-    tiles = 0
+    jobs = []
     for p_crop, p_sk, p_bd, p_prot, p_F, p_s, ks, kb, kofs in passes:
         smax = SIGMAS[min(len(SIGMAS) - 1, max(ks + kb) + 1)]  # + the guard scale
         apron = int(math.ceil(3.0 * smax * p_F + RING * smax * math.sqrt(2) * p_F + BASE_CONTEXT * p_F)) + 4
@@ -846,19 +948,21 @@ def _analyse(
                 if not (p_sk[cy0:cy1, cx0:cx1] > 0.5).any():
                     continue
                 ay0, ay1, ax0, ax1 = max(0, cy0 - apron), min(PH, cy1 + apron), max(0, cx0 - apron), min(PW, cx1 + apron)
-                cand, st = _detect_tile(
-                    p_crop[ay0:ay1, ax0:ax1], p_sk[ay0:ay1, ax0:ax1], p_bd[ay0:ay1, ax0:ax1], p_prot[ay0:ay1, ax0:ax1], p_F,
-                    (cx0 - ax0, cy0 - ay0, cx1 - ax0, cy1 - ay0), ks, kb, kofs,
-                )
-                tiles += 1
-                if st:
-                    stats.append(st)
-                if cand.x.size:
-                    # Into analysis (work) coordinates, so all candidates share one frame.
-                    cand.x = (cand.x + ax0) * p_s
-                    cand.y = (cand.y + ay0) * p_s
-                    cand.sigma = cand.sigma * p_s
-                    parts.append(cand)
+                jobs.append(((p_crop[ay0:ay1, ax0:ax1], p_sk[ay0:ay1, ax0:ax1], p_bd[ay0:ay1, ax0:ax1], p_prot[ay0:ay1, ax0:ax1], p_F,
+                              (cx0 - ax0, cy0 - ay0, cx1 - ax0, cy1 - ay0), ks, kb, kofs), ax0, ay0, p_s))
+    # Tiles are independent, so they run side by side (OpenCV and NumPy release the GIL); the
+    # results are gathered in tile order, so the output is the same as one after the other.
+    px = max((j[0][0].shape[0] * j[0][0].shape[1] for j in jobs), default=0)
+    for (cand, st), (_, ax0, ay0, p_s) in zip(_map_tiles(lambda j: _detect_tile(*j[0]), jobs, px), jobs):
+        if st:
+            stats.append(st)
+        if cand.x.size:
+            # Into analysis (work) coordinates, so all candidates share one frame.
+            cand.x = (cand.x + ax0) * p_s
+            cand.y = (cand.y + ay0) * p_s
+            cand.sigma = cand.sigma * p_s
+            parts.append(cand)
+    tiles = len(jobs)
     H, W = size[1], size[0]
     ana = _Analysis(x0, y0, s, Fw, tiles)
     c = _cat(parts)
@@ -877,23 +981,6 @@ def _analyse(
         sel = c.kidx == kidx
         spread = np.clip(c.spread[sel], 0.8 * g, 1.25 * g)
         c.score[sel] = (c.resp[sel] - c.med[sel]) / spread
-    # Zones from landmarks: 1 = nose (blackheads crowd there), 2 = beard area (below the nose).
-    zones = None
-    if any(len(f.regions.nose) >= 3 for f in local):
-        zones = np.zeros((H, W), np.uint8)
-        for f in local:
-            if len(f.regions.nose) < 3 or len(f.regions.faceOval) < 3:
-                continue
-            nose_pts = np.round(np.array(f.regions.nose, np.float32) * [W, H]).astype(np.int32)
-            oval = np.round(np.array(f.regions.faceOval, np.float32) * [W, H]).astype(np.int32)
-            lower = np.zeros((H, W), np.uint8)
-            cv2.fillPoly(lower, [oval], 2)
-            lower[: max(0, int(nose_pts[:, 1].max())), :] = 0
-            zones = np.maximum(zones, cv2.dilate(lower, _ellipse(max(3, int(0.15 * Fw) | 1))))
-            nz = np.zeros((H, W), np.uint8)
-            cv2.fillPoly(nz, [nose_pts], 1)
-            nz = cv2.dilate(nz, _ellipse(max(3, int(0.08 * Fw) | 1)))
-            zones[nz > 0] = 1
     kinds, conf, ok, reason = _classify(c, Fw, settings, sens_boost, zones)
     kinds_a = np.array(kinds, dtype=object)
     diam = 2.0 * c.sigma * math.sqrt(2.0) / max(Fw, 1.0)
@@ -1172,7 +1259,7 @@ def _correct_marks(
         res = crop + (heal_out - crop) * wh
         res = res + (pig_out - res) * wp * (1.0 - wh)
         out[cy0:cy1, cx0:cx1] = res
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    return np.clip(out, 0.0, 1.0, out=out)
 
 
 def _acne_halo(image: np.ndarray, skin: np.ndarray, marks: list[Mark], F: float, amount: float) -> np.ndarray:
@@ -1195,8 +1282,8 @@ def _acne_halo(image: np.ndarray, skin: np.ndarray, marks: list[Mark], F: float,
     base_cr = _masked_blur(cr, sk * (1.0 - halo[y0:y1, x0:x1]), 0.04 * F)
     excess = np.maximum(_gauss(cr, max(0.8, 0.002 * F)) - base_cr, 0.0)
     out = image.copy()
-    out[y0:y1, x0:x1] = _from_ycbcr(y, cb, cr - excess * 0.85 * (amount / 100.0) * hl)
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    out[y0:y1, x0:x1] = np.clip(_from_ycbcr(y, cb, cr - excess * 0.85 * (amount / 100.0) * hl), 0.0, 1.0)
+    return out
 
 
 def smooth_relief(image: np.ndarray, skin: np.ndarray, F: float, amount: float, sensitivity: float, pore_keep: float) -> np.ndarray:
@@ -1213,22 +1300,28 @@ def smooth_relief(image: np.ndarray, skin: np.ndarray, F: float, amount: float, 
     y0, y1, x0, x1 = max(0, ys.min() - pad), min(h, ys.max() + pad + 1), max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
     crop = image[y0:y1, x0:x1]
     sk = skin[y0:y1, x0:x1].astype(np.float32)
-    a = _gauss(crop, s_hi)
-    band = a - _gauss(crop, s_lo)
+    band = _gauss(crop, s_hi)
+    band -= _gauss(crop, s_lo)
     e = np.sqrt(np.maximum(_fast_masked_blur(_luma(band) ** 2, sk, 3 * s_lo), 1e-10))
     typical = float(np.median(e[sk > 0.5])) if (sk > 0.5).any() else float(np.median(e))
     ratio = e / max(typical, 1e-6)
     lo = 2.2 - 0.9 * sensitivity / 100.0  # where reduction starts (x typical energy)
     rough = _smoothstep(lo, lo + 0.8, ratio)
+    del e, ratio
     # Oily highlights look "rough" only because the shine lights up every pore: leave them.
     yl = _luma(crop)
     gloss = _fast_gauss(yl, max(2.0, 0.008 * F)) / np.maximum(_fast_masked_blur(yl, sk, max(4.0, 0.06 * F)), 1e-3)
     rough = rough * (1.0 - _smoothstep(1.06, 1.2, gloss))
+    del yl, gloss
     k = (t * 0.8 * rough * sk)[..., None]
+    del rough
     out = image.copy()
     # Pores live above s_hi and are untouched; pore_keep only matters for very coarse pores.
-    out[y0:y1, x0:x1] = crop - band * k * (1.0 - 0.3 * pore_keep)
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    band *= k
+    band *= 1.0 - 0.3 * pore_keep
+    np.subtract(crop, band, out=band)  # in place: on a full-length shot the crop is most of the photo
+    out[y0:y1, x0:x1] = np.clip(band, 0.0, 1.0, out=band)
+    return out
 
 
 def lift_under_eye(image: np.ndarray, under_eye: np.ndarray, F: float, amount: float) -> np.ndarray:
@@ -1255,8 +1348,8 @@ def lift_under_eye(image: np.ndarray, under_eye: np.ndarray, F: float, amount: f
     cb_r, cr_r = _cbcr(ref)
     cb_t, cr_t = _cbcr(tone)
     out = image.copy()
-    out[y0:y1, x0:x1] = _from_ycbcr(y, cb + (cb_r - cb_t) * 0.6 * k, cr + (cr_r - cr_t) * 0.6 * k)
-    return np.clip(out, 0.0, 1.0).astype(np.float32)
+    out[y0:y1, x0:x1] = np.clip(_from_ycbcr(y, cb + (cb_r - cb_t) * 0.6 * k, cr + (cr_r - cr_t) * 0.6 * k), 0.0, 1.0)
+    return out
 
 
 def _fine_energy(image: np.ndarray, marks: list[Mark], F: float) -> float:
@@ -1334,17 +1427,32 @@ def _verify(
 def _restore(image: np.ndarray, out: np.ndarray, failed: list[Mark], kept: list[Mark], settings: SkinPerfectionSettings) -> np.ndarray:
     """Put the original pixels back over failed repairs, but not over repairs that passed."""
     h, w = out.shape[:2]
-    back = np.zeros((h, w), np.float32)
-    keep = np.zeros((h, w), np.float32)
-    for m in failed:
-        cv2.circle(back, (int(round(m.x)), int(round(m.y))), int(math.ceil(_repair_radius(m, settings) * 1.25)) + 1, 1.0, -1)
-    for m in kept:
-        cv2.circle(keep, (int(round(m.x)), int(round(m.y))), int(math.ceil(_repair_radius(m, settings))) + 1, 1.0, -1)
-    if not back.any():
+    if not failed:
         return out
     sig = max(0.6, 0.15 * float(np.median([_repair_radius(m, settings) for m in failed])))
-    back = _gauss(back, sig) * (1.0 - _gauss(keep, sig))
-    return (out + (image - out) * np.clip(back, 0.0, 1.0)[..., None]).astype(np.float32)
+    # Only the box around the failed marks changes (plus the blur's reach), so the masks and
+    # the blend are built there, not on the whole photo.
+    reach = int(math.ceil(4.0 * sig)) + 2
+    rad = [int(math.ceil(_repair_radius(m, settings) * 1.25)) + 1 for m in failed]
+    y0 = max(0, min(int(round(m.y)) - r for m, r in zip(failed, rad)) - reach)
+    y1 = min(h, max(int(round(m.y)) + r for m, r in zip(failed, rad)) + reach + 1)
+    x0 = max(0, min(int(round(m.x)) - r for m, r in zip(failed, rad)) - reach)
+    x1 = min(w, max(int(round(m.x)) + r for m, r in zip(failed, rad)) + reach + 1)
+    if y1 <= y0 or x1 <= x0:
+        return out
+    back = np.zeros((y1 - y0, x1 - x0), np.float32)
+    keep = np.zeros_like(back)
+    for m, r in zip(failed, rad):
+        cv2.circle(back, (int(round(m.x)) - x0, int(round(m.y)) - y0), r, 1.0, -1)
+    for m in kept:
+        cv2.circle(keep, (int(round(m.x)) - x0, int(round(m.y)) - y0), int(math.ceil(_repair_radius(m, settings))) + 1, 1.0, -1)
+    if not back.any():
+        return out
+    back = np.clip(_gauss(back, sig) * (1.0 - _gauss(keep, sig)), 0.0, 1.0)[..., None]
+    res = out.copy()
+    o = out[y0:y1, x0:x1]
+    res[y0:y1, x0:x1] = o + (image[y0:y1, x0:x1] - o) * back
+    return res
 
 
 def _apply_overrides(marks: list[Mark], overrides: list[PerfectionOverride], w: int, h: int, next_id: int) -> tuple[list[Mark], int]:
@@ -1410,7 +1518,7 @@ def perfect_skin(
     mult = int(settings.multiplier)
     # Edge guard: strong structure (nose side, jaw line, hairline, clothing edges) damps repairs.
     ep = settings.edgeProtection / 100.0
-    edge_guard = None
+    edge_guard = guard = None
     if ep > 0:
         ys_, xs_ = np.nonzero(region > 0.05)
         guard = np.ones((h, w), np.float32)
@@ -1425,7 +1533,8 @@ def perfect_skin(
         guard *= np.clip(cv2.morphologyEx(region, cv2.MORPH_CLOSE, _ellipse(max(3, int(0.015 * F) | 1))) * 1.6, 0.0, 1.0)
         edge_guard = guard
 
-    raw, ana = _analyse(image, region, body, faces, F, settings)
+    scan_cache: dict = {}
+    raw, ana = _analyse(image, region, body, faces, F, settings, cache=scan_cache)
     if ana is not None:
         rep.tiles, rep.work_scale = ana.tiles, ana.scale
     marks: list[Mark] = []
@@ -1461,6 +1570,7 @@ def perfect_skin(
         keep = _gauss(keep, max(0.8, 0.002 * F))
         edge_guard = (edge_guard if edge_guard is not None else np.ones((h, w), np.float32)) * (1.0 - keep)
     area_region = region * (1.0 - keep)
+    del keep, guard  # folded into edge_guard and area_region (each a full-size float mask)
 
     out = image
     before_energy = None
@@ -1482,20 +1592,25 @@ def perfect_skin(
                 if m.r0 is None:
                     m.r0 = m.r
                 m.r = min(RESIDUE_GROW * m.r0, RETRY_GROW * m.r)
-        prev = out
+        prev = out if p > 0 else None
         out = _correct_marks(out, region, todo, settings, F, edge_guard, [m for m in marks if m not in todo])
         rep.passes = p + 1
         # The first residual scan looks at the whole face again, more sensitively (it finds marks
         # the first detection missed, most often on deep skin). Later scans look for what the
         # repairs left: where a pass changed nothing, the last scan already saw these pixels, and a
         # new hit there is its tile statistics shifting around a repair, not a new mark.
-        changed = None if p == 0 else cv2.dilate((np.abs(out - prev).max(axis=2) > 1e-4).astype(np.uint8), np.ones((3, 3), np.uint8),
-                              iterations=max(1, int(round(0.01 * F)))) > 0
+        changed = None
+        if p > 0:
+            diff = np.zeros((h, w), np.uint8)
+            for r0 in range(0, h, 256):  # in strips: a full-size difference would be another 345 MB at 30 MP
+                diff[r0:r0 + 256] = np.abs(out[r0:r0 + 256] - prev[r0:r0 + 256]).max(axis=2) > 1e-4
+            changed = cv2.dilate(diff, np.ones((3, 3), np.uint8), iterations=max(1, int(round(0.01 * F)))) > 0
+        prev = None
         _verify(image, out, region, todo, [m for m in marks if m.attempts > 0 and m not in todo], settings, F,
                 [m for m in marks if m.attempts == 0 and m not in todo])
         # H. Residual scan of the corrected image (more sensitive), new marks join the next pass.
         boost = 20.0 * settings.residualIntensity / 100.0
-        res, _ = _analyse(out, region, body, faces, F, settings, sens_boost=boost)
+        res, _ = _analyse(out, region, body, faces, F, settings, sens_boost=boost, cache=scan_cache)
         for (x, y, r, kind, conf, is_body, contrast, why) in res:
             if kind in PROTECTED_KINDS:
                 continue
@@ -1593,6 +1708,8 @@ def perfect_skin(
     for m in marks:
         if m.kind == "manual" and m.attempts > 0:
             cv2.circle(allowed.view(np.uint8), (int(round(m.x)), int(round(m.y))), int(math.ceil(m.r * 2.5 + 2)), 1, -1)
-    out = np.where(allowed[..., None], np.clip(out, 0.0, 1.0), image)
+    out = out.copy() if out is image else out  # the input is never modified
+    np.clip(out, 0.0, 1.0, out=out)
+    np.copyto(out, image, where=~allowed[..., None])
     rep.ms = (time.perf_counter() - t0) * 1000
-    return out.astype(np.float32), rep
+    return out.astype(np.float32, copy=False), rep

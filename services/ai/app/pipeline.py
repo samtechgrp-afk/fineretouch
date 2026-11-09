@@ -39,6 +39,7 @@ Stages (all on float32 sRGB in [0, 1]):
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import cv2
@@ -64,7 +65,7 @@ from .retouch_engine import (
     skin_tone_guard,
 )
 from .engines.local import apply_heal_strokes, apply_local_layers
-from .engines.perfection import PerfectionReport, perfect_skin
+from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
 from .engines.noise import reduce_skin_noise
 from .engines.redness import reduce_redness
 from .engines.under_eye import soften_under_eye_texture
@@ -105,7 +106,38 @@ def from_ycbcr(y: np.ndarray, cb: np.ndarray, cr: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1)
 
 
+STRIP_WORKERS = 4  # at most; never more than OpenCV's thread count (the batch thermal profile sets it)
+
+
+def _rows(fn, h: int, rows: int = 256) -> None:
+    """fn(y0, y1) over horizontal strips, side by side on the CPU's cores. Only for per-pixel
+    work that writes its own rows, so the result is the same as one strip after the other."""
+    spans = [(y0, min(h, y0 + rows)) for y0 in range(0, h, rows)]
+    n = min(STRIP_WORKERS, max(1, cv2.getNumThreads()), len(spans))
+    if n <= 1:
+        for a, b in spans:
+            fn(a, b)
+        return
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        for f in [ex.submit(fn, a, b) for a, b in spans]:
+            f.result()
+    _trim_heap()
+
+
 def skin_probability(c: np.ndarray) -> np.ndarray:
+    """Per-pixel YCbCr skin box (0..1), computed in parallel strips on a large image."""
+    if c.shape[0] * c.shape[1] < 2_000_000:
+        return _skin_probability(c)
+    out = np.empty(c.shape[:2], np.float32)
+
+    def run(y0: int, y1: int) -> None:
+        out[y0:y1] = _skin_probability(c[y0:y1])
+
+    _rows(run, c.shape[0])
+    return out
+
+
+def _skin_probability(c: np.ndarray) -> np.ndarray:
     cb, cr = cbcr(c)
     return (
         smoothstep(0.50, 0.55, cr) * (1.0 - smoothstep(0.66, 0.71, cr))
@@ -366,6 +398,10 @@ def render(
         # Without a face the colour-only skin box would take in wood, sand and warm walls, so only
         # semantic body skin and the user's own Add-skin strokes count then.
         face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
+        # The blurred copies of the photo are rebuilt from the cleaned skin below; freeing them
+        # first keeps a 30 MP render inside its memory budget (each is a full float copy).
+        low0 = p = own = region = None
+        bands.clear()
         src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
         if report is not None:
             report.append(rep)
@@ -449,9 +485,10 @@ def render(
     if adj.colorMatch is not None and adj.colorMatch.amount > 0:
         stats = source_stats or color_stats(src)
     lut = decode_lut(adj.lut.data, adj.lut.size) if adj.lut is not None and adj.lut.amount > 0 else None
-    for y0 in range(0, h, STRIP_ROWS):
-        y1 = min(h, y0 + STRIP_ROWS)
+    def finish(y0: int, y1: int) -> None:
         c[y0:y1] = _finish_strip(c[y0:y1], src[y0:y1], low0[y0:y1], skin[y0:y1], y0, h, w, adj, smooth, stats, lut)
+
+    _rows(finish, h)
 
     # 10. Local retouch layers (v0.10): frequency separation, dodge & burn and correction
     #     brushes, each through its own mask (applied before the lens blur, as in the preview).
@@ -490,7 +527,7 @@ def perfect_photo(
         if protect is not None:
             body = body * protect
     return perfect_skin(
-        src.astype(np.float32), skin, faces, settings, body_skin=body,
+        src.astype(np.float32, copy=False), skin, faces, settings, body_skin=body,
         under_eye=masks.under_eye if masks.has_face else None, face_skin=masks.skin if masks.has_face else skin,
     )
 

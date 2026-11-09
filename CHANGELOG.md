@@ -54,6 +54,13 @@
   - **Repair quality review page** (`--quality-gallery`) to calibrate the checks on real validation photos.
 
   Results on the synthetic benchmark (held-out scenes): marks reported corrected but still visible 4 → 1, false corrections 7 → 5, no regression. On retouched real photos, fine texture lost fell from 3.4% to 1.6% and from 5.8% to 2.7%. The thresholds stay provisional until the validation photos are reviewed. Time rose 34%, which phase 2E addresses.
+- **Phase 2E: performance.**
+  - **Pixel-identical output.** The output is unchanged from 2D, checked on benchmark scenes, real photos and a full render.
+  - **Parallel processing.** Detection tiles and the render's per-pixel strips run in parallel, within OpenCV's thread count and a tile memory budget.
+  - **Less repeated work.** Residual scans reuse the first scan's masks, and the classification loop is faster.
+  - **Fewer full-size copies.** Many full-size temporary copies are gone.
+
+  On a 4-vCPU container: 30 MP 63 → 37 s and 6.5 → 4.1 GB; 25 MP 55 → 40 s and 6.3 → 4.5 GB. The 25 s / 4 GB target for the Ryzen 3 7330U is not yet confirmed; `--perf` measures it there.
 - **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)

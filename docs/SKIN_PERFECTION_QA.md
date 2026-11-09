@@ -381,3 +381,63 @@ mark was not found again. An engine test covers the circle rule.
   review page on the validation photos. Until then a strict gate means more marks to review.
 - Time is up 34% on the synthetic scenes (retries and wider donor search). Phase 2E works on
   this.
+
+## 9. Phase 2E results: performance
+
+### What changed (the output is unchanged)
+
+Every change keeps the result pixel-identical to phase 2D. That was checked on six benchmark
+scenes, including the 2400 px scene that uses the native-resolution pass, on two real photos
+through the engine, and on one real photo through the whole render. The held-out benchmark gives
+the same scores as `synthetic-2D.json` on every quality metric.
+
+- **Parallel detection tiles.** Up to 4 threads, no more than OpenCV's thread count, and at most
+  about 900 MB of tiles in flight. Memory that worker threads free is given back to the system
+  afterwards: glibc otherwise keeps about 1 GB of it.
+- **Parallel finishing strips and skin probability** in the render pipeline.
+- **Residual scans reuse the first scan's masks.** Skin, body, protected features and zones are
+  built once per render.
+- **Faster classification loop.** Per-kind settings and thresholds are cached, the edge term is
+  computed once for all candidates, and a small-array median replaces `np.median`.
+- **Less memory.** The blurred photo copies are freed before the engine runs. No copy is made
+  of an image that is already float32. Clipping and blending are done in place. Undoing a failed
+  repair only touches the area around it. The redness, pigmentation and relief tools free their
+  temporaries early.
+
+### Before and after (this container: 4-vCPU Xeon 2.3 GHz, 16 GB, Linux)
+
+`python -m scripts.perfection_benchmark --perf <photo> --repeats 2`, Skin Perfection on, full render:
+
+| Photo | 2D time | 2E time | 2D peak | 2E peak |
+|---|---|---|---|---|
+| CRPixels-1 (30.1 MP) | 63.0 s | **36.6 s** | 6,500 MB | **4,094 MB** |
+| CRPixels-5 (25.2 MP) | 55.0 s | **39.8 s** | 6,264 MB | **4,452 MB** |
+| Synthetic held-out, mean per scene | 10.2 s | **7.4 s** | 1,307 MB | 1,246 MB |
+
+(The 2D figure for CRPixels-1 is one timed run; the others are the median of two.)
+
+### Against the target (30 MP in 25 s, 4 GB, on the Ryzen 3 7330U)
+
+Not met on this container. Time is 37 to 40 s against 25 s, and the 25 MP photo peaks at
+4.45 GB. The Ryzen has 4 cores and 8 threads at up to 4.3 GHz, against 4 virtual cores at
+2.3 GHz here, so it should be faster, but that is untested. On Windows, run:
+
+    cd services\ai
+    python -m scripts.perfection_benchmark --perf D:\photos\<a 30 MP photo>.jpg --repeats 2 --json perf.json
+
+### Where the time goes now (30 MP, this container)
+
+- Detection: about 15 s over 3 scans. Each tile runs 8 dark and 5 bright scales.
+- Area tools: redness and pigmentation 6 s, relief 1.5 s.
+- Repairs: 3.7 s.
+- Rest of the render: about 7 s.
+
+### Options that would change the output (not done; each needs a decision)
+
+- **Body-skin weight floor.** On CRPixels-1, weights between 0.1% and 5% (segmentation noise)
+  cover 90% of the frame, so the area tools work on the whole photo, at about 1% strength in the
+  background. Treating weights under 2% as no skin would limit the work to the real skin (5% of
+  the frame here) and keep the tools off clothes and background. The pixels that change are
+  ones the tools touched at no more than 2% strength.
+- **Area tools on a smaller proxy.** For faces under 320 px they run at nearly full size
+  (CRPixels-5: 91%).
