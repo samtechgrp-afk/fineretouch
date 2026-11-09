@@ -2,6 +2,8 @@
 apps/web/src/engine/shaders.ts; any change to one must be mirrored in the other.
 
 Stages (all on float32 sRGB in [0, 1]):
+  0. Per-effect controls (app/effects.py): each effect's slider, 1x/2x/3x multiplier, opacity,
+     enable switch and the global retouch strength resolve to one effective value per effect.
   1. Three Gaussian bands at radii proportional to the long edge (s0 < s1 < s2). The skin
      stages cap s1/s2 at a share of the face width (TONE_SIGMA_FACE / BASE_SIGMA_FACE), which
      only binds when the face is small in the frame (full-length and group shots), and run on
@@ -41,6 +43,7 @@ import numpy as np
 
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
+from .effects import detector_multiplier, resolve_adjustments
 from .retouch_engine import (
     apply_boosted_skin_retouch,
     apply_depth_bokeh,
@@ -48,6 +51,8 @@ from .retouch_engine import (
     correct_teeth,
     faces_in_crop,
     natural_skin_retouch,
+    remove_acne,
+    remove_dark_spots,
     reduce_glasses_glare,
     remove_clothing_wrinkles,
     remove_stray_hairs,
@@ -210,9 +215,22 @@ def _work_box(weight: np.ndarray, pad: float) -> tuple[int, int, int, int] | Non
 def _skin_stages(
     c: np.ndarray, src: np.ndarray, skin_w: np.ndarray, faces: list[FaceAnalysis], adj: Adjustments,
     sigma_tone: float, sigma_base: float, bands: tuple[np.ndarray, np.ndarray] | None,
+    spot_multiplier: int = 1,
+    tool_multipliers: tuple[int, int] = (1, 1),
 ) -> np.ndarray:
     """Stages 3-5c on one crop (all arrays share its shape; faces normalised to it)."""
     c = c.copy()
+    # 2b. Separate skin tools (v0.7): acne first (red spots, bumps, then post-acne redness), then
+    #     dark spots (isolated marks healed, uneven pigmentation evened on the tone layer).
+    if adj.acneRemoval > 0:
+        c = remove_acne(c, skin_w, faces, adj.acneRemoval, tool_multipliers[0], adj.protectBeautyMarks)
+    if adj.darkSpotRemoval > 0:
+        c = remove_dark_spots(
+            c, skin_w, faces, adj.darkSpotRemoval, tool_multipliers[1], adj.protectBeautyMarks, adj.keepFreckles,
+            sigma_tone=sigma_tone, sigma_base=sigma_base,
+        )
+    if adj.acneRemoval > 0 or adj.darkSpotRemoval > 0:
+        bands = None  # the precomputed blurs no longer describe c
     # 3 + 4. Natural frequency-separation retouch: spots healed one by one (tone inpainted,
     #    healthy pores cloned in), then blotches smoothed and median-evened on the tone layer
     #    only, and the detail layer re-injected by the Texture retention factor.
@@ -220,8 +238,8 @@ def _skin_stages(
         c = natural_skin_retouch(
             c, skin_w, faces,
             smoothing=adj.skinSmoothing, texture_retention=adj.skinTexture,
-            spot_amount=adj.blemishRemoval, multiplier=int(adj.skinMultiplier),
-            protect_beauty_marks=adj.protectBeautyMarks,
+            spot_amount=adj.blemishRemoval, multiplier=int(spot_multiplier),
+            protect_beauty_marks=adj.protectBeautyMarks, keep_freckles=adj.keepFreckles,
             sigma_tone=sigma_tone, sigma_base=sigma_base, bands=bands,
         )
     base = bands[1] if bands is not None else blur(src, sigma_base)
@@ -259,6 +277,9 @@ def render(
     clothes_prob: optional garment probability (HxW, the segmenter's clothes class) for the
     clothing iron and recolour; without it a portrait prior below the chin is used.
     """
+    # Per-effect enable / multiplier / opacity and global strength -> effective engine values.
+    tool_multipliers = (detector_multiplier(adj, "acneRemoval"), detector_multiplier(adj, "darkSpotRemoval"))
+    adj, spot_multiplier = resolve_adjustments(adj)
     src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -285,7 +306,10 @@ def render(
 
     # 3-5c run on the skin's bounding box only: in a full-length shot that is a few percent of
     # the frame, and every pixel outside it would come back unchanged anyway.
-    skin_work = adj.skinSmoothing > 0 or adj.blemishRemoval > 0 or adj.skinToneUnify > 0 or adj.skinMultiplier > 1
+    skin_work = (
+        adj.skinSmoothing > 0 or adj.blemishRemoval > 0 or adj.skinToneUnify > 0 or adj.skinMultiplier > 1
+        or adj.acneRemoval > 0 or adj.darkSpotRemoval > 0
+    )
     if skin_work:
         sigma_tone, sigma_base = S1 * L, S2 * L
         if masks.has_face:
@@ -300,8 +324,9 @@ def render(
                 c[y0:y1, x0:x1], src[y0:y1, x0:x1], skin_w[y0:y1, x0:x1], local, adj,
                 sigma_tone, sigma_base,
                 (low1[y0:y1, x0:x1], low2[y0:y1, x0:x1]) if same_bands else None,
+                spot_multiplier, tool_multipliers,
             )
-    if adj.strayHairRemoval.enabled and faces:
+    if adj.strayHairRemoval.enabled and adj.strayHairRemoval.strength > 0 and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
     # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted.
     if adj.glareReduction > 0 and faces:

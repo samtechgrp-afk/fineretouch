@@ -275,6 +275,14 @@ MOLE_MAX_REDNESS = 0.015
 MOLE_MIN_DIAMETER = 0.012
 # Detection runs with the face about this many pixels wide; pores vanish below the finest scale.
 SPOT_WORK_FACE = 420.0
+# Acne vs dark spot: a spot is acne when its redness (Cr above the skin) passes this and carries
+# at least ACNE_RED_SHARE of its darkness; otherwise it is a pigmented / dark mark.
+ACNE_MIN_REDNESS = 0.008
+ACNE_RED_SHARE = 0.35
+# Freckles (kept by Dark spot removal when "Keep freckles" is on): small and low-contrast.
+FRECKLE_MAX_DIAMETER = 0.02
+FRECKLE_MAX_DARKNESS = 0.09
+SPOT_KINDS = ("all", "acne", "dark")
 
 
 @dataclass
@@ -353,8 +361,14 @@ def detect_spots(
     multiplier: int = 1,
     amount: float = 100.0,
     protect_beauty_marks: bool = True,
+    kind: str = "all",
+    keep_freckles: bool = False,
 ) -> SpotDetection:
     """Find acne, pimples and dark spots inside the skin mask.
+
+    kind: "all" (general blemish removal), "acne" (red spots and raised bumps only) or "dark"
+    (dark / pigmented marks that are not red). keep_freckles leaves small, low-contrast dark
+    spots alone for "dark" and "all".
 
     Signal: darkness and redness relative to the surrounding skin, so a red pimple and a
     brown spot both read as bright blobs. Blobs are found with a multi-scale normalised
@@ -375,12 +389,13 @@ def detect_spots(
     x0, x1 = max(0, xs.min() - pad), min(w, xs.max() + pad + 1)
     if (y1 - y0) * (x1 - x0) < 0.8 * h * w:
         local = faces_in_crop(faces, x0, y0, x1 - x0, y1 - y0, w, h)
-        d = _detect_spots(image[y0:y1, x0:x1], mask[y0:y1, x0:x1], local, multiplier, amount, protect_beauty_marks, F)
+        d = _detect_spots(image[y0:y1, x0:x1], mask[y0:y1, x0:x1], local, multiplier, amount, protect_beauty_marks, F,
+                          kind, keep_freckles)
         heal, moles = empty, empty.copy()
         heal[y0:y1, x0:x1] = d.heal
         moles[y0:y1, x0:x1] = d.protected
         return SpotDetection(heal, moles, d.count, d.protected_count, F)
-    return _detect_spots(image, mask, faces, multiplier, amount, protect_beauty_marks, F)
+    return _detect_spots(image, mask, faces, multiplier, amount, protect_beauty_marks, F, kind, keep_freckles)
 
 
 def _ring_isotropy(y: np.ndarray, labels: np.ndarray, stats: np.ndarray, centroids: np.ndarray,
@@ -415,8 +430,10 @@ def _ring_isotropy(y: np.ndarray, labels: np.ndarray, stats: np.ndarray, centroi
 
 def _detect_spots(
     image: np.ndarray, mask: np.ndarray, faces: list[FaceAnalysis], multiplier: int, amount: float,
-    protect_beauty_marks: bool, F: float,
+    protect_beauty_marks: bool, F: float, kind: str = "all", keep_freckles: bool = False,
 ) -> SpotDetection:
+    if kind not in SPOT_KINDS:
+        raise ValueError(f"kind must be one of {SPOT_KINDS}")
     prof = SPOT_PROFILES.get(int(multiplier), SPOT_PROFILES[1])
     h, w = image.shape[:2]
     s = min(1.0, SPOT_WORK_FACE / F)
@@ -506,11 +523,21 @@ def _detect_spots(
             if np.percentile(grad[sel], 90) < SOFT_SHADOW_EDGE * max(float(peak_dark[i]), 1e-4):
                 heal_ids[i] = False
 
+    # Separate tools: acne (red) vs dark / pigmented marks; freckles optionally kept.
+    acne = (mean_red >= ACNE_MIN_REDNESS) & (1.5 * mean_red >= ACNE_RED_SHARE * np.maximum(mean_dark, 1e-4))
+    if kind == "acne":
+        heal_ids &= acne
+    elif kind == "dark":
+        heal_ids &= ~acne
+    if keep_freckles and kind != "acne":
+        heal_ids &= ~((diameter < FRECKLE_MAX_DIAMETER * Fw) & (peak_dark < FRECKLE_MAX_DARKNESS) & ~acne)
+
     lut_heal = np.concatenate([[0], heal_ids]).astype(np.uint8)
     lut_mole = np.concatenate([[0], mole]).astype(np.uint8)
     heal = lut_heal[labels]
     moles = lut_mole[labels]
-    bumps, n_bumps = _detect_bumps(y, core, protect, faces, Fw, prof, a, floor) if prof.bump_k > 0 else (None, 0)
+    look_bumps = prof.bump_k > 0 and kind != "dark"
+    bumps, n_bumps = _detect_bumps(y, core, protect, faces, Fw, prof, a, floor) if look_bumps else (None, 0)
     if bumps is not None:
         heal = np.maximum(heal, bumps)
     grow = max(3, round(prof.grow * Fw * 2) | 1)
@@ -758,6 +785,80 @@ def adaptive_tone_median(tone: np.ndarray, weight: np.ndarray, sigma: float) -> 
     return tone + delta * weight[..., None]
 
 
+def reduce_acne_redness(image: np.ndarray, heal: np.ndarray, skin: np.ndarray, face_w: float, amount: float) -> np.ndarray:
+    """Post-acne redness: around healed acne, pull excess red (Cr above the local skin) back.
+
+    Only a halo of about 3 spot widths around the detected acne is touched, so the cheeks'
+    natural flush elsewhere stays.
+    """
+    t = float(np.clip(amount / 100.0, 0.0, 1.0))
+    if t <= 0 or not heal.any():
+        return image
+    F = max(face_w, 32.0)
+    halo = cv2.dilate(heal.astype(np.uint8), _ellipse(max(3, int(0.03 * F) | 1))).astype(np.float32)
+    halo = _gauss(halo, 0.01 * F) * skin
+    y = _luma(image)
+    cb, cr = _cbcr(image)
+    base_cr = _masked_blur(cr, skin.astype(np.float32), 0.05 * F)
+    excess = np.maximum(cr - base_cr, 0.0)
+    return np.clip(_from_ycbcr(y, cb, cr - excess * 0.85 * t * halo), 0.0, 1.0).astype(np.float32)
+
+
+def remove_acne(
+    image: np.ndarray, skin: np.ndarray, faces: list[FaceAnalysis], amount: float, multiplier: int = 1,
+    protect_beauty_marks: bool = True,
+) -> np.ndarray:
+    """Acne removal: red spots, pimples and raised bumps healed one by one, then local redness."""
+    if amount <= 0:
+        return image
+    det = detect_spots(image, skin, faces, multiplier, amount, protect_beauty_marks, kind="acne")
+    if det.count == 0:
+        return image
+    c = heal_spots(image, skin, faces, amount, multiplier, protect_beauty_marks, detection=det)
+    return reduce_acne_redness(c, det.heal, skin, det.face_width, amount)
+
+
+# Pigmentation works one band coarser than smoothing: patches (sun spots, melasma, post-acne
+# marks) span the S2 band; the wider skin is a blur PIGMENT_WIDE times larger (S3 = 2.5 x S2).
+PIGMENT_WIDE = 2.5
+
+
+def correct_pigmentation(image: np.ndarray, skin: np.ndarray, sigma_base: float, amount: float) -> np.ndarray:
+    """Uneven pigmentation: brownish patches on the tone layer pulled toward the skin around them.
+
+    A patch qualifies when its tone layer is darker than the wider skin AND more yellow-brown
+    (lower Cb). Shadows darken without that hue shift and strong dark edges (nose side, jaw)
+    are excluded, so facial shading stays. Pores are untouched (detail layer is kept).
+    Mirrored in shaders.ts (uPigment).
+    """
+    t = float(np.clip(amount / 100.0, 0.0, 1.0))
+    if t <= 0:
+        return image
+    tone = _gauss(image, sigma_base)
+    base = _gauss(image, PIGMENT_WIDE * sigma_base)
+    d_y = _luma(base) - _luma(tone)
+    cb_t, _ = _cbcr(tone)
+    cb_b, _ = _cbcr(base)
+    pig = _smoothstep(0.004, 0.02, d_y) * _smoothstep(0.002, 0.008, cb_b - cb_t)
+    edge = _smoothstep(0.06, 0.14, d_y)
+    k = (0.9 * t * pig * (1.0 - edge) * skin)[..., None]
+    return np.clip(image + (base - tone) * k, 0.0, 1.0).astype(np.float32)
+
+
+def remove_dark_spots(
+    image: np.ndarray, skin: np.ndarray, faces: list[FaceAnalysis], amount: float, multiplier: int = 1,
+    protect_beauty_marks: bool = True, keep_freckles: bool = False, *, sigma_tone: float, sigma_base: float,
+) -> np.ndarray:
+    """Dark spot removal: isolated dark / pigmented marks healed (texture cloned back), then
+    uneven pigmentation evened on the tone layer. Beauty marks and, optionally, freckles stay."""
+    if amount <= 0:
+        return image
+    det = detect_spots(image, skin, faces, multiplier, amount, protect_beauty_marks, kind="dark", keep_freckles=keep_freckles)
+    c = heal_spots(image, skin, faces, amount, multiplier, protect_beauty_marks, detection=det) if det.count else image
+    pig = amount if not keep_freckles else 0.6 * amount
+    return correct_pigmentation(c, skin, sigma_base, pig)
+
+
 def natural_skin_retouch(
     image: np.ndarray,
     skin: np.ndarray,
@@ -771,6 +872,7 @@ def natural_skin_retouch(
     sigma_tone: float,
     sigma_base: float,
     bands: tuple[np.ndarray, np.ndarray] | None = None,
+    keep_freckles: bool = False,
 ) -> np.ndarray:
     """Texture-preserving skin retouch on two frequency layers.
 
@@ -793,7 +895,8 @@ def natural_skin_retouch(
     """
     c = image
     if spot_amount > 0:
-        c = heal_spots(c, skin, faces, spot_amount, multiplier, protect_beauty_marks)
+        det = detect_spots(c, skin, faces, multiplier, spot_amount, protect_beauty_marks, keep_freckles=keep_freckles)
+        c = heal_spots(c, skin, faces, spot_amount, multiplier, protect_beauty_marks, detection=det)
     smooth = float(np.clip(smoothing / 100.0, 0.0, 1.0))
     if smooth <= 0:
         return c

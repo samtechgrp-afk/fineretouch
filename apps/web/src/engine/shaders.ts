@@ -135,6 +135,10 @@ out vec4 outColor;
 uniform sampler2D uSrc, uLow0, uLow1, uLow2, uLow3, uMask, uHairRoi;
 uniform bool uHasFace;
 uniform float uMultiplier;      // 1..3 skin boost
+uniform float uSpotMultiplier;  // 1..3 spot detection reach (max of skin boost and spot healing multiplier)
+uniform float uAcne, uDarkSpot;               // 0..1 separate acne / dark spot tools (v0.7)
+uniform float uAcneMultiplier, uDarkMultiplier; // 1..3 their detector reach
+uniform bool uKeepFreckles;
 uniform bool uHair;             // stray hair cleanup enabled and a face ROI exists
 uniform float uHairStrength;    // 0..1
 uniform mat3 uMatchM;           // colour transfer matrix (L*a*b*), see matchMatrix() in color.ts
@@ -217,6 +221,35 @@ void main() {
   vec3 fine = src - low1;
   vec3 mid = low1 - low2;
 
+  float face = uHasFace ? m.r : skin;
+  // Acne removal (preview of retouch_engine.remove_acne): red spots get the surrounding tone
+  // plus their own grain, then excess redness around them is pulled back to the local skin.
+  if (uAcne > 0.0) {
+    float sens = 1.0 + 0.45 * (uAcneMultiplier - 1.0);
+    float r = crOf(low1) - crOf(low2);
+    float spot = smoothstep(0.012 / sens, 0.035 / sens, r);
+    vec3 clean = low2 + fine * uTexture;
+    c += (clean - c) * spot * face * min(1.0, uAcne * (0.9 + 0.1 * sens));
+    float flush = smoothstep(0.004, 0.02 / sens, crOf(low2) - crOf(low3)) * face * uAcne * 0.6;
+    c = fromYCbCr(luma(c), cbOf(c), crOf(c) - max(crOf(low2) - crOf(low3), 0.0) * flush);
+  }
+  // Dark spot removal (preview of retouch_engine.remove_dark_spots): dark, non-red marks healed,
+  // then brownish pigmentation (tone darker AND lower Cb than the wider skin) evened; strong
+  // dark edges (facial shading) are excluded.
+  if (uDarkSpot > 0.0) {
+    float sens = (1.0 + 0.45 * (uDarkMultiplier - 1.0)) / (uKeepFreckles ? 1.8 : 1.0);
+    float d = luma(low2) - luma(low1);
+    float r = crOf(low1) - crOf(low2);
+    float spot = smoothstep(0.015 / sens, 0.05 / sens, d) * (1.0 - smoothstep(0.008, 0.02, r));
+    if (uProtectMoles) spot *= 1.0 - smoothstep(0.1, 0.16, luma(low2) - luma(low0));
+    vec3 clean = low2 + fine * uTexture;
+    c += (clean - c) * spot * face * min(1.0, uDarkSpot * (0.9 + 0.1 * sens));
+    float dp = luma(low3) - luma(low2);
+    float pig = smoothstep(0.004, 0.02, dp) * smoothstep(0.002, 0.008, cbOf(low3) - cbOf(low2));
+    float edge = smoothstep(0.06, 0.14, dp);
+    c += (low3 - low2) * 0.9 * uDarkSpot * (uKeepFreckles ? 0.6 : 1.0) * pig * (1.0 - edge) * skin;
+  }
+
   // Frequency separation (preview of retouch_engine.natural_skin_retouch): tone layer = low1,
   // detail layer = src - low1. The blotch band (low1 - low2) is dropped from the tone layer and
   // the detail layer comes back by the Texture retention factor. Export also runs an adaptive
@@ -231,7 +264,7 @@ void main() {
   // gates it, because a red pimple fails the colour-based skin test. 2x/3x widen detection;
   // very dark, neutral spots (beauty marks) are kept unless protection is off.
   if (uBlemish > 0.0) {
-    float sens = 1.0 + 0.45 * (uMultiplier - 1.0);
+    float sens = 1.0 + 0.45 * (uSpotMultiplier - 1.0);
     float d = luma(low2) - luma(low1);
     float r = crOf(low1) - crOf(low2);
     float spot = max(smoothstep(0.015 / sens, 0.05 / sens, d), smoothstep(0.012 / sens, 0.035 / sens, r));

@@ -9,6 +9,8 @@
  * Every slider is a plain number with a documented range so a preset is just JSON.
  */
 
+import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControls } from './effects.js';
+
 export interface SliderSpec {
   key: AdjustmentKey;
   label: string;
@@ -201,6 +203,12 @@ export interface Adjustments {
   skinTexture: number; // 0..100 texture retention: share of the pore / detail layer re-injected after smoothing
   blemishRemoval: number; // 0..100
   skinToneUnify: number; // 0..100 pulls skin chroma toward the face average
+  /** v0.7 Acne removal: red spots, pimples, raised bumps, then post-acne redness. 0..100 */
+  acneRemoval: number;
+  /** v0.7 Dark spot removal: isolated dark marks, then uneven pigmentation on the tone layer. 0..100 */
+  darkSpotRemoval: number;
+  /** Dark spot and blemish removal leave small, faint freckles alone. */
+  keepFreckles: boolean;
   // Face (landmark driven)
   eyeBrighten: number; // 0..100
   darkCircles: number; // 0..100
@@ -229,6 +237,11 @@ export interface Adjustments {
   clothing: ClothingSettings;
   /** Reference look as a 3D LUT, applied after colour grading. */
   lut: LookLut | null;
+  // Per-effect controls (v0.7, effects.ts): enable / 1x-2x-3x / opacity per retouch effect,
+  // and a master strength over all of them. Slider values above are never rewritten.
+  effects: EffectControls;
+  /** 0..100: scales every retouch effect's contribution (not light / colour). */
+  globalStrength: number;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -240,10 +253,13 @@ export type AdjustmentKey = Exclude<
   | 'depthBokeh'
   | 'protectBeautyMarks'
   | 'skinToneGuard'
+  | 'keepFreckles'
   | 'hsl'
   | 'colorGrading'
   | 'clothing'
   | 'lut'
+  | 'effects'
+  | 'globalStrength'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -275,6 +291,9 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   skinTexture: 50,
   blemishRemoval: 0,
   skinToneUnify: 0,
+  acneRemoval: 0,
+  darkSpotRemoval: 0,
+  keepFreckles: false,
   eyeBrighten: 0,
   darkCircles: 0,
   teethWhiten: 0,
@@ -292,6 +311,8 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   teethStainRemoval: 0,
   clothing: DEFAULT_CLOTHING,
   lut: null,
+  effects: DEFAULT_EFFECTS,
+  globalStrength: 100,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -303,15 +324,35 @@ export const SLIDERS: readonly SliderSpec[] = [
   { key: 'tint', label: 'Tint', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'saturation', label: 'Saturation', min: -100, max: 100, step: 1, group: 'color' },
   { key: 'vibrance', label: 'Vibrance', min: -100, max: 100, step: 1, group: 'color' },
-  { key: 'skinSmoothing', label: 'Smoothing', min: 0, max: 100, step: 1, group: 'skin' },
   {
-    key: 'skinTexture', label: 'Texture retention', min: 0, max: 100, step: 1, group: 'skin', unit: '%',
-    hint: 'Share of the pore and fine-detail layer put back after Smoothing evens the tone layer. 100% keeps every pore.',
+    key: 'skinSmoothing', label: 'Skin smoothing', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Evens blotches and roughness on the tone layer only (frequency separation); pores come back through Texture preservation.',
   },
-  { key: 'blemishRemoval', label: 'Spot healing', min: 0, max: 100, step: 1, group: 'skin' },
-  { key: 'skinToneUnify', label: 'Even skin tone', min: 0, max: 100, step: 1, group: 'skin' },
+  {
+    key: 'skinTexture', label: 'Texture preservation', min: 0, max: 100, step: 1, group: 'skin', unit: '%',
+    hint: 'Share of the pore and fine-detail layer put back after smoothing. 100% keeps every pore.',
+  },
+  {
+    key: 'acneRemoval', label: 'Acne removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Finds red spots, pimples and raised bumps one by one, heals them with real skin texture, then reduces the redness around them. Unaffected skin is untouched.',
+  },
+  {
+    key: 'darkSpotRemoval', label: 'Dark spot removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Heals isolated dark marks and evens brownish pigmentation patches. Facial shadows, beauty marks and (optionally) freckles are kept.',
+  },
+  {
+    key: 'blemishRemoval', label: 'Blemish removal', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'General clean-up: every kind of small spot or mark (acne, dark spots, minor imperfections) in one pass.',
+  },
+  {
+    key: 'skinToneUnify', label: 'Skin tone correction', min: 0, max: 100, step: 1, group: 'skin',
+    hint: 'Evens uneven colour and redness toward the person\'s own local skin tone (never a preset complexion).',
+  },
+  {
+    key: 'darkCircles', label: 'Under-eye correction', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
+    hint: 'Lifts dark circles and under-eye discoloration toward the cheek tone, without enlarging or reshaping the eyes.',
+  },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
-  { key: 'darkCircles', label: 'Reduce dark circles', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   {
     key: 'teethStainRemoval', label: 'Teeth stains', min: 0, max: 100, step: 1, group: 'face', needsFace: true,
@@ -374,6 +415,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   };
   if (typeof src.protectBeautyMarks === 'boolean') out.protectBeautyMarks = src.protectBeautyMarks;
   if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
+  if (typeof src.keepFreckles === 'boolean') out.keepFreckles = src.keepFreckles;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
   const cl = asRecord(src.clothing);
@@ -385,6 +427,8 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
     saturation: num(cl.saturation, -100, 100, DEFAULT_CLOTHING.saturation),
   };
   out.lut = sanitizeLookLut(src.lut);
+  out.effects = sanitizeEffects(src.effects);
+  out.globalStrength = num(src.globalStrength, 0, 100, 100);
   return out;
 }
 
@@ -456,7 +500,9 @@ export function isDefault(adj: Adjustments): boolean {
     hslIsDefault(adj.hsl) &&
     gradingIsDefault(adj.colorGrading) &&
     !adj.clothing.enabled &&
-    adj.lut === null
+    adj.lut === null &&
+    adj.globalStrength === 100 &&
+    effectsAreDefault(adj.effects)
   );
 }
 
@@ -643,3 +689,4 @@ export const MAX_BATCH_ITEMS = 5000;
 
 export * from './style.js';
 export * from './lut.js';
+export * from './effects.js';

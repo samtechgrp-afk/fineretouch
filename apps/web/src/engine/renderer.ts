@@ -1,5 +1,5 @@
 import type { Adjustments, ColorStats } from '@fineretouch/shared';
-import { gradingIsDefault, hslIsDefault } from '@fineretouch/shared';
+import { gradingIsDefault, hslIsDefault, resolveAdjustments } from '@fineretouch/shared';
 import { matchMatrix, toneCurveKnots } from './color';
 import { gradeBounds, gradeUniform, hslUniform } from './colorMixer';
 import {
@@ -240,8 +240,11 @@ export class Renderer {
   }
 
   /** Run the retouch pass (and the bokeh chain when enabled) into the offscreen output. */
-  render(adj: Adjustments, info: RenderInfo): void {
+  render(edit: Adjustments, info: RenderInfo): void {
     if (!this.src || !this.out) return;
+    // Per-effect enable / 1x-2x-3x / opacity and global strength -> effective engine values
+    // (same function as services/ai/app/effects.py, so preview and export agree).
+    const adj = resolveAdjustments(edit);
     const gl = this.gl;
     const p = this.retouchProg;
     gl.useProgram(p);
@@ -274,8 +277,15 @@ export class Renderer {
     u('uSharpen', adj.sharpen / 100);
     u('uVignette', adj.vignette / 100);
     u('uMultiplier', adj.skinMultiplier);
+    u('uSpotMultiplier', adj.spotMultiplier);
+    u('uAcne', adj.acneRemoval / 100);
+    u('uDarkSpot', adj.darkSpotRemoval / 100);
+    u('uAcneMultiplier', adj.acneMultiplier);
+    u('uDarkMultiplier', adj.darkSpotMultiplier);
+    gl.uniform1i(this.loc(p, 'uKeepFreckles'), adj.keepFreckles ? 1 : 0);
     gl.uniform1i(this.loc(p, 'uProtectMoles'), adj.protectBeautyMarks ? 1 : 0);
-    const skinWork = adj.skinSmoothing > 0 || adj.blemishRemoval > 0 || adj.skinToneUnify > 0 || adj.skinMultiplier > 1;
+    const skinWork =
+      adj.skinSmoothing > 0 || adj.blemishRemoval > 0 || adj.skinToneUnify > 0 || adj.skinMultiplier > 1 || adj.acneRemoval > 0 || adj.darkSpotRemoval > 0;
     gl.uniform1i(this.loc(p, 'uToneGuard'), adj.skinToneGuard && skinWork ? 1 : 0);
     const hsl = !hslIsDefault(adj.hsl);
     gl.uniform1i(this.loc(p, 'uHsl'), hsl ? 1 : 0);

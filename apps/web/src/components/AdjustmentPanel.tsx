@@ -1,12 +1,13 @@
 'use client';
 
 import * as Slider from '@radix-ui/react-slider';
-import { DEFAULT_ADJUSTMENTS, GROUP_LABELS, SLIDERS, type AdjustmentGroup, type SliderSpec } from '@fineretouch/shared';
+import { DEFAULT_ADJUSTMENTS, GROUP_LABELS, SLIDERS, effectForSlider, type AdjustmentGroup, type Adjustments, type SliderSpec } from '@fineretouch/shared';
 import { Fragment, useState } from 'react';
 import { selectActivePhoto, useEditor } from '@/lib/store';
 import { ColorMixerPanel } from './ColorMixerPanel';
 import { RetouchControlPanel } from './RetouchControlPanel';
 import { BatchSyncPanel } from './panels/BatchSyncPanel';
+import { EffectControlsRow, EffectSwitch, GlobalStrength } from './panels/EffectControls';
 import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
@@ -32,6 +33,10 @@ export function AdjustmentPanel() {
 
   return (
     <aside className="flex h-full min-w-0 flex-col overflow-y-auto overflow-x-hidden" aria-label="Adjustments">
+      <Section title="Retouch strength" open={open.strength ?? true} onToggle={() => setOpen((o) => ({ ...o, strength: !(o.strength ?? true) }))}
+        note={photo.restored ? 'Edits restored from your last session.' : undefined}>
+        <GlobalStrength adj={photo.adjustments} />
+      </Section>
       <Section title="Pro studio retouch" open={open.studio} onToggle={() => setOpen((o) => ({ ...o, studio: !o.studio }))} note={faceState}>
         <RetouchStudioPanel photo={photo} />
       </Section>
@@ -46,7 +51,7 @@ export function AdjustmentPanel() {
           <Section title={GROUP_LABELS[g]} open={open[g]} onToggle={() => setOpen((o) => ({ ...o, [g]: !o[g] }))}
             note={g === 'face' ? faceState : g === 'skin' && !hasFace ? 'Using colour-based skin detection' : undefined}>
             {SLIDERS.filter((s) => s.group === g).map((s) => (
-              <AdjustmentSlider key={s.key} spec={s} value={photo.adjustments[s.key]} disabled={Boolean(s.needsFace && !hasFace)} />
+              <AdjustmentSlider key={s.key} spec={s} adj={photo.adjustments} disabled={Boolean(s.needsFace && !hasFace)} />
             ))}
           </Section>
           {g === 'color' && (
@@ -83,7 +88,10 @@ function Section(props: { title: string; open: boolean; onToggle(): void; note?:
   );
 }
 
-function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: number; disabled: boolean }) {
+function AdjustmentSlider({ spec, adj, disabled }: { spec: SliderSpec; adj: Adjustments; disabled: boolean }) {
+  const value = adj[spec.key];
+  const effect = effectForSlider(spec.key);
+  const effectOff = effect !== null && !adj.effects[effect].enabled;
   const beginEdit = useEditor((s) => s.beginEdit);
   const setAdjustment = useEditor((s) => s.setAdjustment);
   const updateAdjustments = useEditor((s) => s.updateAdjustments);
@@ -93,10 +101,11 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
 
   return (
     <div className={disabled ? 'opacity-40' : ''}>
-      <div className="mb-1 flex items-center justify-between text-xs">
+      <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+        {effect && <EffectSwitch id={effect} adj={adj} disabled={disabled} />}
         <label
           htmlFor={id}
-          className="cursor-pointer text-ink-300"
+          className={`mr-auto cursor-pointer ${effectOff ? 'text-ink-500 line-through' : 'text-ink-300'}`}
           title={spec.hint ? `${spec.hint} Double-click to reset.` : 'Double-click to reset'}
           onDoubleClick={() => !disabled && updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         >
@@ -133,6 +142,7 @@ function AdjustmentSlider({ spec, value, disabled }: { spec: SliderSpec; value: 
           onDoubleClick={() => updateAdjustments({ [spec.key]: def }, [useEditor.getState().activeId!])}
         />
       </Slider.Root>
+      {effect && <EffectControlsRow id={effect} adj={adj} disabled={disabled} />}
     </div>
   );
 }

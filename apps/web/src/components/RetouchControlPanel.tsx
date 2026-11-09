@@ -1,5 +1,6 @@
 'use client';
 
+import { EffectControlsRow } from './panels/EffectControls';
 import { SKIN_MULTIPLIERS, mapStyleToAdjustments, type ApertureShape, type SkinMultiplier, type StyleSyncMode } from '@fineretouch/shared';
 import { useRef, useState } from 'react';
 import { extractPalette } from '@/engine/color';
@@ -81,6 +82,12 @@ function SkinBoost({ photo }: { photo: Photo }) {
         <Toggle checked={keepMarks} onChange={(v) => updateAdjustments({ protectBeautyMarks: v })} label="Keep beauty marks" />
       </div>
       <div className="mt-2 flex items-center justify-between gap-2">
+        <span className="text-xs text-ink-300" title="Dark spot and blemish removal leave small, faint freckles in place.">
+          Keep freckles
+        </span>
+        <Toggle checked={photo.adjustments.keepFreckles} onChange={(v) => updateAdjustments({ keepFreckles: v })} label="Keep freckles" />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2">
         <span
           className="text-xs text-ink-300"
           title="Locks skin colour in CIELAB: smoothing, spot healing, even tone and the 2x/3x boost may not turn skin grey or ashen, or shift it away from the person's own undertone."
@@ -113,6 +120,7 @@ function StrayHair({ photo, hasFace }: { photo: Photo; hasFace: boolean }) {
         onStart={() => beginEdit()}
         onChange={(v) => setStray({ strength: v }, { live: true })}
       />
+      <EffectControlsRow id="strayHair" adj={photo.adjustments} disabled={!st.enabled || !hasFace} />
     </section>
   );
 }

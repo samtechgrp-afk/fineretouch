@@ -2,6 +2,8 @@
 
 import {
   DEFAULT_ADJUSTMENTS,
+  DEFAULT_EFFECT_CONTROL,
+  EFFECT_SOURCE,
   applyPreset,
   autoRetouch,
   mapStyleToAdjustments,
@@ -12,6 +14,8 @@ import {
   type ColorMatch,
   type ColorStats,
   type DepthBokehSettings,
+  type EffectControl,
+  type EffectId,
   type ImageAnalysis,
   type Preset,
   type SkinMultiplier,
@@ -21,6 +25,7 @@ import {
 } from '@fineretouch/shared';
 import { create } from 'zustand';
 import type { StudioOverlay } from '@/components/viewport/shaders';
+import { loadSavedEdits, saveEdits } from './editPersistence';
 import type { RawInfo } from './images';
 
 export const HISTORY_LIMIT = 100;
@@ -74,6 +79,10 @@ export interface Photo {
   rejected: boolean;
   /** Camera RAW original: format, badge label and EXIF (null for JPEG/PNG/...). */
   raw?: RawInfo | null;
+  /** name|bytes|lastModified|WxH of the original: edits are autosaved under it and restored on re-import. */
+  fingerprint?: string;
+  /** True when this photo's edits were restored from a previous session. */
+  restored?: boolean;
 }
 
 export interface ViewState {
@@ -99,7 +108,7 @@ export interface EditorState {
   aiOnline: boolean | null;
   styleSync: StyleSyncState;
 
-  addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'> & Partial<Pick<Photo, 'raw'>>>): void;
+  addPhotos(photos: Array<Pick<Photo, 'id' | 'name' | 'width' | 'height' | 'thumbUrl'> & Partial<Pick<Photo, 'raw' | 'fingerprint'>>>): void;
   removePhotos(ids: string[]): void;
   /** Reorder a subset of photos (e.g. back to file order after a parallel import). */
   sortPhotos(ids: string[]): void;
@@ -116,6 +125,12 @@ export interface EditorState {
   /** Live change (e.g. during a drag) without an undo step. */
   patchAdjustments(patch: Partial<Adjustments>, id?: string): void;
   setSkinMultiplier(multiplier: SkinMultiplier, ids?: string[]): void;
+  /** Per-effect enable / multiplier / opacity. `live` skips history (opacity drags). */
+  setEffectControl(id: EffectId, patch: Partial<EffectControl>, opts?: { live?: boolean; ids?: string[] }): void;
+  /** Effect slider back to its default and its controls to enabled, 1x, 100%. */
+  resetEffect(id: EffectId, ids?: string[]): void;
+  /** Master retouch strength (0..100). `live` skips history. */
+  setGlobalStrength(value: number, opts?: { live?: boolean; ids?: string[] }): void;
   /** `live` skips history (slider drags); call beginEdit() at drag start. */
   setStrayHairRemoval(patch: Partial<StrayHairSettings>, opts?: { live?: boolean; ids?: string[] }): void;
   setDepthBokeh(patch: Partial<DepthBokehSettings>, opts?: { live?: boolean; ids?: string[] }): void;
@@ -216,9 +231,11 @@ export const useEditor = create<EditorState>()((set, get) => ({
       const order = [...s.order];
       for (const p of list) {
         if (photos[p.id]) continue;
+        const saved = p.fingerprint ? loadSavedEdits(p.fingerprint) : null;
         photos[p.id] = {
           ...p,
-          adjustments: { ...DEFAULT_ADJUSTMENTS },
+          adjustments: saved ?? { ...DEFAULT_ADJUSTMENTS },
+          restored: Boolean(saved),
           past: [],
           future: [],
           analysis: null,
@@ -323,6 +340,37 @@ export const useEditor = create<EditorState>()((set, get) => ({
 
   setSkinMultiplier(multiplier, ids) {
     get().updateAdjustments({ skinMultiplier: multiplier }, ids);
+  },
+
+  setEffectControl(id, patch, opts) {
+    const s = get();
+    const apply = (a: Adjustments) => sanitizeAdjustments({ ...a, effects: { ...a.effects, [id]: { ...a.effects[id], ...patch } } });
+    if (opts?.live) {
+      const p = selectActivePhoto(s);
+      if (p) set({ photos: mapPhotos(s, [p.id], (q) => ({ ...q, adjustments: apply(q.adjustments) })) });
+      return;
+    }
+    set({ photos: mapPhotos(s, targets(s, opts?.ids), (p) => withHistory(p, apply(p.adjustments))) });
+  },
+
+  resetEffect(id, ids) {
+    const s = get();
+    const src = EFFECT_SOURCE[id];
+    const apply = (a: Adjustments): Adjustments => {
+      const next: Record<string, unknown> = { ...a, effects: { ...a.effects, [id]: { ...DEFAULT_EFFECT_CONTROL } } };
+      if (src.length === 1) next[src[0]] = DEFAULT_ADJUSTMENTS[src[0]];
+      else {
+        const [key, field] = src as [keyof Adjustments, string];
+        next[key] = { ...(a[key] as object), [field]: (DEFAULT_ADJUSTMENTS[key] as unknown as Record<string, number>)[field] };
+      }
+      return sanitizeAdjustments(next);
+    };
+    set({ photos: mapPhotos(s, targets(s, ids), (p) => withHistory(p, apply(p.adjustments))) });
+  },
+
+  setGlobalStrength(value, opts) {
+    if (opts?.live) get().patchAdjustments({ globalStrength: value });
+    else get().updateAdjustments({ globalStrength: value }, opts?.ids);
   },
 
   setStrayHairRemoval(patch, opts) {
@@ -533,3 +581,21 @@ export const useEditor = create<EditorState>()((set, get) => ({
 }));
 
 export const selectActivePhoto = (s: EditorState): Photo | null => (s.activeId ? s.photos[s.activeId] ?? null : null);
+
+// Autosave: every photo's current edits are written (debounced) under its file fingerprint, so
+// re-importing the same original after a reload or crash restores them. The original is never touched.
+if (typeof window !== 'undefined') {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let last: Record<string, Photo> | null = null;
+  useEditor.subscribe((state) => {
+    if (state.photos === last) return;
+    last = state.photos;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      const entries: Array<[string, Adjustments]> = [];
+      for (const p of Object.values(useEditor.getState().photos)) if (p.fingerprint) entries.push([p.fingerprint, p.adjustments]);
+      saveEdits(entries);
+    }, 600);
+  });
+}

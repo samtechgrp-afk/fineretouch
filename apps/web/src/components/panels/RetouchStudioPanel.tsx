@@ -1,6 +1,7 @@
 'use client';
 
-import { DEFAULT_ADJUSTMENTS, type AdjustmentKey, type ClothingSettings } from '@fineretouch/shared';
+import { EffectControlsRow } from './EffectControls';
+import { DEFAULT_ADJUSTMENTS, effectForSlider, type AdjustmentKey, type ClothingSettings } from '@fineretouch/shared';
 import type { StudioOverlay } from '@/components/viewport/shaders';
 import { useEditor, type Photo, type SegmentState } from '@/lib/store';
 import { Heading, RangeRow, Segmented, Toggle } from './controls';
@@ -51,18 +52,22 @@ function SliderFor({ photo, k, label, disabled, unit, hint }: { photo: Photo; k:
   const beginEdit = useEditor((s) => s.beginEdit);
   const setAdjustment = useEditor((s) => s.setAdjustment);
   const value = photo.adjustments[k];
+  const effect = effectForSlider(k);
   return (
-    <RangeRow
-      label={label}
-      value={value}
-      min={0}
-      max={100}
-      hint={hint}
-      disabled={disabled}
-      format={(v) => `${Math.round(v)}${unit ?? ''}`}
-      onStart={() => beginEdit()}
-      onChange={(v) => setAdjustment(k, v)}
-    />
+    <div>
+      <RangeRow
+        label={label}
+        value={value}
+        min={0}
+        max={100}
+        hint={hint}
+        disabled={disabled}
+        format={(v) => `${Math.round(v)}${unit ?? ''}`}
+        onStart={() => beginEdit()}
+        onChange={(v) => setAdjustment(k, v)}
+      />
+      {effect && <EffectControlsRow id={effect} adj={photo.adjustments} disabled={disabled} />}
+    </div>
   );
 }
 
@@ -80,11 +85,13 @@ function SkinSection({ photo }: { photo: Photo }) {
         <SliderFor
           photo={photo}
           k="skinTexture"
-          label="Skin texture retention"
+          label="Texture preservation"
           unit="%"
           hint="Share of the pore and fine-detail layer re-injected after smoothing. 100% keeps every pore."
         />
-        <SliderFor photo={photo} k="blemishRemoval" label="Spot healing strength" />
+        <SliderFor photo={photo} k="acneRemoval" label="Acne removal" hint="Red spots, pimples and raised bumps, then the redness around them." />
+        <SliderFor photo={photo} k="darkSpotRemoval" label="Dark spot removal" hint="Isolated dark marks and brownish pigmentation; shading, beauty marks and (optionally) freckles stay." />
+        <SliderFor photo={photo} k="blemishRemoval" label="Blemish removal" hint="General clean-up of every kind of small spot in one pass." />
       </div>
       {plastic && (
         <p className="mt-1.5 text-[11px] text-apricot-300">
@@ -115,6 +122,7 @@ function StrayHairSection({ photo, hasFace }: { photo: Photo; hasFace: boolean }
         onStart={() => beginEdit()}
         onChange={(v) => setStray({ strength: v }, { live: true })}
       />
+      <EffectControlsRow id="strayHair" adj={photo.adjustments} disabled={!st.enabled || !hasFace} />
     </section>
   );
 }
@@ -146,6 +154,7 @@ function ClothingSection({ photo }: { photo: Photo }) {
       />
       <div className="space-y-3">
         <RangeRow label="Wrinkle removal" value={cl.wrinkleStrength} min={0} max={100} disabled={off} onStart={() => beginEdit()} onChange={(v) => set({ wrinkleStrength: v }, true)} />
+        <EffectControlsRow id="clothingIron" adj={photo.adjustments} disabled={off} />
         <RangeRow
           label="Fabric texture kept"
           value={cl.texturePreservation}
