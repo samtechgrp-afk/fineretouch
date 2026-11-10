@@ -1,0 +1,317 @@
+# Skin Perfection Studio (v0.13)
+
+Skin Perfection is a full-resolution blemish engine for face and body skin. It finds acne,
+pimples, blackheads, whiteheads, dark spots, post-acne marks, small black dots and other
+blemishes. It corrects each one with real skin texture, rescans to check what is still
+visible, and reports detected, corrected and remaining marks with an overlay. Freckles,
+moles, birthmarks, hair follicles, pores and identity are protected.
+
+- Engine: `services/ai/app/engines/perfection.py`
+- Settings: `adjustments.skinPerfection` (`packages/shared/src/perfection.ts` ↔
+  `services/ai/app/schemas.py`, pinned by a test)
+- Panel: `apps/web/src/components/panels/SkinPerfectionPanel.tsx`
+- Preview, cache and overlay: `apps/web/src/lib/perfection.ts`,
+  `apps/web/src/components/viewport/perfectionOverlay.ts`
+- Endpoint: `POST /v1/perfection` (returns the report plus a preview of the result)
+- Tests: `services/ai/tests/test_perfection.py`, `packages/shared/src/perfection.test.ts`,
+  `apps/web/src/lib/perfection.test.ts`
+- Benchmark: `python -m scripts.perfection_benchmark [--quick] [--old] [--json out.json]`
+  (run from `services/ai`)
+
+## 1. Why small marks were left behind (audit)
+
+| # | Root cause | Where | Effect |
+|---|---|---|---|
+| 1 | Export "Auto" chose the GPU path on any hardware WebGL2, including integrated Radeon. That path only has shader approximations of spot healing. | `ExportModal.tsx` engine choice | Real detection never ran on most exports. |
+| 2 | The detector worked on a copy shrunk to a 420 px face width. | `SPOT_WORK_FACE` in the old spot healer | Blackheads (2–6 px on a 700 px face) fell under its minimum size. |
+| 3 | A 5 px median blur on the detection signal. | old spot detector | Removed pore-sized blackheads and dots before detection. |
+| 4 | Connected components on a threshold map. | old spot detector | Dense acne merged into blobs that then failed the size and roundness tests. A 0.75 ring-isotropy test rejected clustered marks. |
+| 5 | Heal blend `max(soft, heal×0.85) × 0.9` at 1×. | `heal_spots` | About 23% of each mark stayed visible. |
+| 6 | No residual check. | pipeline | A weak repair was counted as done. |
+| 7 | Face-only detection (body only through a parse option). | pipeline | Neck, chest, arms and legs kept their marks. |
+| 8 | A local baseline that included the marks themselves. | old spot detector | Dense acne raised the baseline and hid the marks. |
+
+Blurring more would not fix any of these. The engine below replaces the detection and correction steps.
+
+## 2. Pipeline (stages A–I)
+
+All stages run in the local AI engine on the full-resolution image (CPU, OpenCV + NumPy; no
+new dependencies or models).
+
+- **A. High-resolution analysis.** The skin bounding box is cropped. Faces up to 1100 px wide
+  (`WORK_FACE`) are analysed at native resolution. Wider faces are analysed at 1100 px, **except
+  the 3 finest scales** (blackheads, whiteheads, pore-sized dots), which run on the
+  full-resolution pixels whenever the face is shrunk by more than 10% (phase 2B,
+  `NATIVE_SCALES`). Each pass computes one guard scale beyond its range, so splitting the scales
+  finds the same maxima. Body-only photos use the skin area. The crop is processed in 1024 px tiles
+  with an apron, so a mark on a seam is found once (a test covers this).
+- **B. Skin segmentation.** Face skin (MediaPipe landmarks + face parsing) and body skin (selfie
+  multiclass segmenter: body skin × not-hair × skin probability), with clothing, hair and
+  background excluded. Manual add/erase strokes from the skin-mask brush apply to both. Edges
+  of the region and a closed-region guard keep repairs off lips, eyes, nostrils and hairlines.
+- **C. Multi-scale detection.** Scale-space normalised Laplacian-of-Gaussian at 8 scales
+  (0.0012–0.026 × face width), on lightness for dark marks and the first 5 scales for bright
+  heads. A robust baseline excludes outlier marks. Each scale gets its own threshold, set
+  from the median absolute deviation (MAD) of its responses. A tile's spread is clamped to
+  0.8–1.25× the photo's skin-weighted median, so one acne-dense tile can't raise its own
+  threshold.
+- **D. Features.** Each candidate is measured for:
+  - darkness, brightness, redness (a*) and brownness (b*)
+  - ring isotropy (12 samples) and in-skin ring share
+  - Hessian anisotropy, which rejects hairs and creases
+  - a local shine map, which rejects specular highlights
+  - an edge map
+  - a pore reference (75th percentile of fine dark peaks), so pores stay pores
+  - since phase 2B, two more texture references measured on the same skin: bright texture (the
+    sheen between pores) and colour texture (a* speckle). Measured sensor noise is taken out of
+    the luma references (Immerkaer estimator), so a noisier deep-skin tile is not held to a
+    stricter standard
+  - neighbour density (clusters mean freckles or stubble)
+- **E. Classification.** Each candidate is sorted into one of these:
+  - repaired: acne, pimple, blackhead, whitehead, blemish, dark spot, post-acne, small dot
+  - protected: mole (large, very dark, sharp), freckle (small, faint, brown, in clusters),
+    birthmark (large, flat), follicle (dense dark field in the beard area or on body skin)
+  - rejected: shine
+  Each category has its own sensitivity, and confidence comes from the margin over the threshold.
+  Marks below the confidence threshold become "review" and are not corrected automatically.
+  Phase 2B rules (tone fairness):
+  - **Texture test.** A pore-sized mark must beat the dark pore reference (as before), **or**,
+    if it is clearly significant (≥ 2× its detection threshold) and not inside lit texture,
+    a light mark may instead beat the bright texture and a clearly red mark (a* ≥ 4.4) the
+    colour texture.
+  - **Lit-texture guard.** 20 or more light dots within 0.1 × face width is sheen, oil or body
+    shimmer. There only the strict pore test applies and no pimple is fused. Without this guard
+    the new tests doubled detections on real, already-retouched photos.
+  - **Pimple fusion.** A light, red head at the centre of a red dome makes the dome a pimple,
+    and its roundness is judged with the head counted in.
+  - **Rims.** A faint light dot right beside a much darker mark is that mark's rim, not a whitehead.
+  Phase 2C rules (dense clusters, stubble, Needs Review):
+  - **Needs Review with a reason.** A review mark carries `reason`: `lowConfidence` (below the
+    confidence threshold), `mayBeFollicle` or `mayBeFreckle`. A mark that may be a natural
+    feature is never corrected automatically, never included in **Correct all remaining**, and
+    is kept out of every repair window and area correction until the user chooses Correct or
+    Ignore for it.
+  - **Stubble field.** Follicles in a field are alike. A strong dot at least 1.5× the size and
+    1.3× the darkness of the median of its follicle neighbours (3 or more within 2 × follicle
+    reach) is likely a blackhead in the beard, but could be a thicker hair: `mayBeFollicle`.
+    A lone pore-sized dark dot in the hair zone that looks like a nearby field's dots, and a
+    pore-sized dot where the skin runs one way (structure-tensor coherence ≥ 0.5, hair
+    shafts), are `mayBeFollicle` too.
+  - **Freckle group.** A strong spot read as a freckle but at least 1.4× the size and 1.8× the
+    darkness of its group's median is `mayBeFreckle`. A spot far darker than any freckle is
+    still a dark spot and is corrected, as before.
+  - **Cluster split.** A broad birthmark or blemish candidate that holds 2 or more clearly
+    stronger, smaller accepted marks is the coarse-scale merge of those marks: it is dropped,
+    and the marks inside are corrected one by one.
+- **F. Targeted correction.** Heal-type marks get a push-pull membrane fill from the
+  surrounding ring. It is capped so it is never lighter than the ring's median, which prevents
+  pale blobs. Pigment-type marks get a pigment-only correction above the pore scale. Acne also
+  gets halo redness reduction.
+- **G. Texture reconstruction.** Repairs take fine texture from the best donor patch nearby and
+  mix the pore band back in (texture and pore preservation sliders), so a repair is not a flat
+  disc.
+- **H. Residual scan.** After every pass, each mark's contrast is measured again. A mark counts as
+  corrected only if its contrast fell below 40% of the original (`VERIFY_RATIO`). The scan
+  then runs detection again with extra sensitivity (residual slider) to find marks that are
+  still visible. Colourless "blemish" marks do not get the extra sensitivity (on its own it
+  finds skin relief). A hit within 1.8 radii of a mark already corrected is that mark's residue:
+  the mark is widened (at most 1.5× its first radius) and corrected again or reported
+  remaining, instead of being counted as a new mark. Each mark is attempted at most twice and there are at most 4 passes, so the
+  loop always ends.
+  Since phase 2D, a scan after the first only adds a new mark where that pass changed pixels:
+  elsewhere the last scan already saw the same pixels, and a new hit is its tile statistics
+  shifting around a repair.
+- **H2. Correction quality gate (phase 2D, `app/engines/perfection_quality.py`).** Lower
+  contrast alone does not make a mark corrected. Each repair is measured on a window around it
+  (inner disc 0.8 R, ring 1.4–2.2 R; other marks and protected features left out) with seven
+  checks:
+
+  | Check | What it measures | Limit |
+  |---|---|---|
+  | residual | contrast left / allowed (the 40% rule) | ≤ 1 |
+  | colour | CIEDE2000 between the repaired disc and its ring, on low-passed colour | ≤ 2.0 |
+  | texture | fine-band energy in the disc vs the ring (both + a visibility floor) | 0.6–1.6 |
+  | pores | share of the ring's pore count kept in the disc (only where the ring has visible pores) | ≥ 0.5 |
+  | edges | gradient on the repair's edge vs the ring's own gradient (seams) | ≤ 2.0 |
+  | repetition | correlation between the disc's texture and any nearby patch (stamped donors) | ≤ 0.9 |
+  | surround | L* change of the skin just outside the repair | ≤ 1.0 L* |
+
+  A repair that fails is tried again from the original pixels (never stacked on the failed
+  one), with the next-best donor and 1.35× wider. Donors avoid every other mark; a partly
+  covered donor is used only when no clean one exists, with the covered pixels filled. When the
+  last attempt still fails a naturalness check (colour, texture, pores, edges, repetition,
+  surround), the original skin is put back and the mark goes to **Needs review** with reason
+  `repairFailed` and the failed checks. A colour failure that only means some of the mark is
+  left is not damage: that mark stays "remaining" and is measured again after the area tools.
+  A mark the user chose to correct keeps its repair and shows which checks it failed.
+  Marks waiting for review are untouched by every tool, the area tools included.
+  The thresholds are provisional: they were set on synthetic dev scenes and checked on retouched
+  real photos, and are calibrated on the real validation photos with the repair quality review
+  page (`SKIN_PERFECTION_QA.md`, section 8).
+- **I. Quality verification and report.** The report gives:
+  - detected, corrected, remaining, review, protected and ignored counts
+  - counts per kind and mean confidence
+  - texture retention (fine-band energy after vs before)
+  - every mark (position, size, kind, confidence, region, status, contrast before and after,
+    and since phase 2D each repair's quality-check values and failed checks)
+  - failures per quality check
+  Area tools follow: redness, discoloration, texture/scar smoothing and under-eye. Finally,
+  every pixel outside the skin region is copied back unchanged.
+
+## 3. Controls (every one is a real engine input)
+
+| Control | Field | What it does in the engine |
+|---|---|---|
+| Skin Perfection on/off | `enabled` | Runs stage 0c of the render pipeline. |
+| 1× Natural / 2× Strong / 3× Maximum | `multiplier` | Sensitivity boost (+0/+10/+18), radius (×1/1.12/1.25), area tools (×1/1.35/1.6). Each is capped. |
+| Overall strength | `strength` | Scales every correction. |
+| Acne removal | acne, pimple, whitehead sensitivity | Detection threshold k for those classes. |
+| Blackhead removal | blackhead, smallDot | Same. |
+| Dark spot correction | darkSpot, postAcne, discoloration | Same, plus the discoloration area tool. |
+| Small blemish detection | blemish | Same. |
+| Body blemish correction | `bodyCoverage`, `bodySensitivity` | Body skin on/off, and the body threshold (category sensitivity × body/70). |
+| Skin texture preservation | `texturePreservation` | Donor-texture mix in repairs, and how far area tools reach. |
+| Pore preservation | `porePreservation` | Pore-test strictness, and the pore band put back after a repair. |
+| Residual imperfection scan | `residualIntensity` | Sensitivity boost of the rescan (0–20). |
+| Correction radius | `correctionRadius` | Repair footprint around each mark. |
+| Edge protection | `edgeProtection` | Edge-map rejection and the edge guard around features. |
+| Confidence threshold | `confidenceThreshold` | Below this a mark is "review" (not auto-corrected). |
+| Passes | `passes` (1–4) | Correction + residual-scan rounds. |
+| Preserve freckles / moles / birthmarks | `preserve*` | Off: those are corrected as dark spots. |
+| Advanced, per category (13) | `categories[k]` | Enabled, sensitivity and strength for acne, pimples, blackheads, whiteheads, dark spots, post-acne, small dots, blemishes, discoloration, scars, texture, redness and under-eye. |
+
+`test_perfection.py::test_every_control_changes_the_result` checks every control: each one
+must change the output on a control scene.
+
+### Per-mark actions (all undoable)
+
+- **Click** a mark in the overlay to select it. **Shift-click** adds to the selection.
+- **Correct** / **Ignore** the selected marks. Each becomes an override (`overrides`: x, y,
+  radius, action). Correct also works where nothing was detected and adds a manual mark.
+- **Try to correct remaining** (called "Correct all remaining" before the B2 fix) adds a correct
+  override for every remaining or low-confidence review mark at or above the confidence
+  threshold, as one undo step. Marks that may be a freckle or a follicle, and marks whose repair
+  failed the quality checks, are never included. Nor are marks the last residual scan found
+  (`residual` in the report): they are created after the overrides are applied, so a bulk
+  override there would do nothing. Select one and choose Correct to repair it by hand.
+  **The count is what will be attempted, not what will be corrected.** The button shows how
+  many marks it tries (`bulkPlan` in `packages/shared`), and the line below it says how many of
+  those already failed a quality check once, that any repair failing a check is undone, and
+  how many rescan marks can only be corrected one at a time. After one click nothing is left to
+  try in bulk: each tried mark is either corrected or listed as a failed repair.
+  A correct override forces the mark at its centre (the one chosen) and other ordinary marks
+  whose centre is inside its circle, but never a protected feature or a "may be a feature" mark
+  next to it: those need their own decision.
+  **Bulk corrections must pass the quality gate.** The overrides it adds carry `bulk: true`. Such
+  a repair is kept only if it passes every check, "still visible" included. Otherwise the
+  original pixels come back (exactly, inside the mark's radius, even beside a corrected
+  neighbour) and the mark goes to Needs review as a failed repair. A bulk override never forces
+  a protected or "may be a feature" mark, and adds no manual mark where nothing is detected.
+  A mark you choose Correct on yourself still keeps its repair when it fails a check (and your
+  choice replaces an earlier bulk one on that mark).
+- **The reason** for a review mark is shown when the mark is selected, and the panel counts the
+  marks that may be a natural feature and the repairs that failed the quality checks. A failed
+  repair shows which checks it failed and that the original skin was restored.
+- **Run another pass** adds one pass (up to 4).
+- **Rescan** runs the engine again with the same settings.
+- **Undo / redo**: overrides and settings are ordinary edit history. Earlier results are cached
+  per photo, so undo shows them instantly.
+
+The original file is never changed. Everything is stored as settings in the edit.
+
+## 4. Preview and export
+
+- **Preview.** The browser sends the original to `POST /v1/perfection` with the settings and
+  gets back a preview-size render and the report. That render becomes the viewport's source
+  pixels, so heal strokes, layers and every other slider stay live on top of it. Settings
+  changes re-run the engine after 0.7 s. A change made during a run queues exactly one more
+  run.
+- **Export.** A photo with Skin Perfection on always renders in the AI engine at full
+  resolution, even when the browser/GPU engine is selected. The export dialog says so. This
+  removes root cause 1.
+- **Same order in both.** Heal and clone strokes run right after the engine, in the preview
+  (the browser replays them on the perfected pixels) and in the export (`pipeline.render`
+  applies them after stage 0c when Skin Perfection is on; without it they stay at stage 0b).
+  The strokes were painted on the perfected photo, so that is what they apply to.
+  `tests/test_perfection_bulk.py` compares the two where a stroke crosses a repair.
+- **Same healing in both.** `apps/web/src/engine/heal.ts` is a port of `engines/local.py`.
+  `apps/web/src/engine/heal.parity.test.ts` and `services/ai/tests/test_heal_parity.py` run
+  both on the same fixture (`apps/web/src/engine/__fixtures__/heal-parity.json`: a crop of a
+  Skin Perfection result, with heal and clone strokes across two repairs, generated by
+  `python -m scripts.heal_parity_fixture`). They agree within one 8-bit level (314 of 76,800
+  channel values differ by 1, none by more): the browser rounds to 8 bits after each stroke, the
+  engine rounds once at the end. Rounding the engine after each stroke as well leaves 2 values
+  differing by 1 (float32 against float64 arithmetic).
+
+## 5. Measured results
+
+> Phase 2A replaced this section's benchmark with the QA report in `docs/SKIN_PERFECTION_QA.md`
+> (12 synthetic scenes, per tone and category, time and memory). The figures below are the
+> original PR #13 run and are synthetic only. The real photo used here had already been
+> retouched, so its counts are a smoke test, not an accuracy measurement.
+
+Synthetic dataset: `services/ai/tests/perfection_fixtures.py` builds Lab skin at Fitzpatrick-
+like tones I–VI. It includes lighting, multi-octave relief, a pore field, sensor noise,
+labelled imperfections, and natural features (moles, a freckle cluster and a stubble field)
+that must survive. The scenes are 10 in total: 1200 px normal density, and 1600 px dense acne.
+
+| Metric (mean of 10 scenes) | Old tools (2× boost) | Skin Perfection (defaults) |
+|---|---|---|
+| Precision | – | **0.97** |
+| Recall | – | **0.95** |
+| F1 | – | **0.96** |
+| Removal rate (contrast < 40% of before) | 0.52 | **0.94** |
+| Natural features damaged (sum over 10 scenes) | 7 | **4** (all in the dense type VI scene) |
+| Texture retention (fine-band energy) | 1.0 | **1.0** |
+
+The old tools leave about half of all marks visible at 2×. Skin Perfection removes 94% and verifies each one.
+
+Real photo (4480×6720 full-body portrait, face 712 px wide), at defaults:
+
+- 189 marks detected, 154 corrected and verified, 35 left for review, and 254 natural
+  features protected (freckles, moles, follicles on hands and legs).
+- After "Correct all remaining": 172 corrected and 22 still visible. These are reported as
+  remaining, not counted as removed.
+- Texture retention is about 0.78, and pores stay visible at 100% zoom.
+- Time: full-resolution render about 35–45 s on 4 CPU cores. Preview scan (2560 px long edge)
+  about 10 s.
+
+### Known limits
+
+- Whiteheads on very deep skin (type VI) were found about half the time in PR #13. Phase 2B
+  raised this to 24 of 27 on the synthetic benchmark (see `SKIN_PERFECTION_QA.md`); real-photo
+  figures wait for the labelled test set.
+- The 30 MP full-resolution render takes about 37 s on a 4-vCPU container (phase 2E). The
+  preview uses the 2560 px proxy.
+- Synthetic metrics are an upper bound. Real skin needs the review overlay for edge cases.
+
+## 6. Performance and hardware
+
+- **Target:** Windows, Ryzen with integrated Radeon, 16 GB RAM.
+- The engine is CPU-only (OpenCV + NumPy) and needs no GPU. Peak memory at 30 MP stays within
+  the engine's render admission budget (`FINERETOUCH_RENDER_MEMORY_MB`).
+- Large blurs run at low resolution (`_lowres`), and detection runs tile by tile.
+- Since phase 2E, detection tiles run side by side on up to 4 CPU threads (never more than
+  OpenCV's thread count, which the batch thermal profile sets), with at most about 900 MB of
+  tiles in flight. The per-pixel finishing stages of the render run in parallel strips. Results
+  are gathered in order, so the output is the same as one tile or strip after the other (a test
+  checks this). The masks a residual scan needs (skin, body, protected features, zones) are made
+  once per render, and full-size temporaries are freed or reused in place.
+- Measured on a 4-vCPU Xeon (2.3 GHz) container, 16 GB: a 30 MP photo takes 37 s with a 4.1 GB
+  peak, and a 25 MP photo 40 s with 4.5 GB (2D: 63 s / 6.5 GB and 55 s / 6.3 GB). The 25 s /
+  4 GB target is for the Ryzen 3 7330U; run `--perf` there to check it (`SKIN_PERFECTION_QA.md`,
+  section 9).
+- New dependencies: **none**. Models: **none new**. It uses the existing MediaPipe face
+  landmarker and selfie multiclass segmenter.
+
+## 7. Phases and acceptance criteria
+
+| Phase | Scope | Acceptance |
+|---|---|---|
+| 1 | Engine (A–I), renderer stage 0c, export always via engine, `/v1/perfection` | Removal ≥ 0.9 and F1 ≥ 0.9 on the benchmark. No protected features damaged on normal scenes. Pixels outside skin unchanged. Every control changes the result. |
+| 2 | Skin Perfection Studio panel | Every control in the reference image is present and wired. 1×/2×/3× chips. Final quality check counts come from the report. |
+| 3 | Overlay + per-mark actions | Select, ignore, correct, correct all remaining, another pass, rescan. All undoable. Counts update from a fresh engine run, never assumed. |
+| Next | Real-photo test set with hand labels | Precision/recall on real skin, with 100% zoom crops per tone. |
+
+Regression: `pytest services/ai/tests/test_perfection.py` (28 tests, about 150 s) and the
+benchmark (`--quick` about 20 s, full about 1 min). Run with `--json` to keep a record.

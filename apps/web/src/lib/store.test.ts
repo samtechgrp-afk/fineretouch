@@ -1,4 +1,4 @@
-import { BUILT_IN_PRESETS, DEFAULT_ADJUSTMENTS } from '@fineretouch/shared';
+import { BUILT_IN_PRESETS, DEFAULT_ADJUSTMENTS, correctRemaining, type PerfectionReport } from '@fineretouch/shared';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HISTORY_LIMIT, useEditor } from './store';
 
@@ -30,6 +30,31 @@ describe('editor store', () => {
     expect(useEditor.getState().photos.p0.adjustments.skinSmoothing).toBe(0);
     s.redo();
     expect(useEditor.getState().photos.p0.adjustments.skinSmoothing).toBe(40);
+  });
+
+  it('Correct all remaining is one undo step, and redo brings the same bulk choices back', () => {
+    add(1);
+    const s = useEditor.getState();
+    const sp0 = { ...DEFAULT_ADJUSTMENTS.skinPerfection, enabled: true };
+    s.updateAdjustments({ skinPerfection: sp0 }, ['p0']);
+    const mark = { kind: 'acne', confidence: 0.9, region: 'face', status: 'remaining', attempts: 2, residual: false, contrast: 0.1, after: 0.08, r: 0.002 } as const;
+    const rep = {
+      width: 1000, height: 1000, passes: 2, tiles: 1, workScale: 1, faceWidth: 500, ms: 1,
+      counts: { detected: 3, corrected: 0, remaining: 3, review: 0, protected: 0, ignored: 0 },
+      byKind: {}, meanConfidence: null, textureRetention: null, areas: {},
+      marks: [0.2, 0.5, 0.8].map((x, id) => ({ ...mark, id, x, y: 0.5 })),
+    } as PerfectionReport;
+    const bulk = correctRemaining(sp0, rep, 0.5);
+    s.updateAdjustments({ skinPerfection: bulk }, ['p0']);
+    const steps = useEditor.getState().photos.p0.past.length;
+    expect(useEditor.getState().photos.p0.adjustments.skinPerfection.overrides).toHaveLength(3);
+    s.undo();
+    expect(useEditor.getState().photos.p0.past).toHaveLength(steps - 1);
+    expect(useEditor.getState().photos.p0.adjustments.skinPerfection.overrides).toEqual([]);
+    s.redo();
+    const back = useEditor.getState().photos.p0.adjustments.skinPerfection.overrides;
+    expect(back).toEqual(bulk.overrides);
+    expect(back.every((o) => o.bulk)).toBe(true);
   });
 
   it('does not stack duplicate snapshots for no-op clicks', () => {

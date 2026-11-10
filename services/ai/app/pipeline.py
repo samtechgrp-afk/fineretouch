@@ -33,12 +33,13 @@ Stages (all on float32 sRGB in [0, 1]):
      8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
   Pro tools (v0.10, engines/local.py): 0b. healing and clone strokes on the original pixels
-  before stage 1; 10. local retouch layers (frequency separation, dodge & burn, correction
+  before stage 1 (right after the Skin Perfection engine, 0c, when that is on: the preview's order); 10. local retouch layers (frequency separation, dodge & burn, correction
   brushes with their own masks) after stage 8 and before the bokeh of stage 9.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import cv2
@@ -64,10 +65,11 @@ from .retouch_engine import (
     skin_tone_guard,
 )
 from .engines.local import apply_heal_strokes, apply_local_layers
+from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
 from .engines.noise import reduce_skin_noise
 from .engines.redness import reduce_redness
 from .engines.under_eye import soften_under_eye_texture
-from .schemas import Adjustments, ColorStats, FaceAnalysis
+from .schemas import Adjustments, ColorStats, FaceAnalysis, SkinPerfectionSettings
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
 # Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
@@ -104,7 +106,38 @@ def from_ycbcr(y: np.ndarray, cb: np.ndarray, cr: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1)
 
 
+STRIP_WORKERS = 4  # at most; never more than OpenCV's thread count (the batch thermal profile sets it)
+
+
+def _rows(fn, h: int, rows: int = 256) -> None:
+    """fn(y0, y1) over horizontal strips, side by side on the CPU's cores. Only for per-pixel
+    work that writes its own rows, so the result is the same as one strip after the other."""
+    spans = [(y0, min(h, y0 + rows)) for y0 in range(0, h, rows)]
+    n = min(STRIP_WORKERS, max(1, cv2.getNumThreads()), len(spans))
+    if n <= 1:
+        for a, b in spans:
+            fn(a, b)
+        return
+    with ThreadPoolExecutor(max_workers=n) as ex:
+        for f in [ex.submit(fn, a, b) for a, b in spans]:
+            f.result()
+    _trim_heap()
+
+
 def skin_probability(c: np.ndarray) -> np.ndarray:
+    """Per-pixel YCbCr skin box (0..1), computed in parallel strips on a large image."""
+    if c.shape[0] * c.shape[1] < 2_000_000:
+        return _skin_probability(c)
+    out = np.empty(c.shape[:2], np.float32)
+
+    def run(y0: int, y1: int) -> None:
+        out[y0:y1] = _skin_probability(c[y0:y1])
+
+    _rows(run, c.shape[0])
+    return out
+
+
+def _skin_probability(c: np.ndarray) -> np.ndarray:
     cb, cr = cbcr(c)
     return (
         smoothstep(0.50, 0.55, cr) * (1.0 - smoothstep(0.66, 0.71, cr))
@@ -308,12 +341,15 @@ def render(
     hair_prob: np.ndarray | None = None,
     clothes_prob: np.ndarray | None = None,
     parse: FaceParse | None = None,
+    report: list | None = None,
 ) -> np.ndarray:
     """rgb8: HxWx3 uint8 (or uint16, e.g. a demosaiced camera RAW) sRGB -> HxWx3 uint8 sRGB.
 
     depth: optional relative depth (0 subject .. 1 far, any size) for the bokeh stage.
     hair_prob: optional hair probability (HxW) that keeps stray-hair cleanup out of the hairstyle.
     parse: optional face parsing (face skin, body skin, hair; app/masking.py) for the skin mask.
+    report: optional list; the Skin Perfection report (engines/perfection.PerfectionReport) is
+    appended to it when that engine runs.
     clothes_prob: optional garment probability (HxW, the segmenter's clothes class) for the
     clothing iron and recolour; without it a portrait prior below the chin is used.
     """
@@ -322,8 +358,11 @@ def render(
     adj, spot_multiplier = resolve_adjustments(adj)
     src = rgb8.astype(np.float32) / (65535.0 if rgb8.dtype == np.uint16 else 255.0)
     # 0b. Healing and clone strokes (v0.10) on the original pixels: every later stage, and the
-    #     sharpening detail, work from the cleaned photo.
-    if adj.localRetouch.heal:
+    #     sharpening detail, work from the cleaned photo. With Skin Perfection on they run right
+    #     after it instead (stage 0c): the strokes were painted on the perfected photo the preview
+    #     shows (POST /v1/perfection, then the browser's heal), so the export uses that order too.
+    perfection_on = adj.skinPerfection.enabled and adj.skinPerfection.strength > 0
+    if adj.localRetouch.heal and not perfection_on:
         src = apply_heal_strokes(src, adj.localRetouch.heal)
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -354,6 +393,25 @@ def render(
         keep = protect_weight(sm, h, w)
         if keep is not None:
             masks.under_eye = masks.under_eye * keep
+    # 0c. Skin Perfection engine (v0.13): detect, classify, correct and verify imperfections at
+    #     full resolution on face and body skin. It edits the photo the rest of the chain starts
+    #     from (like the healing brush), so every later stage sees the cleaned skin.
+    sp = adj.skinPerfection
+    if perfection_on:
+        # Without a face the colour-only skin box would take in wood, sand and warm walls, so only
+        # semantic body skin and the user's own Add-skin strokes count then.
+        face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
+        # The blurred copies of the photo are rebuilt from the cleaned skin below; freeing them
+        # first keeps a 30 MP render inside its memory budget (each is a full float copy).
+        low0 = p = own = region = None
+        bands.clear()
+        src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
+        if report is not None:
+            report.append(rep)
+        if adj.localRetouch.heal:  # 0b, after the engine (see above): the order the preview uses
+            src = apply_heal_strokes(src, adj.localRetouch.heal)
+        low0 = blur(src, S0 * L)
+        bands.clear()
     skin = skin[..., None]
 
     c = src.copy()
@@ -432,9 +490,10 @@ def render(
     if adj.colorMatch is not None and adj.colorMatch.amount > 0:
         stats = source_stats or color_stats(src)
     lut = decode_lut(adj.lut.data, adj.lut.size) if adj.lut is not None and adj.lut.amount > 0 else None
-    for y0 in range(0, h, STRIP_ROWS):
-        y1 = min(h, y0 + STRIP_ROWS)
+    def finish(y0: int, y1: int) -> None:
         c[y0:y1] = _finish_strip(c[y0:y1], src[y0:y1], low0[y0:y1], skin[y0:y1], y0, h, w, adj, smooth, stats, lut)
+
+    _rows(finish, h)
 
     # 10. Local retouch layers (v0.10): frequency separation, dodge & burn and correction
     #     brushes, each through its own mask (applied before the lens blur, as in the preview).
@@ -453,6 +512,29 @@ def render(
 
 
 STRIP_ROWS = 256
+
+
+def perfect_photo(
+    src: np.ndarray, skin: np.ndarray, masks: FaceMasks, faces: list[FaceAnalysis], parse: FaceParse | None,
+    settings: SkinPerfectionSettings, protect: np.ndarray | None = None,
+) -> tuple[np.ndarray, PerfectionReport]:
+    """Stage 0c: the Skin Perfection engine on the photo (float32 sRGB), with face skin from the
+    renderer's skin weight and body skin from face parsing. Clothing, hair and background are
+    outside both; the user's Protect strokes are already in `skin` and are re-applied to body
+    skin here."""
+    h, w = src.shape[:2]
+    body = None
+    if settings.bodyCoverage and parse is not None:
+        p = parse.resized(h, w)
+        fw = masks.face_width or 0.25 * max(h, w)
+        body = blur(p.body_skin, fw * 0.003) * hair_keep(blur(p.hair, fw * 0.004))
+        body = body * (0.4 + 0.6 * skin_probability(blur(src, S0 * max(h, w))))
+        if protect is not None:
+            body = body * protect
+    return perfect_skin(
+        src.astype(np.float32, copy=False), skin, faces, settings, body_skin=body,
+        under_eye=masks.under_eye if masks.has_face else None, face_skin=masks.skin if masks.has_face else skin,
+    )
 
 
 def _finish_strip(

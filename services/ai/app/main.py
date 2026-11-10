@@ -27,6 +27,7 @@ replicas behind the gateway (see docker-compose.yml).
 
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
@@ -190,7 +191,7 @@ def _needs_skin_parse(adj: Adjustments) -> bool:
         or a.rednessReduction > 0 or a.skinNoise > 0
         or any(l.enabled and l.mask.base == "skin" for l in a.localRetouch.layers)
     )
-    return skin_tools and a.skinMask.useSegmentation
+    return (skin_tools or a.skinPerfection.enabled) and a.skinMask.useSegmentation
 
 
 def _render_bytes(
@@ -229,7 +230,9 @@ def _render_admitted(
         seg = depth_service.segment(rgb)
         if seg is not None:
             hair, clothes = seg[1], seg[2]
-    parse = depth_service.parse(rgb) if faces and _needs_skin_parse(adj) else None
+    # Skin Perfection also works on body-only photos (back, arms, legs): parse without a face.
+    body_scan = adj.skinPerfection.enabled and adj.skinPerfection.bodyCoverage
+    parse = depth_service.parse(rgb) if (faces or body_scan) and _needs_skin_parse(adj) else None
     result = render(hq, adj, faces, depth=depth, hair_prob=hair, clothes_prob=clothes if want_clothes else None, parse=parse)
     encoded, mime = imageio.encode(result, out.format, out.quality)
     return encoded, mime, cull_flags(faces, sharpness(rgb))
@@ -252,6 +255,51 @@ async def render_upload(
     t0 = time.perf_counter()
     encoded, mime, _ = await run_in_threadpool(_render_bytes, data, adj, out)
     return Response(encoded, media_type=mime, headers={"X-Render-Ms": f"{(time.perf_counter() - t0) * 1000:.0f}"})
+
+
+def _perfection_admitted(data: bytes, adj: Adjustments, preview_long_edge: int) -> dict:
+    try:
+        hq = imageio.decode_hq(data, None)
+    except Exception as exc:
+        raise HTTPException(415, f"Unsupported or corrupt image: {exc}") from exc
+    rgb = raw_engine.to_uint8(hq)
+    faces = faces_service.detect(rgb)
+    sp = adj.skinPerfection.model_copy(update={"enabled": True})
+    only = Adjustments(skinPerfection=sp, skinMask=adj.skinMask)
+    parse = depth_service.parse(rgb) if only.skinMask.useSegmentation else None
+    reports: list = []
+    out = render(hq, only, faces, parse=parse, report=reports)
+    rep = reports[0].to_json() if reports else None
+    small = raw_engine.resize_long_edge(out, preview_long_edge) if max(out.shape[:2]) > preview_long_edge else out
+    encoded, _ = imageio.encode(small, "jpeg", 95)
+    return {"report": rep, "faces": len(faces), "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")}
+
+
+@app.post("/v1/perfection")
+async def perfection_scan(
+    file: UploadFile = File(...),
+    adjustments: str = Form("{}"),
+    previewLongEdge: int = Form(2048),
+) -> dict:
+    """Skin Perfection at full resolution: the verification report (marks with position, class,
+    confidence and status; detected / corrected / remaining counts) and the perfected photo at
+    preview size, which the browser uses as its source so every other slider stays live."""
+    data = await _read_upload(file)
+    adj = _parse_adjustments(adjustments)
+    edge = int(np.clip(previewLongEdge, 256, 8192))
+    try:
+        w, h = imageio.oriented_size(data)
+    except Exception:
+        w, h = 6000, 4000
+    t0 = time.perf_counter()
+
+    def work() -> dict:
+        with memory.render_gate.admit(memory.render_estimate(w, h)):
+            return _perfection_admitted(data, adj, edge)
+
+    result = await run_in_threadpool(work)
+    result["ms"] = round((time.perf_counter() - t0) * 1000)
+    return result
 
 
 @app.post("/v1/render-object", response_model=RenderObjectResponse)

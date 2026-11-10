@@ -12,6 +12,7 @@
 import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControls } from './effects.js';
 import { DEFAULT_SKIN_MASK, sanitizeSkinMask, skinMaskIsDefault, withOwnStrokes, type SkinMaskSettings } from './skinMask.js';
 import { DEFAULT_LOCAL_RETOUCH, localRetouchIsDefault, sanitizeLocalRetouch, type LocalRetouch } from './localRetouch.js';
+import { DEFAULT_SKIN_PERFECTION, sanitizeSkinPerfection, skinPerfectionIsDefault, type SkinPerfectionSettings } from './perfection.js';
 
 export interface SliderSpec {
   key: AdjustmentKey;
@@ -254,6 +255,8 @@ export interface Adjustments {
   skinMask: SkinMaskSettings;
   /** v0.10 pro tools: healing / clone strokes and local retouch layers (localRetouch.ts). */
   localRetouch: LocalRetouch;
+  /** v0.13 Skin Perfection Studio (perfection.ts): runs in the local AI engine. */
+  skinPerfection: SkinPerfectionSettings;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -274,6 +277,7 @@ export type AdjustmentKey = Exclude<
   | 'globalStrength'
   | 'skinMask'
   | 'localRetouch'
+  | 'skinPerfection'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -332,6 +336,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   globalStrength: 100,
   skinMask: DEFAULT_SKIN_MASK,
   localRetouch: DEFAULT_LOCAL_RETOUCH,
+  skinPerfection: DEFAULT_SKIN_PERFECTION,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -462,6 +467,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   out.globalStrength = num(src.globalStrength, 0, 100, 100);
   out.skinMask = sanitizeSkinMask(src.skinMask);
   out.localRetouch = sanitizeLocalRetouch(src.localRetouch);
+  out.skinPerfection = sanitizeSkinPerfection(src.skinPerfection);
   return out;
 }
 
@@ -537,7 +543,8 @@ export function isDefault(adj: Adjustments): boolean {
     adj.globalStrength === 100 &&
     effectsAreDefault(adj.effects) &&
     skinMaskIsDefault(adj.skinMask) &&
-    localRetouchIsDefault(adj.localRetouch)
+    localRetouchIsDefault(adj.localRetouch) &&
+    skinPerfectionIsDefault(adj.skinPerfection)
   );
 }
 
@@ -729,3 +736,5 @@ export * from './effects.js';
 export * from './skinMask.js';
 export * from './localRetouch.js';
 export * from './assistant.js';
+export * from './perfection.js';
+export * from './labels.js';

@@ -131,3 +131,17 @@ export async function pool<T>(items: T[], limit: number, fn: (item: T, index: nu
   });
   await Promise.all(workers);
 }
+
+/**
+ * Skin Perfection at full resolution in the local engine: the verification report and the
+ * perfected photo at preview size (a JPEG data URL), which the viewport uses as its source.
+ */
+export async function perfectionScan(
+  file: Blob,
+  adjustments: Pick<Adjustments, 'skinPerfection' | 'skinMask'>,
+  previewLongEdge: number,
+  signal?: AbortSignal,
+): Promise<{ report: import('@fineretouch/shared').PerfectionReport | null; image: string; faces: number; ms: number }> {
+  const extra = { adjustments: JSON.stringify(adjustments), previewLongEdge: String(Math.round(previewLongEdge)) };
+  return (await postFile('/v1/perfection', file, extra, signal)).json();
+}

@@ -42,15 +42,23 @@ def reduce_redness(
     # Two passes: the red areas themselves are left out of the second reference, so a large
     # flushed patch does not raise the "normal" skin colour it is compared with.
     weight = core
+    ref = cb_r = cr_r = excess = None
     for _ in range(2):
+        ref = cb_r = cr_r = excess = None  # the first pass's arrays, freed before the second is built
         ref = _masked_blur(tone, weight, reach)
         cb_r, cr_r = _cbcr(ref)
         excess = cr_t - cr_r
         weight = core * (1.0 - _smoothstep(REDNESS_RAMP[0], REDNESS_RAMP[1], excess))
+    del tone, ref, weight, core, cr_t, cr_r  # full-size temporaries, freed before the output is built
     red = _smoothstep(REDNESS_RAMP[0], REDNESS_RAMP[1], excess)
     k = t * red * skin
+    del red
     y = _luma(image)
     cb, cr = _cbcr(image)
     cr = cr - REDNESS_CR_PULL * np.maximum(excess, 0.0) * k
+    del excess
     cb = cb + REDNESS_CB_PULL * (cb_r - cb_t) * k
-    return np.clip(_from_ycbcr(y, cb, cr), 0.0, 1.0).astype(np.float32)
+    del cb_r, cb_t, k
+    out = _from_ycbcr(y, cb, cr)
+    del y, cb, cr
+    return np.clip(out, 0.0, 1.0, out=out).astype(np.float32, copy=False)

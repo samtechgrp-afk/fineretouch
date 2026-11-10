@@ -135,7 +135,12 @@ def correct_pigmentation(image: np.ndarray, skin: np.ndarray, sigma_base: float,
     pig = _smoothstep(0.004, 0.02, d_y) * _smoothstep(0.002, 0.008, cb_b - cb_t)
     edge = _smoothstep(0.06, 0.14, d_y)
     k = (0.9 * t * pig * (1.0 - edge) * skin)[..., None]
-    return np.clip(image + (base - tone) * k, 0.0, 1.0).astype(np.float32)
+    del pig, edge, d_y, cb_t, cb_b
+    base -= tone  # in place: (base - tone) * k + image, without full-size temporaries
+    del tone
+    base *= k
+    base += image
+    return np.clip(base, 0.0, 1.0, out=base).astype(np.float32, copy=False)
 
 
 def remove_dark_spots(

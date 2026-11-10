@@ -1,0 +1,50 @@
+{
+ "photo": "CRPixels-1.jpg",
+ "megapixels": 30.1,
+ "warmup": {
+  "ms": 51830.890792999984,
+  "engineMs": 33215.59327,
+  "peakMB": 6016.7,
+  "counts": {
+   "detected": 230,
+   "corrected": 213,
+   "remaining": 17,
+   "review": 4,
+   "protected": 755,
+   "ignored": 0
+  },
+  "tiles": 12
+ },
+ "runs": [
+  {
+   "ms": 46116.691084999955,
+   "engineMs": 33321.97096000004,
+   "peakMB": 6059.3,
+   "counts": {
+    "detected": 230,
+    "corrected": 213,
+    "remaining": 17,
+    "review": 4,
+    "protected": 755,
+    "ignored": 0
+   },
+   "tiles": 12
+  },
+  {
+   "ms": 48748.387399999956,
+   "engineMs": 36304.680822000024,
+   "peakMB": 6067.7,
+   "counts": {
+    "detected": 230,
+    "corrected": 213,
+    "remaining": 17,
+    "review": 4,
+    "protected": 755,
+    "ignored": 0
+   },
+   "tiles": 12
+  }
+ ],
+ "msMedian": 47432.53924249996,
+ "peakMB": 6067.7
+}

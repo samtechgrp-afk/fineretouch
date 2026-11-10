@@ -1,5 +1,74 @@
 # Changelog
 
+## v0.13.0 (unreleased): Skin Perfection Studio
+
+- **New full-resolution blemish engine** (`services/ai/app/engines/perfection.py`). It replaces the detection behind spot healing for photos that use it, and fixes why small marks were left behind:
+  - It works at a 1100 px face width or more, in overlapping tiles. The old detector worked at 420 px, with a median blur that erased blackheads.
+  - Detection runs at 8 scales with a per-scale robust threshold, so dense acne no longer hides itself.
+  - Marks are classified into 8 repairable kinds plus protected freckles, moles, birthmarks and follicles. Shine is rejected.
+  - Each mark gets a targeted heal or pigment correction with donor skin texture and pores restored.
+- **Verified, not assumed.** After each pass every mark is measured again. A mark counts as corrected only when its contrast fell below 40%, and a residual scan looks for anything left. Each mark gets at most 2 attempts and there are at most 4 passes.
+- **Face and body.** Neck, chest, shoulders, arms, hands, back and legs are covered, with clothing, hair and background excluded. The skin-mask brush adds or removes areas. Pixels outside skin are copied back unchanged.
+- **Skin Perfection Studio panel.** The panel has:
+  - acne, blackhead, dark spot and small blemish sliders
+  - body blemish correction
+  - texture preservation, pore preservation and residual scan
+  - 1× Natural, 2× Strong and 3× Maximum chips, plus overall strength
+  - advanced settings: radius, edge protection, confidence threshold, passes, preserve freckles/moles/birthmarks, and sensitivity and strength for each of 13 categories
+  Every control is an engine input, and a test checks that each one changes the result.
+- **Final quality check.** Detected, Corrected and Needs-review counts come from the engine's report. A colour-coded overlay shows each mark. Click or Shift-click marks to **correct** or **ignore** them. **Correct all remaining** and **Run another pass** are also available. Every action is undoable, and earlier results come back instantly from the cache.
+- **Export.** Photos using Skin Perfection always render in the AI engine at full resolution. The GPU export path only approximated spot healing, and it was the default on integrated GPUs.
+- **Benchmark.** `python -m scripts.perfection_benchmark --old` scores 10 synthetic scenes (tones I–VI, normal and dense acne). Precision 0.97, recall 0.95, removal 0.94. The old tools at 2× removed 0.52. Details and limits are in `docs/SKIN_PERFECTION.md`.
+- No new dependencies or models.
+- **Phase 2A: quality assurance.** `python -m scripts.perfection_benchmark` now writes a QA report (JSON + HTML). The report:
+  - covers precision, recall, F1, removal, residual rate, false positives (on natural features, false corrections, per MP), natural-feature preservation, texture, clean-skin change, time and peak memory
+  - breaks results down by skin tone, by category, and by tone × category
+  - is compared against a committed baseline (`qa/baselines/`), and a regression fails CI
+- **Synthetic and real reports are separate.** The suite has 12 synthetic scenes. The real-photo suite reads `.labels.json` files and a manifest, splits by subject, and accepts only consented photos. `--coverage` lists the empty cells of the coverage matrix, and `--perf` times a full-resolution render on the current computer.
+- **Phase 2B: tone-fair detection.** The engine now has:
+  - **Separate texture references.** Bright-texture and colour-texture references sit beside the pore reference, with sensor noise taken out.
+  - **Native-resolution finest scales.** These run for faces wider than 1100 px.
+  - **Pimple fusion.** A light head on a red dome is one pimple.
+  - **Rim rejection.**
+  - **Rescan changes.** Rescan residue joins its mark, and colourless relief is not boosted.
+  - **A lit-texture guard.** It keeps sheen and shimmer from passing the new tests on real photos.
+
+  Results on the synthetic benchmark (held-out scenes):
+  - **Type VI:** whiteheads 15 → 24 of 27, pimples 18 → 22 of 22, recall 0.874 → 0.942.
+  - **Overall false positives:** 30 → 12, with no regression on any tone.
+
+  On five already-retouched real photos, detections changed by +1.3%. Thresholds are tuned on separate `--dev` scenes. The 30 MP render is +8% slower (51 s), and phase 2E addresses that.
+- **Phase 2C: dense clusters, stubble and Needs Review.**
+  - **Review marks carry a reason:** low confidence, may be a follicle, or may be a freckle. The panel shows it for the selected mark and counts the marks that may be a natural feature.
+  - **Never corrected unasked.** A mark that may be a natural feature is never corrected automatically or by **Correct all remaining**, and it is kept out of repair windows and area corrections.
+  - **Stubble and freckle groups.** A dot unlike its stubble field, or a spot unlike its freckle group, goes to review. So do lone or hair-aligned dots in the hair zone.
+  - **Cluster split.** Marks that merge into one broad patch at a coarse scale are corrected one by one.
+  - **Fix:** a correct override no longer forces a protected feature, or a mark under review as a possible feature, that sits next to the mark it was placed for.
+
+  Results on the synthetic benchmark (held-out scenes): recall 0.967 → 0.985, false corrections 11 → 7, natural features damaged 4 → 0, and type VI dark spots 36 of 36. False positives rose 12 → 16; all four extra are freckles left for review, untouched. The report now counts these separately.
+- **Phase 2D: correction quality.**
+  - **Seven checks per repair:** contrast left, colour (ΔE2000 against the skin around it), texture, pores, seams at the edge, repeated donor texture, and change to the skin around it. A mark is corrected only when its repair passes.
+  - **Failed repairs are undone.** A repair that fails is retried from the original skin with another donor. If it still fails, the original skin is restored and the mark goes to Needs review with the failed checks. Choosing Correct keeps the repair anyway.
+  - **Better repairs:** donors no longer bring neighbouring marks into a repair, no ghost ring from the mark's edge, and the fill tone comes from the skin around the mark.
+  - Marks waiting for review are untouched by the area tools. **Correct all remaining** skips failed repairs and forces a neighbour only if its centre is inside the circle.
+  - **Repair quality review page** (`--quality-gallery`) to calibrate the checks on real validation photos.
+
+  Results on the synthetic benchmark (held-out scenes): marks reported corrected but still visible 4 → 1, false corrections 7 → 5, no regression. On retouched real photos, fine texture lost fell from 3.4% to 1.6% and from 5.8% to 2.7%. The thresholds stay provisional until the validation photos are reviewed. Time rose 34%, which phase 2E addresses.
+- **Phase 2E: performance.**
+  - **Pixel-identical output.** The output is unchanged from 2D, checked on benchmark scenes, real photos and a full render.
+  - **Parallel processing.** Detection tiles and the render's per-pixel strips run in parallel, within OpenCV's thread count and a tile memory budget.
+  - **Less repeated work.** Residual scans reuse the first scan's masks, and the classification loop is faster.
+  - **Fewer full-size copies.** Many full-size temporary copies are gone.
+
+  On a 4-vCPU container: 30 MP 63 → 37 s and 6.5 → 4.1 GB; 25 MP 55 → 40 s and 6.3 → 4.5 GB. The 25 s / 4 GB target for the Ryzen 3 7330U is not yet confirmed; `--perf` measures it there.
+- **Label mode** (Test labels section). You click marks to label them as imperfections or natural features. Engine suggestions start unconfirmed. Labels are saved to `<photo>.labels.json` and never touch the photo or the edit. Details are in `docs/SKIN_PERFECTION_QA.md`.
+
+- **Review fixes (B1, B3).**
+  - **Correct all remaining respects the quality gate.** A bulk correction is kept only if its repair passes every check. Otherwise the original pixels come back and the mark is listed as a failed repair. On a 25 MP full-body photo this removes the smudge the button left on knuckles and nail edges. Choosing Correct on a single mark still keeps its repair.
+  - **Preview and export apply heal strokes in the same order**: right after Skin Perfection. Export used to heal first, so it could differ from the preview where a stroke crossed a repair.
+- **Review fix (B2): the bulk button counts what it will try.** "Correct all remaining (N)" is now **Try to correct remaining (N)**. N leaves out marks the last residual scan found, which the bulk action cannot reach (on a 4 MP test photo, 17 of the 42 it used to count; the output is pixel-identical to before). A line below the button says how many of the N already failed a quality check once and that a repair failing a check is undone, so none is promised as a correction. After one click the count is 0.
+- **Browser / Python healing parity test.** Both heal implementations run on the same Skin Perfection crop and strokes; they agree within one 8-bit level.
+
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)
 
 - **High-resolution GPU export in tiles.** Photos larger than the GPU's texture limit or the chosen GPU memory budget (Low 512 MB / Balanced 1.5 GB / High 3 GB) render in overlapping tiles instead of being scaled down.

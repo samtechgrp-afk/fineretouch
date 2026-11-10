@@ -8,6 +8,9 @@ import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
 import { editMaskFor, faceMaskFor } from '@/lib/export';
 import { ensureProxy, fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
+import { perfectedPixels, perfectionKeyOf, schedulePerfection, usePerfection } from '@/lib/perfection';
+import { drawMarks, hitLabel, hitMark } from './viewport/perfectionOverlay';
+import { restoreLabels, useLabels } from '@/lib/qaLabels';
 import { autoHealSource } from '@/engine/heal';
 import { noiseLevelOf } from '@/lib/noise';
 import { displayAdjustments, selectActivePhoto, useEditor } from '@/lib/store';
@@ -41,6 +44,7 @@ export function PhotoEditorViewport() {
   const healRef = useRef<Uint8ClampedArray | null>(null);
   const displayRef = useRef<DisplayView | null>(null);
   const brushCanvasRef = useRef<HTMLCanvasElement>(null);
+  const marksCanvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
   const [renderMs, setRenderMs] = useState<number | null>(null);
@@ -78,6 +82,28 @@ export function PhotoEditorViewport() {
     return { dpr, cw, ch, paneW, fit };
   }, [view.mode]);
 
+  /** Skin Perfection marks over the photo (Final quality check overlay). */
+  const perfFrame = () => {
+    const d = displayRef.current;
+    const r = rendererRef.current;
+    return d && r && r.width ? { display: d, width: r.width, height: r.height } : null;
+  };
+  const perfReport = () => {
+    const st = useEditor.getState();
+    const p = selectActivePhoto(st);
+    const ps = usePerfection.getState();
+    if (!p || !p.adjustments.skinPerfection.enabled || !ps.overlay) return null;
+    return ps.byPhoto[p.id]?.report ?? null;
+  };
+  const drawPerfectionMarks = () => {
+    const c = marksCanvasRef.current;
+    const wrap = wrapRef.current;
+    const p = selectActivePhoto(useEditor.getState());
+    const ls = useLabels.getState();
+    const labels = p && (ls.on || ls.byPhoto[p.id]?.labels.length) ? { labels: ls.byPhoto[p.id]?.labels ?? [], selected: ls.selected } : null;
+    if (c && wrap) drawMarks(c, wrap, perfFrame(), perfReport(), usePerfection.getState().selected, labels);
+  };
+
   const draw = useCallback(() => {
     cancelAnimationFrame(frameRef.current);
     frameRef.current = requestAnimationFrame(() => {
@@ -103,7 +129,11 @@ export function PhotoEditorViewport() {
       }
       // Pro tools: heal / clone strokes replayed on the proxy pixels (stage 0b of the engine).
       const lr = adj.localRetouch;
-      const healed = lr.heal.length ? healedPixels(`${p.id}:proxy`, pixelsOf(`${p.id}:proxy`, proxy), proxy.width, proxy.height, lr.heal) : null;
+      // Skin Perfection (stage 0c, engine only): its perfected preview is the base the heal
+      // strokes and every shader stage work on. While a re-run is pending the last result shows.
+      const perf = adj.skinPerfection.enabled ? perfectedPixels(p.id, perfectionKeyOf(adj), proxy.width, proxy.height) : null;
+      const base = perf ? perf.pixels : null;
+      const healed = lr.heal.length ? healedPixels(`${p.id}:proxy`, base ?? pixelsOf(`${p.id}:proxy`, proxy), proxy.width, proxy.height, lr.heal) : base;
       if (healRef.current !== healed) {
         r.setHealedSource(healed);
         healRef.current = healed;
@@ -168,6 +198,7 @@ export function PhotoEditorViewport() {
       };
       r.display(display, adj.glareReduction / 100);
       displayRef.current = display;
+      drawPerfectionMarks();
       setRenderMs(performance.now() - t0);
       setStagesRun(r.lastStages.length);
     });
@@ -177,6 +208,30 @@ export function PhotoEditorViewport() {
   useEffect(() => {
     draw();
   }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, photo?.parseState, pending, view, draw]);
+
+  // Skin Perfection: re-run the engine (debounced) when its settings change; redraw on results.
+  const perfOn = Boolean(photo?.adjustments.skinPerfection.enabled);
+  const perfKey = photo && perfOn ? perfectionKeyOf(photo.adjustments) : '';
+  const perfAuto = usePerfection((s) => s.auto);
+  const perfOnline = useEditor((s) => s.aiOnline);
+  useEffect(() => {
+    if (photo && perfOn && perfAuto && perfOnline) schedulePerfection(photo.id);
+  }, [photo?.id, perfKey, perfOn, perfAuto, perfOnline]); // eslint-disable-line react-hooks/exhaustive-deps
+  const perfState = usePerfection((s) => (photo ? s.byPhoto[photo.id] : undefined));
+  const perfSelected = usePerfection((s) => s.selected);
+  const perfOverlay = usePerfection((s) => s.overlay);
+  useEffect(() => {
+    draw();
+  }, [perfState?.key, perfState?.report, draw]);
+  const labelOn = useLabels((s) => s.on);
+  const labelSel = useLabels((s) => s.selected);
+  const labelsHere = useLabels((s) => (photo ? s.byPhoto[photo.id] : undefined));
+  useEffect(() => {
+    if (photo) restoreLabels(photo.id);
+  }, [photo?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    drawPerfectionMarks();
+  }, [perfSelected, perfOverlay, labelOn, labelSel, labelsHere]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Edit as shown (with a pending assistant plan previewed), so previewed tools get their maps too.
   const shown = useEditor((s) => (photo ? displayAdjustments(s, photo) : null));
@@ -391,6 +446,33 @@ export function PhotoEditorViewport() {
       drawBrush(e.clientX - rect.left, e.clientY - rect.top, true);
       return;
     }
+    const ls = useLabels.getState();
+    if (!brush && e.button === 0 && ls.on && photo) {
+      // Label mode: click a label to select it (Alt-click deletes it); click skin to add one.
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      const hit = hitLabel(x, y, perfFrame(), ls.byPhoto[photo.id]?.labels ?? []);
+      if (hit) {
+        if (e.altKey) ls.remove(photo.id, hit.id);
+        else ls.select(hit.id);
+        return;
+      }
+      const pt = toImage(x, y);
+      if (pt && pt[0] >= 0 && pt[0] <= 1 && pt[1] >= 0 && pt[1] <= 1) {
+        ls.add(photo.id, pt[0], pt[1]);
+        return;
+      }
+    }
+    if (!brush && e.button === 0) {
+      // Click a Skin Perfection mark to select it (Shift adds / removes); drag still pans.
+      const m = hitMark(e.clientX - rect.left, e.clientY - rect.top, perfFrame(), perfReport());
+      if (m) {
+        const ps = usePerfection.getState();
+        const cur = ps.selected;
+        ps.select(e.shiftKey ? (cur.includes(m.id) ? cur.filter((i) => i !== m.id) : [...cur, m.id]) : [m.id]);
+        return;
+      }
+    }
     const v = useEditor.getState().view;
     const x = e.clientX - rect.left;
     const nearSplit = v.mode === 'split' && Math.abs(x - v.split * rect.width) < 24;
@@ -433,7 +515,9 @@ export function PhotoEditorViewport() {
         // Spot healing: no source set, so pick one around the stroke on the current pixels.
         const proxy = getProxy(photo.id);
         if (proxy) {
-          const base = pixelsOf(`${photo.id}:proxy`, proxy);
+          const adj0 = photo.adjustments;
+          const perf = adj0.skinPerfection.enabled ? perfectedPixels(photo.id, perfectionKeyOf(adj0), proxy.width, proxy.height) : null;
+          const base = perf?.pixels ?? pixelsOf(`${photo.id}:proxy`, proxy);
           const cur = healedPixels(`${photo.id}:proxy`, base, proxy.width, proxy.height, photo.adjustments.localRetouch.heal) ?? base;
           offset = autoHealSource(cur, proxy.width, proxy.height, view.brushSize, points);
         }
@@ -456,7 +540,7 @@ export function PhotoEditorViewport() {
     <div
       ref={wrapRef}
       className="relative h-full w-full touch-none select-none overflow-hidden bg-ink-950"
-      style={{ cursor: brush ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
+      style={{ cursor: brush || labelOn ? 'crosshair' : view.mode === 'split' ? 'ew-resize' : view.zoom > 1 ? 'grab' : 'default' }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
@@ -466,6 +550,7 @@ export function PhotoEditorViewport() {
       data-testid="viewport"
     >
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" aria-label="Photo preview" />
+      <canvas ref={marksCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden data-testid="perfection-marks" />
       <canvas ref={brushCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full" aria-hidden data-testid="brush-layer" />
       {!photo && !error && (
         <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-ink-400">
