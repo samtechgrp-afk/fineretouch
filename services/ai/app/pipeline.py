@@ -32,6 +32,9 @@ Stages (all on float32 sRGB in [0, 1]):
      contrast, saturation, vibrance; 8b. HSL mixer and colour grading (color_engine);
      8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
+  0d. Professional Skin Finish (v0.14, engines/finish.py), after 0c and the heal strokes: edge-aware
+     smoothing of the bump, blotch, pore and grain bands of face and body skin, texture
+     restoration and verification. Off by default (then nothing in it runs).
   Pro tools (v0.10, engines/local.py): 0b. healing and clone strokes on the original pixels
   before stage 1 (right after the Skin Perfection engine, 0c, when that is on: the preview's order); 10. local retouch layers (frequency separation, dodge & burn, correction
   brushes with their own masks) after stage 8 and before the bokeh of stage 9.
@@ -48,6 +51,12 @@ import numpy as np
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .effects import detector_multiplier, resolve_adjustments
+from .engines.finish import FinishReport, finish_skin
+from .engines.local import apply_heal_strokes, apply_local_layers
+from .engines.noise import reduce_skin_noise
+from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
+from .engines.redness import reduce_redness
+from .engines.under_eye import soften_under_eye_texture
 from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep, protect_weight
 from .retouch_engine import (
     apply_boosted_skin_retouch,
@@ -56,20 +65,21 @@ from .retouch_engine import (
     correct_teeth,
     faces_in_crop,
     natural_skin_retouch,
-    remove_acne,
-    remove_dark_spots,
     reduce_glasses_glare,
+    remove_acne,
     remove_clothing_wrinkles,
+    remove_dark_spots,
     remove_stray_hairs,
     shift_clothing_color,
     skin_tone_guard,
 )
-from .engines.local import apply_heal_strokes, apply_local_layers
-from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
-from .engines.noise import reduce_skin_noise
-from .engines.redness import reduce_redness
-from .engines.under_eye import soften_under_eye_texture
-from .schemas import Adjustments, ColorStats, FaceAnalysis, SkinPerfectionSettings
+from .schemas import (
+    Adjustments,
+    ColorStats,
+    FaceAnalysis,
+    SkinFinishSettings,
+    SkinPerfectionSettings,
+)
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
 # Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
@@ -412,6 +422,17 @@ def render(
             src = apply_heal_strokes(src, adj.localRetouch.heal)
         low0 = blur(src, S0 * L)
         bands.clear()
+    # 0d. Professional Skin Finish (v0.14): edge-aware texture finishing of face and body skin on
+    #     the photo Skin Perfection and the heal strokes left, before every older skin stage.
+    #     Off by default; when off nothing here runs, so the output is unchanged bit for bit.
+    fs = adj.skinFinish
+    if fs.enabled and fs.strength > 0:
+        face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
+        src, frep = finish_photo(src, face_skin, masks, parse, fs, protect_weight(sm, h, w))
+        if report is not None:
+            report.append(frep)
+        low0 = blur(src, S0 * L)
+        bands.clear()
     skin = skin[..., None]
 
     c = src.copy()
@@ -535,6 +556,27 @@ def perfect_photo(
         src.astype(np.float32, copy=False), skin, faces, settings, body_skin=body,
         under_eye=masks.under_eye if masks.has_face else None, face_skin=masks.skin if masks.has_face else skin,
     )
+
+
+def finish_photo(
+    src: np.ndarray, skin: np.ndarray, masks: FaceMasks, parse: FaceParse | None,
+    settings: SkinFinishSettings, protect: np.ndarray | None = None, method: str = "edge",
+) -> tuple[np.ndarray, FinishReport]:
+    """Stage 0d: the Professional Skin Finish engine on the photo (float32 sRGB), with face skin
+    from the renderer's skin weight and body skin from face parsing (gated by the skin colour box,
+    hair kept out, the user's Protect strokes applied). Clothing, hair and background are outside
+    both, and their pixels come back bit for bit."""
+    h, w = src.shape[:2]
+    fw = masks.face_width or 0.25 * max(h, w)
+    body = None
+    if settings.bodyCoverage and parse is not None:
+        p = parse.resized(h, w)
+        body = blur(p.body_skin, fw * 0.003) * hair_keep(blur(p.hair, fw * 0.004))
+        body = body * (0.4 + 0.6 * skin_probability(blur(src, S0 * max(h, w))))
+        if protect is not None:
+            body = body * protect
+    return finish_skin(src.astype(np.float32, copy=False), skin.astype(np.float32, copy=False), settings, fw,
+                       body=body, method=method)
 
 
 def _finish_strip(

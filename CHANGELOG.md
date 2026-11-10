@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.14.0 (unreleased): Professional Skin Finish, phase 1
+
+- **New finishing engine** (`services/ai/app/engines/finish.py`, render stage 0d). It runs after Skin Perfection and the healing strokes, on face skin and parsed body skin. It is **off by default**, and while it is off the renderer never calls it, so every existing render is bit-identical (checked against golden hashes of the PR #13 head, `python -m qa.golden check`).
+- **What phase 1 does.** It splits CIELAB L* into fine, pore, bump and blotch bands, scaled to the face width, and calms bumps and blotches while keeping pores and grain:
+  - **Skin smoothing** reduces the bump and blotch bands.
+  - **Pore preservation** keeps the pore band, and moves the smoothing cut away from the pore scale, so pores keep over 90% of their relief at strong smoothing.
+  - **Texture preservation** keeps the finest grain, and refills grain where a patch ended up flatter than the person's own skin (seeded, so the same photo gives the same grain).
+  - **Overall strength** blends the whole finish.
+  Each control has its own on/off switch, and a test checks that each one changes the band it claims.
+- **Contours are kept.** An edge weight per band fades the smoothing out near nostrils, eyelids, lips, the jaw and shadow edges. Dark cores (nostrils, lash shadows, moles) are protected. Pixels outside the finish mask are copied bit for bit.
+- **Method chosen by measurement.** Four smoothing methods were compared on six synthetic skin tones and ten real photos with professional retouches (`python -m qa.finish_eval`); details are in `docs/SKIN_FINISH.md`.
+- **QA tools.** `qa/golden.py` records and checks SHA-256 hashes of rendered output; `qa/finish_eval.py` measures bands, contour contrast, halo, texture and complexion shift against a reference retouch.
+- Shine, tone evenness, dark spot, under-eye, dodge and burn, the styles, the panel, mask view and brush follow in phase 2. No new dependencies or models.
+
 ## v0.13.0 (unreleased): Skin Perfection Studio
 
 - **New full-resolution blemish engine** (`services/ai/app/engines/perfection.py`). It replaces the detection behind spot healing for photos that use it, and fixes why small marks were left behind:

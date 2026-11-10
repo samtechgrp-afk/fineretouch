@@ -319,6 +319,33 @@ class SkinPerfectionSettings(BaseModel):
         return PerfectionCategory(sensitivity=s, strength=t)
 
 
+class FinishControl(BaseModel):
+    """One Professional Skin Finish slider: its own on/off switch and amount (0..100)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    amount: float = Field(50, ge=0, le=100)
+
+
+class SkinFinishSettings(BaseModel):
+    """Professional Skin Finish (v0.14, stage 0d; engines/finish.py). Off by default: with it off
+    the renderer's output is bit-identical to a build without it.
+
+    Phase 1 controls: smoothing (bumps and blotches), texturePreservation (grain and the texture
+    restoration floor), porePreservation (pores) and the overall strength. The other controls of
+    the panel arrive with phase 2."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    strength: float = Field(100, ge=0, le=100)  # Overall Skin Finish Strength: blends the whole finish
+    smoothing: FinishControl = FinishControl(amount=55)
+    texturePreservation: FinishControl = FinishControl(amount=75)
+    porePreservation: FinishControl = FinishControl(amount=65)
+    bodyCoverage: bool = True  # neck, shoulders, arms, hands, legs (face parsing)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -372,6 +399,7 @@ class Adjustments(BaseModel):
     # v0.13 Skin Perfection engine: tiled multi-scale detection, classification, targeted
     # correction and verified residual passes (app/engines/perfection.py).
     skinPerfection: SkinPerfectionSettings = SkinPerfectionSettings()
+    skinFinish: SkinFinishSettings = SkinFinishSettings()
 
 
 class StyleProfile(BaseModel):
