@@ -66,6 +66,8 @@
 - **Review fixes (B1, B3).**
   - **Correct all remaining respects the quality gate.** A bulk correction is kept only if its repair passes every check. Otherwise the original pixels come back and the mark is listed as a failed repair. On a 25 MP full-body photo this removes the smudge the button left on knuckles and nail edges. Choosing Correct on a single mark still keeps its repair.
   - **Preview and export apply heal strokes in the same order**: right after Skin Perfection. Export used to heal first, so it could differ from the preview where a stroke crossed a repair.
+- **Review fix (B2): the bulk button counts what it will try.** "Correct all remaining (N)" is now **Try to correct remaining (N)**. N leaves out marks the last residual scan found, which the bulk action cannot reach (on a 4 MP test photo, 17 of the 42 it used to count; the output is pixel-identical to before). A line below the button says how many of the N already failed a quality check once and that a repair failing a check is undone, so none is promised as a correction. After one click the count is 0.
+- **Browser / Python healing parity test.** Both heal implementations run on the same Skin Perfection crop and strokes; they agree within one 8-bit level.
 
 ## v0.12.0 (unreleased): rendering and performance (Phase 7)
 

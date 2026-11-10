@@ -5,7 +5,7 @@ import {
   PERFECTION_CATEGORY_LABELS,
   PERFECTION_GROUPS,
   correctRemaining,
-  isBulkCorrectable,
+  bulkPlan,
   FEATURE_REASONS,
   REVIEW_REASON_TEXT,
   qualitySummary,
@@ -65,7 +65,7 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
   const marksById = new Map(report?.marks.map((m) => [m.id, m]) ?? []);
   const chosen = selected.map((id) => marksById.get(id)).filter((m): m is NonNullable<typeof m> => Boolean(m));
   const minConf = sp.confidenceThreshold / 100;
-  const fixable = report?.marks.filter((m) => isBulkCorrectable(m, minConf)).length ?? 0;
+  const bulk = bulkPlan(report, minConf);
   const undecided = report?.marks.filter((m) => m.status === 'review' && m.reason && FEATURE_REASONS.includes(m.reason)).length ?? 0;
   const repairFailed = report?.marks.filter((m) => m.status === 'review' && m.reason === 'repairFailed').length ?? 0;
   const status = !on
@@ -212,11 +212,11 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
         <div className="mt-2.5 grid grid-cols-2 gap-2">
           <button
             className="btn-primary"
-            disabled={!on || !report || fixable === 0}
+            disabled={!on || !report || bulk.attempt === 0}
             onClick={() => commit(correctRemaining(sp, report!, minConf))}
-            title="Correct every remaining mark at or above the confidence threshold (one undo step). Marks that may be a freckle or a follicle are never included."
+            title="Repair every remaining mark at or above the confidence threshold again (one undo step). Each repair must pass every quality check, or the original skin comes back and the mark is listed as a failed repair. Marks that may be a freckle or a follicle, failed repairs and marks found by the last rescan are not included: select those and choose Correct or Ignore."
           >
-            Correct all remaining {fixable ? `(${fixable})` : ''}
+            Try to correct remaining {bulk.attempt ? `(${bulk.attempt})` : ''}
           </button>
           <button
             className="btn"
@@ -227,6 +227,16 @@ export function SkinPerfectionPanel({ photo }: { photo: Photo }) {
             Run another pass ({sp.passes}/4)
           </button>
         </div>
+        {report && (bulk.attempt > 0 || bulk.oneByOne > 0) && (
+          <p className="mt-1 text-[11px] text-ink-400" data-testid="perfection-bulk-plan">
+            {bulk.attempt > 0 &&
+              `Tries ${bulk.attempt} mark${bulk.attempt > 1 ? 's' : ''} again; none is guaranteed. ${
+                bulk.failedBefore > 0 ? `${bulk.failedBefore} already failed a quality check once. ` : ''
+              }A repair that fails a check is undone and listed as a failed repair. `}
+            {bulk.oneByOne > 0 &&
+              `${bulk.oneByOne} mark${bulk.oneByOne > 1 ? 's' : ''} found by the last rescan can only be corrected one at a time.`}
+          </p>
+        )}
         {chosen.length > 0 ? (
           <div className="mt-2 rounded bg-ink-850 p-2 text-[11px]" data-testid="perfection-selection">
             <p className="text-ink-200">

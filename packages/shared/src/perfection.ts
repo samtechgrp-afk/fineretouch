@@ -321,14 +321,42 @@ export interface PerfectionReport {
 }
 
 /**
- * Marks "Correct all remaining" may correct: remaining marks and low-confidence review marks at
+ * Marks "Correct all remaining" tries again: remaining marks and low-confidence review marks at
  * or above `minConfidence`. A mark that may be a natural feature, or whose repair failed the
- * quality checks, is never corrected in bulk; it needs its own decision.
+ * quality checks, is never corrected in bulk; it needs its own decision. Nor is a mark the
+ * residual scan found after the correction passes (`residual`): it does not exist yet when the
+ * engine applies the choices, so a bulk choice there would do nothing (select it and choose
+ * Correct instead).
  */
 export function isBulkCorrectable(m: PerfectionMark, minConfidence: number): boolean {
-  if (m.confidence < minConfidence) return false;
+  if (m.confidence < minConfidence || m.residual) return false;
   if (m.status === 'remaining') return true;
   return m.status === 'review' && (m.reason == null || m.reason === 'lowConfidence');
+}
+
+/**
+ * What "Correct all remaining" will do (B2). Every mark in `attempt` is repaired again and must
+ * pass every quality check, or its original skin comes back and it is listed as Repair failed;
+ * none is a guaranteed correction. `failedBefore` of them already failed a check on the last
+ * render. `oneByOne` are marks the residual scan found that the bulk action cannot reach.
+ */
+export interface BulkPlan {
+  attempt: number;
+  failedBefore: number;
+  oneByOne: number;
+}
+
+export function bulkPlan(report: PerfectionReport | null | undefined, minConfidence: number): BulkPlan {
+  const plan: BulkPlan = { attempt: 0, failedBefore: 0, oneByOne: 0 };
+  for (const m of report?.marks ?? []) {
+    if (isBulkCorrectable(m, minConfidence)) {
+      plan.attempt++;
+      if (m.attempts > 0 && (m.quality?.failed.length ?? 1) > 0) plan.failedBefore++;
+    } else if (m.residual && isBulkCorrectable({ ...m, residual: false }, minConfidence)) {
+      plan.oneByOne++;
+    }
+  }
+  return plan;
 }
 
 /** Overrides that correct every remaining mark at or above `minConfidence` (one undo step). */

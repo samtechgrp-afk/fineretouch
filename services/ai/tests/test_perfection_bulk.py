@@ -291,3 +291,25 @@ def test_preview_and_export_endpoints_agree_where_a_stroke_meets_a_repair(healed
     jpeg = np.abs(base[k].astype(int) - perfected[k].astype(int))
     assert d.mean() <= jpeg.mean() + 0.1 and d.max() <= jpeg.max() + 2
     assert np.array_equal(export, np.asarray(render(rgb8, adj, [face])))
+
+
+# --- B2: the count shows only what the bulk action can attempt -------------------------------
+
+
+def test_bulk_choice_on_a_mark_the_last_rescan_found_does_nothing(scene):
+    """Marks the residual scan finds are created after the choices are applied, so a bulk choice
+    there cannot reach them (correctRemaining leaves them out, and the count does too)."""
+    img, mask, faces, _, _ = scene
+    h, w = img.shape[:2]
+    out, rep = perfect_skin(img, mask, faces, on(passes=1))
+    late = [m for m in rep.marks if m.residual and m.status == "remaining"]
+    assert late and all(m.attempts == 0 for m in late)
+    out2, rep2 = perfect_skin(img, mask, faces, on(passes=1, overrides=bulk_for(late, w, h)))
+    assert np.array_equal(out2, out)
+    assert [(m.id, m.status) for m in rep2.marks] == [(m.id, m.status) for m in rep.marks]
+    # Choosing Correct on one of them still repairs it (a hand-placed correction).
+    one = late[0]
+    L = float(max(w, h))
+    own = PerfectionOverride(x=one.x / w, y=one.y / h, radius=max(0.0005, one.r / L * 1.3), action="correct")
+    out3, _ = perfect_skin(img, mask, faces, on(passes=1, overrides=[own]))
+    assert np.abs(out3 - out)[disc(img.shape, one.x, one.y, one.r)].max() > 0.01

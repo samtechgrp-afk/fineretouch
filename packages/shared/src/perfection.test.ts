@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_ADJUSTMENTS, applyPreset, isDefault, sanitizeAdjustments } from './index.js';
 import {
   DEFAULT_SKIN_PERFECTION,
+  bulkPlan,
   correctRemaining,
   groupSensitivity,
   overrideMark,
@@ -91,6 +92,37 @@ describe('skin perfection settings', () => {
     const s = correctRemaining(DEFAULT_SKIN_PERFECTION, r, 0.5);
     expect(s.overrides).toHaveLength(1);
     expect(s.overrides[0]).toMatchObject({ x: 0.5 });
+  });
+
+  it('counts only what the bulk action will attempt, and none of it as a sure correction (B2)', () => {
+    const failed = { failed: ['colour' as const], values: {}, incomplete: false };
+    const r = report([
+      { attempts: 2, quality: failed }, // tried twice, still failing a check
+      { attempts: 1, quality: null, x: 0.1 }, // tried, still visible
+      { status: 'review', reason: 'lowConfidence', confidence: 0.6, attempts: 0, x: 0.2 }, // never tried
+      { residual: true, attempts: 1, quality: failed, x: 0.3 }, // found by the last rescan
+      { residual: true, status: 'review', reason: 'lowConfidence', confidence: 0.6, attempts: 0, x: 0.4 },
+      { status: 'review', reason: 'repairFailed', attempts: 2, quality: failed, x: 0.5 }, // already undone
+      { status: 'review', reason: 'mayBeFreckle', attempts: 0, x: 0.6 },
+      { confidence: 0.3, x: 0.7 }, // below the threshold
+      { status: 'corrected', x: 0.8 },
+    ]);
+    expect(bulkPlan(r, 0.5)).toEqual({ attempt: 3, failedBefore: 2, oneByOne: 2 });
+    // The count is exactly what the button sends to the engine.
+    expect(correctRemaining(DEFAULT_SKIN_PERFECTION, r, 0.5).overrides.map((o) => o.x)).toEqual([0.5, 0.1, 0.2]);
+    expect(bulkPlan(null, 0.5)).toEqual({ attempt: 0, failedBefore: 0, oneByOne: 0 });
+  });
+
+  it('after one click nothing is left to try in bulk (the count converges)', () => {
+    // What the engine reports after the click: the retried marks either passed (corrected) or
+    // were undone (review / repairFailed); the rescan marks are still one-by-one.
+    const failed = { failed: ['residual' as const], values: {}, incomplete: false };
+    const after = report([
+      { status: 'corrected', attempts: 3 },
+      { status: 'review', reason: 'repairFailed', attempts: 3, quality: failed, x: 0.1 },
+      { residual: true, attempts: 1, quality: failed, x: 0.3 },
+    ]);
+    expect(bulkPlan(after, 0.5)).toEqual({ attempt: 0, failedBefore: 0, oneByOne: 1 });
   });
 
   it('quality summary names the failed checks and what happened to the repair', () => {
