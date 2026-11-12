@@ -86,7 +86,9 @@ time is Gaussian blurs and resizes on full-resolution planes.
   licensed Wikimedia Commons photos were selected (CC BY-SA 3.0/4.0 and US-government public
   domain): light skin with acne, post-acne marks and hyperpigmentation on the face, back and chest,
   plus a deep-skinned woman, a medium-deep man and a medium East Asian face. Wikimedia
-  rate-limits the cloud, so they need to be downloaded on Sam's PC, which needs Sam's OK.
+  rate-limits the cloud, so they were downloaded on Sam's PC (with his OK) into
+  `Desktop\Untitled Export2\qa-licensed\` (9 files, 41 MB, 6.6–49.9 MP). They are not tested
+  yet: this session cannot read that folder, so they need to be uploaded to the project.
   retouchedElle was not used.
 - **Shine on lighter skin and strong highlights.** Only measured on deep skin so far (p99 L* down by
   1–3).
