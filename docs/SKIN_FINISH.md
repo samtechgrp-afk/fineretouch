@@ -193,8 +193,8 @@ the box to the mask would cut both numbers without changing the output.
 - `python -m qa.golden check <baseline> --manifest <real.json>` re-renders 24 synthetic cases and
   3 real exports and compares SHA-256 hashes with the PR #13 head. All 27 were identical after
   phase 1. After phase 2 only the cases with Dark circles on changed (the six synthetic "heavy"
-  cases and the CRPixels-26 snapshot, darkCircles 88): that is the approved replacement of the
-  stage 6 fill. Every other case is identical.
+  cases and the two real "snapshot13" exports, CRPixels-26 and CRPixels-5, all with darkCircles
+  88): that is the approved replacement of the stage 6 fill. The other 19 cases are identical.
 - `tests/test_skin_finish_local.py` (26 tests) checks each phase 2 correction on the pixels it is
   about: spots lifted on tones I, III, V, VI while a crease, a mole and pores stay; glare lowered
   more than better-lit skin and its colour restored; colour blotches reduced without moving the
