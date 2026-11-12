@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_ADJUSTMENTS,
+  autoExposure,
   autoRetouch,
   exposureForLightness,
+  AUTO_SKIN_BRIGHTEN_MAX,
   isDefault,
   mapStyleToAdjustments,
   sanitizeAdjustments,
@@ -83,13 +85,45 @@ describe('style mapping', () => {
   });
 
   it('auto retouch stays within gentle bounds', () => {
-    const dark = autoRetouch(profile({ meanL: 30, skinTexture: 9 }), true);
-    expect(dark.exposure).toBeGreaterThan(0);
-    expect(dark.exposure).toBeLessThanOrEqual(60);
+    const dark = autoRetouch(profile({ meanL: 30, skinLuma: 28, skinTexture: 9 }), true);
+    expect(dark.exposure).toBeUndefined(); // the photo's exposure and contrast are never touched
+    expect(dark.contrast).toBeUndefined();
+    expect(dark.skinBrighten).toBeGreaterThan(0);
+    expect(dark.skinBrighten).toBeLessThanOrEqual(AUTO_SKIN_BRIGHTEN_MAX);
     expect(dark.skinMultiplier).toBe(2);
     expect(dark.eyeBrighten).toBe(20);
     const noSkin = autoRetouch(profile({ skinTexture: null, skinLuma: null }), false);
     expect(noSkin.skinSmoothing).toBeUndefined();
     expect(noSkin.eyeBrighten).toBeUndefined();
+  });
+
+  it('auto retouch keeps a low-key portrait as shot (CRPixels-26 night measurements)', () => {
+    // Measured on the night portrait: frame mean 33.8 L*, skin 44.8 L*. The old rule gave +47.
+    const night = profile({ meanL: 33.8, skinLuma: 44.8 });
+    expect(autoExposure(night, true)).toEqual({ exposure: 0, skinBrighten: 0, capped: false, lowKey: true });
+    expect(autoRetouch(night, true).exposure).toBeUndefined();
+    expect(autoRetouch(night, true).skinBrighten).toBeUndefined();
+    // Without a face there is no skin mask to lift, and the frame is never brightened.
+    expect(autoExposure(night, false)).toEqual({ exposure: 0, skinBrighten: 0, capped: false, lowKey: false });
+  });
+
+  it('auto retouch never changes global exposure: dark photos get capped skin-only brightening', () => {
+    const dim = profile({ meanL: 30, skinLuma: 27 });
+    const e = autoExposure(dim, true);
+    expect(e.exposure).toBe(0);
+    expect(e.capped).toBe(true);
+    expect(e.skinBrighten).toBe(AUTO_SKIN_BRIGHTEN_MAX);
+    expect(autoRetouch(dim, true).skinBrighten).toBe(AUTO_SKIN_BRIGHTEN_MAX);
+    const slight = autoExposure(profile({ meanL: 52, skinLuma: 50 }), true);
+    expect(slight.skinBrighten).toBeGreaterThan(0);
+    expect(slight.skinBrighten).toBeLessThan(AUTO_SKIN_BRIGHTEN_MAX);
+    // An overexposed frame is left as shot: no darkening of the whole photograph.
+    const bright = autoExposure(profile({ meanL: 80, skinLuma: 85 }), true);
+    expect(bright).toEqual({ exposure: 0, skinBrighten: 0, capped: false, lowKey: false });
+    for (const meanL of [10, 30, 50, 56, 70, 90]) {
+      const a = autoRetouch(profile({ meanL, skinLuma: meanL }), true);
+      expect(a.exposure).toBeUndefined();
+      expect(a.contrast).toBeUndefined();
+    }
   });
 });

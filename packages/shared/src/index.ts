@@ -13,6 +13,7 @@ import { DEFAULT_EFFECTS, effectsAreDefault, sanitizeEffects, type EffectControl
 import { DEFAULT_SKIN_MASK, sanitizeSkinMask, skinMaskIsDefault, withOwnStrokes, type SkinMaskSettings } from './skinMask.js';
 import { DEFAULT_LOCAL_RETOUCH, localRetouchIsDefault, sanitizeLocalRetouch, type LocalRetouch } from './localRetouch.js';
 import { DEFAULT_SKIN_PERFECTION, sanitizeSkinPerfection, skinPerfectionIsDefault, type SkinPerfectionSettings } from './perfection.js';
+import { DEFAULT_SKIN_FINISH, sanitizeSkinFinish, skinFinishIsDefault, type SkinFinishSettings } from './finish.js';
 
 export interface SliderSpec {
   key: AdjustmentKey;
@@ -220,6 +221,8 @@ export interface Adjustments {
   keepFreckles: boolean;
   // Face (landmark driven)
   eyeBrighten: number; // 0..100
+  /** Skin brightening: lifts skin only (the skin mask), highlights kept; 0 = off. Never the background. 0..100 */
+  skinBrighten: number;
   darkCircles: number; // 0..100
   teethWhiten: number; // 0..100
   // Detail
@@ -241,6 +244,8 @@ export interface Adjustments {
   // Pro studio (v0.6)
   /** Removes flash / window reflections on eyeglass lenses (needs eye landmarks). */
   glareReduction: number; // 0..100
+  /** Run Glasses glare even where no glasses were detected (manual override; off by default). */
+  glareForce: boolean;
   /** Evens yellow or dark patches on teeth toward their own enamel colour. */
   teethStainRemoval: number; // 0..100
   clothing: ClothingSettings;
@@ -257,6 +262,8 @@ export interface Adjustments {
   localRetouch: LocalRetouch;
   /** v0.13 Skin Perfection Studio (perfection.ts): runs in the local AI engine. */
   skinPerfection: SkinPerfectionSettings;
+  /** v0.14 Professional Skin Finish (finish.ts): runs in the local AI engine, after Skin Perfection. */
+  skinFinish: SkinFinishSettings;
 }
 
 /** Keys of the plain numeric sliders (structured settings have their own controls). */
@@ -269,6 +276,7 @@ export type AdjustmentKey = Exclude<
   | 'protectBeautyMarks'
   | 'skinToneGuard'
   | 'keepFreckles'
+  | 'glareForce'
   | 'hsl'
   | 'colorGrading'
   | 'clothing'
@@ -278,6 +286,7 @@ export type AdjustmentKey = Exclude<
   | 'skinMask'
   | 'localRetouch'
   | 'skinPerfection'
+  | 'skinFinish'
 >;
 
 export const DEFAULT_STRAY_HAIR: Readonly<StrayHairSettings> = Object.freeze({ enabled: false, strength: 60 });
@@ -316,6 +325,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   underEyeTexture: 0,
   keepFreckles: false,
   eyeBrighten: 0,
+  skinBrighten: 0,
   darkCircles: 0,
   teethWhiten: 0,
   sharpen: 0,
@@ -329,6 +339,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   hsl: DEFAULT_HSL,
   colorGrading: DEFAULT_COLOR_GRADING,
   glareReduction: 0,
+  glareForce: false,
   teethStainRemoval: 0,
   clothing: DEFAULT_CLOTHING,
   lut: null,
@@ -337,6 +348,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   skinMask: DEFAULT_SKIN_MASK,
   localRetouch: DEFAULT_LOCAL_RETOUCH,
   skinPerfection: DEFAULT_SKIN_PERFECTION,
+  skinFinish: DEFAULT_SKIN_FINISH,
 });
 
 export const SLIDERS: readonly SliderSpec[] = [
@@ -387,6 +399,10 @@ export const SLIDERS: readonly SliderSpec[] = [
   {
     key: 'underEyeTexture', label: 'Under-eye texture', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
     hint: 'Fades fine lines and crepey texture below the eyes. Pores and the eye\'s own contour are kept.',
+  },
+  {
+    key: 'skinBrighten', label: 'Skin brightening', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
+    hint: 'Lifts the skin only, gently, keeping its highlights and shading. Background, hair and clothing stay as shot.',
   },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
@@ -452,6 +468,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   if (typeof src.protectBeautyMarks === 'boolean') out.protectBeautyMarks = src.protectBeautyMarks;
   if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
   if (typeof src.keepFreckles === 'boolean') out.keepFreckles = src.keepFreckles;
+  if (typeof src.glareForce === 'boolean') out.glareForce = src.glareForce;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
   const cl = asRecord(src.clothing);
@@ -468,6 +485,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   out.skinMask = sanitizeSkinMask(src.skinMask);
   out.localRetouch = sanitizeLocalRetouch(src.localRetouch);
   out.skinPerfection = sanitizeSkinPerfection(src.skinPerfection);
+  out.skinFinish = sanitizeSkinFinish(src.skinFinish);
   return out;
 }
 
@@ -544,7 +562,8 @@ export function isDefault(adj: Adjustments): boolean {
     effectsAreDefault(adj.effects) &&
     skinMaskIsDefault(adj.skinMask) &&
     localRetouchIsDefault(adj.localRetouch) &&
-    skinPerfectionIsDefault(adj.skinPerfection)
+    skinPerfectionIsDefault(adj.skinPerfection) &&
+    skinFinishIsDefault(adj.skinFinish)
   );
 }
 
@@ -662,6 +681,16 @@ export interface FaceAnalysis {
   regions: FaceRegions;
   /** 0 = closed, 1 = wide open, from eye aspect ratio. */
   eyeOpenness: number;
+  /** 0..1 how sure the engine is that this face wears glasses (phase 3b); null / missing = not measured. */
+  glasses?: number | null;
+}
+
+/** Glasses confidence at or above which Glasses glare runs on a face (engines/glasses.py). */
+export const GLASSES_CONFIDENT = 0.6;
+
+/** Faces Glasses glare works on: glasses confidently detected, or every face with eyes when forced. */
+export function glareFaces(faces: FaceAnalysis[], force: boolean): FaceAnalysis[] {
+  return faces.filter((f) => (force ? f.regions.leftEye.length >= 3 && f.regions.rightEye.length >= 3 : (f.glasses ?? 0) >= GLASSES_CONFIDENT));
 }
 
 export interface ImageAnalysis {
@@ -737,4 +766,5 @@ export * from './skinMask.js';
 export * from './localRetouch.js';
 export * from './assistant.js';
 export * from './perfection.js';
+export * from './finish.js';
 export * from './labels.js';

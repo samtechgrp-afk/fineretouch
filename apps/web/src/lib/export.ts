@@ -35,6 +35,12 @@ function parsePixels(bmp: ImageBitmap, w: number, h: number): Uint8ClampedArray 
  * With the engine's face parsing (and skinMask.useSegmentation) the skin channel is the
  * semantic mask of pipeline.build_masks; otherwise landmarks only.
  */
+/** Widest detected face as a share of the photo's width (for face-scaled preview stages). */
+export function faceShareOf(analysis: ImageAnalysis | null | undefined): number | undefined {
+  const faces = analysis?.faces ?? [];
+  return faces.length ? Math.max(...faces.map((f) => f.box[2])) : undefined;
+}
+
 export function faceMaskFor(
   id: string,
   analysis: ImageAnalysis | null,
@@ -216,7 +222,7 @@ export async function renderFullRes(
     const mask = faceMaskFor(ctx.id, ctx.analysis, w, h, adjustments.skinMask);
     const edit = editMaskFor(ctx.id, adjustments.skinMask, w, h);
     const hair = adjustments.strayHairRemoval.enabled ? hairRoiFor(ctx.id, ctx.analysis, w, h) : null;
-    const lens = adjustments.glareReduction > 0 ? lensRoiFor(ctx.id, ctx.analysis, w, h) : null;
+    const lens = adjustments.glareReduction > 0 ? lensRoiFor(ctx.id, ctx.analysis, w, h, adjustments.glareForce) : null;
     const sm = adjustments.skinMask;
     const layerKey = `export:${mask ? 'face' : 'none'}:${sm.strokes.length}:${sm.feather}:${sm.useSegmentation}:${sm.includeBodySkin}`;
 
@@ -235,7 +241,7 @@ export async function renderFullRes(
       if (lens) renderer.setLensRoi(lens.data, lens.width, lens.height);
       if (seg) renderer.setSegmentation(seg, seg.width, seg.height);
       if (depth) renderer.setDepth(depth.source, depth.width, depth.height);
-      renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats, noiseLevel });
+      renderer.render(adjustments, { hasFace: Boolean(mask), sourceStats: ctx.sourceStats, noiseLevel, faceShare: faceShareOf(ctx.analysis) });
       const px = renderer.readPixels({ x: t.ix - t.x, y: t.iy - t.y, width: t.iw, height: t.ih });
       ctx2d.putImageData(new ImageData(px, t.iw, t.ih), t.ix, t.iy);
       // Let the browser breathe between tiles (UI stays responsive on a big export).

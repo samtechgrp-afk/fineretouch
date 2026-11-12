@@ -39,7 +39,7 @@ export async function captureReferenceLook(photo: Photo): Promise<ReferenceLook>
 const NEUTRAL: Partial<Adjustments> = {
   exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0, vibrance: 0,
   skinSmoothing: 0, blemishRemoval: 0, skinToneUnify: 0, eyeBrighten: 0, darkCircles: 0, teethWhiten: 0, teethStainRemoval: 0,
-  glareReduction: 0, sharpen: 0, vignette: 0, colorMatch: null, skinMultiplier: 1, lut: null,
+  glareReduction: 0, skinBrighten: 0, sharpen: 0, vignette: 0, colorMatch: null, skinMultiplier: 1, lut: null,
 };
 
 function ctxFor(photo: Photo) {

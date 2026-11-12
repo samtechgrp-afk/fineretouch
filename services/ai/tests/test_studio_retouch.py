@@ -26,11 +26,12 @@ def ring(cx: float, cy: float, rx: float, ry: float, n: int = 24) -> list[tuple[
     return [(float(cx + rx * np.cos(a)), float(cy + ry * np.sin(a))) for a in t]
 
 
-def face(**regions) -> FaceAnalysis:
+def face(glasses: float | None = 0.95, **regions) -> FaceAnalysis:
     base = dict(faceOval=ring(0.5, 0.5, 0.4, 0.45), leftEye=[], rightEye=[], leftUnderEye=[], rightUnderEye=[],
                 innerMouth=[], lips=[], leftBrow=[], rightBrow=[], nose=[])
     base.update(regions)
-    return FaceAnalysis(box=(0.1, 0.05, 0.8, 0.9), landmarkCount=478, eyeOpenness=0.8, regions=FaceRegions(**base))
+    return FaceAnalysis(box=(0.1, 0.05, 0.8, 0.9), landmarkCount=478, eyeOpenness=0.8, regions=FaceRegions(**base),
+                        glasses=glasses)
 
 
 def skin(h: int = H, w: int = W) -> np.ndarray:
@@ -268,5 +269,34 @@ def test_render_runs_studio_stages():
     out = render(rgb8, adj, f, clothes_prob=seg)
     assert np.abs(out.astype(int) - base.astype(int))[150:190, 110:170].mean() > 5  # glare
     assert np.abs(out.astype(int) - base.astype(int))[283:292, 170:190].mean() > 2  # teeth
+    # Phase 3b: no glasses found (or not measured) -> the glare stage is skipped; the override runs it.
+    for g in (0.2, None):
+        bare = [face(glasses=g, leftEye=EYE_L, rightEye=EYE_R, innerMouth=MOUTH)]
+        out2 = render(rgb8, adj, bare, clothes_prob=seg)
+        assert np.abs(out2.astype(int) - base.astype(int))[150:190, 110:170].max() == 0
+        forced = render(rgb8, adj.model_copy(update={"glareForce": True}), bare, clothes_prob=seg)
+        assert np.array_equal(forced[150:190, 110:170], out[150:190, 110:170])
     # Defaults change nothing compared to v0.5 behaviour.
     assert np.array_equal(render(rgb8, Adjustments.model_validate({}), f), base)
+
+
+def test_glare_never_turns_skin_hue_around_the_eyes():
+    """The snapshot-13 patch: on a bare face, a cool rim light and warm skin highlights inside
+    the lens area were read as a (warm) reflection and subtracted, turning skin blue and orange.
+    Even when forced to run, skin keeps its hue: a* / b* direction within a few degrees."""
+    img = skin()
+    img[:, : int(0.3 * W)] = img[:, : int(0.3 * W)] * 0.8 + np.array([0.55, 0.65, 0.95], np.float32) * 0.2
+    img += 0.35 * blob(H, W, 0.44 * H, 0.27 * W, 10)[..., None] * np.array([0.6, 0.75, 1.0], np.float32)  # rim light
+    img += 0.3 * blob(H, W, 0.46 * H, 0.42 * W, 8)[..., None] * np.array([1.0, 0.85, 0.7], np.float32)  # warm sheen
+    img = np.clip(img, 0, 1).astype(np.float32)
+    out = reduce_glasses_glare(img, [face(leftEye=EYE_L, rightEye=EYE_R)], strength=100)
+    lab0 = cv2.cvtColor(img, cv2.COLOR_RGB2Lab)
+    lab1 = cv2.cvtColor(out, cv2.COLOR_RGB2Lab)
+    moved = np.abs(out - img).max(axis=-1) > 0.01
+    assert moved.any()  # the stage did run here
+    c0 = np.hypot(lab0[..., 1], lab0[..., 2])
+    sel = moved & (c0 > 3)
+    h0 = np.arctan2(lab0[..., 2], lab0[..., 1])[sel]
+    h1 = np.arctan2(lab1[..., 2], lab1[..., 1])[sel]
+    turn = np.degrees(np.abs(np.angle(np.exp(1j * (h1 - h0)))))
+    assert np.percentile(turn, 99) < 5, np.percentile(turn, 99)

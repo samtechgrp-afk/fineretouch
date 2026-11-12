@@ -5,10 +5,10 @@ import type { LayerKind, LayerStroke, RetouchLayer } from '@fineretouch/shared';
 import { Renderer, type DisplayView } from '@/engine/renderer';
 import { ensureDepth, hairRoiFor } from '@/lib/depth';
 import { ensureParse, ensureSegmentation, lensRoiFor } from '@/lib/studio';
-import { editMaskFor, faceMaskFor } from '@/lib/export';
+import { editMaskFor, faceMaskFor, faceShareOf } from '@/lib/export';
 import { ensureProxy, fitSize, getDepth, getProxy, getSegmentation } from '@/lib/images';
 import { LAYER_LONG_EDGE, healedPixels, pixelsOf, syncLayerMasks } from '@/lib/localRetouch';
-import { perfectedPixels, perfectionKeyOf, schedulePerfection, usePerfection } from '@/lib/perfection';
+import { engineSourceOn, perfectedPixels, perfectionKeyOf, schedulePerfection, usePerfection } from '@/lib/perfection';
 import { drawMarks, hitLabel, hitMark } from './viewport/perfectionOverlay';
 import { restoreLabels, useLabels } from '@/lib/qaLabels';
 import { autoHealSource } from '@/engine/heal';
@@ -131,7 +131,7 @@ export function PhotoEditorViewport() {
       const lr = adj.localRetouch;
       // Skin Perfection (stage 0c, engine only): its perfected preview is the base the heal
       // strokes and every shader stage work on. While a re-run is pending the last result shows.
-      const perf = adj.skinPerfection.enabled ? perfectedPixels(p.id, perfectionKeyOf(adj), proxy.width, proxy.height) : null;
+      const perf = engineSourceOn(adj) ? perfectedPixels(p.id, perfectionKeyOf(adj), proxy.width, proxy.height) : null;
       const base = perf ? perf.pixels : null;
       const healed = lr.heal.length ? healedPixels(`${p.id}:proxy`, base ?? pixelsOf(`${p.id}:proxy`, proxy), proxy.width, proxy.height, lr.heal) : base;
       if (healRef.current !== healed) {
@@ -166,9 +166,9 @@ export function PhotoEditorViewport() {
         depthKeyRef.current = depthKey;
       }
       const glareOn = adj.glareReduction > 0 || st.view.overlay === 'glare';
-      const lensKey = `${faceKey}:${glareOn}`;
+      const lensKey = `${faceKey}:${glareOn}:${adj.glareForce}`;
       if (lensKeyRef.current !== lensKey) {
-        const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
+        const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height, adj.glareForce) : null;
         r.setLensRoi(roi?.data ?? null, roi?.width, roi?.height);
         lensKeyRef.current = lensKey;
       }
@@ -179,7 +179,7 @@ export function PhotoEditorViewport() {
         segKeyRef.current = segKey;
       }
       const noiseLevel = adj.skinNoise > 0 ? noiseLevelOf(`${p.id}:proxy`, proxy) : undefined;
-      r.render(adj, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats, noiseLevel });
+      r.render(adj, { hasFace: Boolean(mask), sourceStats: p.analysis?.colorStats ?? p.localStats, noiseLevel, faceShare: faceShareOf(p.analysis) });
       const g = geometry();
       if (!g) return;
       const v = st.view;
@@ -210,7 +210,7 @@ export function PhotoEditorViewport() {
   }, [photo?.id, photo?.adjustments, photo?.analysis, photo?.analysisState, photo?.localStats, photo?.depthState, photo?.segmentState, photo?.parseState, pending, view, draw]);
 
   // Skin Perfection: re-run the engine (debounced) when its settings change; redraw on results.
-  const perfOn = Boolean(photo?.adjustments.skinPerfection.enabled);
+  const perfOn = Boolean(photo && engineSourceOn(photo.adjustments));
   const perfKey = photo && perfOn ? perfectionKeyOf(photo.adjustments) : '';
   const perfAuto = usePerfection((s) => s.auto);
   const perfOnline = useEditor((s) => s.aiOnline);
@@ -516,7 +516,7 @@ export function PhotoEditorViewport() {
         const proxy = getProxy(photo.id);
         if (proxy) {
           const adj0 = photo.adjustments;
-          const perf = adj0.skinPerfection.enabled ? perfectedPixels(photo.id, perfectionKeyOf(adj0), proxy.width, proxy.height) : null;
+          const perf = engineSourceOn(adj0) ? perfectedPixels(photo.id, perfectionKeyOf(adj0), proxy.width, proxy.height) : null;
           const base = perf?.pixels ?? pixelsOf(`${photo.id}:proxy`, proxy);
           const cur = healedPixels(`${photo.id}:proxy`, base, proxy.width, proxy.height, photo.adjustments.localRetouch.heal) ?? base;
           offset = autoHealSource(cur, proxy.width, proxy.height, view.brushSize, points);

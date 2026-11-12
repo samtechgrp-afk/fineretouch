@@ -74,6 +74,28 @@ void main() {
 }`;
 
 /**
+ * Dark circles reference (v0.14, mirrors engines/under_eye.correct_dark_circles): face skin with
+ * the under-eye area cut out, written premultiplied (uPart 0: rgb * w) or as the weight alone
+ * (uPart 1). Both are then blurred at the S2 scale; their ratio is the colour of the person's own
+ * skin around each eye, without the eye, lashes or background in it.
+ */
+/** Dark circles reference blur, as a share of the face width (engines/under_eye.UNDER_REF_SIGMA). */
+export const UNDER_REF_SIGMA = 0.06;
+
+export const UNDER_REF_FRAG = /* glsl */ `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 outColor;
+uniform sampler2D uSrc, uMask;
+uniform vec4 uFrame;
+uniform int uPart;
+void main() {
+  vec4 m = texture(uMask, uFrame.xy + vUv * uFrame.zw);
+  float w = m.r * (1.0 - smoothstep(0.05, 0.3, m.b));
+  outColor = uPart == 0 ? vec4(texture(uSrc, vUv).rgb * w, 1.0) : vec4(vec3(w), 1.0);
+}`;
+
+/**
  * Tiled export (v0.12): a tile covers part of the photo. Masks, depth, segmentation and layer
  * masks are whole-photo textures, so they are sampled at fuv(vUv). uFrame = (x0, y0, w, h) of
  * the tile in whole-photo UV; (0, 0, 1, 1) when rendering the whole photo.
@@ -143,6 +165,7 @@ precision highp float;
 in vec2 vUv;
 out vec4 outColor;
 uniform sampler2D uSrc, uLow0, uLow1, uLow2, uLow3, uMask, uHairRoi;
+uniform sampler2D uUnderRefRgb, uUnderRefW; // dark circles reference (UNDER_REF_FRAG, blurred)
 uniform sampler2D uEdit;        // user mask strokes: r = add, g = erase (masking.apply_mask_edits)
 uniform bool uHasEdit;
 uniform bool uHasFace;
@@ -163,6 +186,7 @@ uniform float uSmooth, uTexture, uBlemish, uUnify;
 uniform float uRedness, uNoise, uUnderEyeTex; // v0.9 skin engine (app/engines/redness.py, noise.py, under_eye.py)
 uniform float uNoiseLevel;                    // measured luma noise level of the source (lib/noise.ts)
 uniform float uEye, uDark, uTeeth, uSharpen, uVignette;
+uniform float uSkinBright;      // skin brightening 0..1 (pipeline.py 5c2)
 uniform bool uMatch;
 uniform float uMatchAmount;
 uniform vec3 uSrcMean, uRefMean;
@@ -362,18 +386,26 @@ void main() {
       c = mix(c, low1, line * roi * (0.6 + 0.4 * uHairStrength));
     }
   }
+  // Skin brightening (preview of pipeline.py 5c2): a gain on skin only, highlights kept.
+  if (uHasFace && uSkinBright > 0.0) {
+    c *= 1.0 + 0.12 * uSkinBright * skin * (1.0 - smoothstep(0.75, 0.95, luma(low1)));
+  }
   if (uHasFace) {
     if (uEye > 0.0) {
       float e = uEye * m.g;
       c = c * (1.0 + 0.35 * e) + 0.6 * e * (src - low0);
     }
     float underEye = m.b * (1.0 - e.g); // Protect strokes apply to the under-eye tools too
+    // Dark circles (v0.14): the shadow (low1) is lifted as a whole toward the surrounding face
+    // skin (masked blur), so texture rides on top and nothing grey comes in.
     if (uDark > 0.0) {
-      float d = uDark * underEye;
-      float y = luma(c);
-      float cb = cbOf(c), cr = crOf(c);
-      y += max(0.0, luma(low2) * 1.06 - y) * d;
-      c = fromYCbCr(y, cb + (cbOf(low2) - cb) * 0.5 * d, cr + (crOf(low2) - cr) * 0.5 * d);
+      float wr = texture(uUnderRefW, vUv).r;
+      float d = uDark * underEye * step(0.02, wr);
+      vec3 ref = texture(uUnderRefRgb, vUv).rgb / max(wr, 0.02);
+      float y = luma(c) + max(0.0, luma(ref) - luma(low1)) * 0.85 * d;
+      float cb = cbOf(c) + (cbOf(ref) - cbOf(low1)) * 0.6 * d;
+      float cr = crOf(c) + (crOf(ref) - crOf(low1)) * 0.6 * d;
+      c = fromYCbCr(y, cb, cr);
     }
     // Under-eye texture (preview of engines/under_eye.py): the crease band (low0 - low1) faded,
     // dark lines fully at 100%, lighter ridges by 35%; pores (src - low0) kept.

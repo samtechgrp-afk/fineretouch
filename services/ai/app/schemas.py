@@ -319,6 +319,56 @@ class SkinPerfectionSettings(BaseModel):
         return PerfectionCategory(sensitivity=s, strength=t)
 
 
+class FinishControl(BaseModel):
+    """One Professional Skin Finish slider: its own on/off switch and amount (0..100)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    amount: float = Field(50, ge=0, le=100)
+
+
+# The panel's styles (packages/shared/src/finish.ts FINISH_STYLES mirrors this): every amount.
+FINISH_STYLES: dict[str, dict[str, float]] = {
+    "natural": dict(smoothing=35, texturePreservation=85, porePreservation=80, shine=25, darkSpots=45, toneEvenness=25, underEye=25, dodgeBurn=15),
+    "professional": dict(smoothing=55, texturePreservation=75, porePreservation=65, shine=45, darkSpots=70, toneEvenness=45, underEye=45, dodgeBurn=30),
+    "advanced": dict(smoothing=80, texturePreservation=60, porePreservation=45, shine=60, darkSpots=95, toneEvenness=65, underEye=60, dodgeBurn=45),
+}
+
+
+class SkinFinishSettings(BaseModel):
+    """Professional Skin Finish (v0.14, stage 0d; engines/finish.py). Off by default: with it off
+    the renderer's output is bit-identical to a build without it.
+
+    Texture (phase 1): smoothing (bumps and blotches), texturePreservation (grain and the texture
+    restoration floor), porePreservation (pores) and the overall strength.
+    Local corrections (phase 2, engines/finish_local.py): shine, darkSpots (post-acne marks, dark
+    spots, small hyperpigmentation), toneEvenness, underEye and dodgeBurn. They are 0 unless set,
+    so a finish saved with only the phase 1 controls renders as it did; the panel's styles
+    (Natural, Professional, Advanced) set all of them. `style` records which one was picked
+    ("custom" after any slider change)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    strength: float = Field(100, ge=0, le=100)  # Overall Skin Finish Strength: blends the whole finish
+    smoothing: FinishControl = FinishControl(amount=55)
+    texturePreservation: FinishControl = FinishControl(amount=75)
+    porePreservation: FinishControl = FinishControl(amount=65)
+    shine: FinishControl = FinishControl(amount=0)
+    darkSpots: FinishControl = FinishControl(amount=0)
+    toneEvenness: FinishControl = FinishControl(amount=0)
+    underEye: FinishControl = FinishControl(amount=0)
+    dodgeBurn: FinishControl = FinishControl(amount=0)
+    style: str = "custom"
+    bodyCoverage: bool = True  # neck, shoulders, arms, hands, legs (face parsing)
+
+    @classmethod
+    def styled(cls, style: str, **kw) -> "SkinFinishSettings":
+        """On, with every amount from one of FINISH_STYLES."""
+        return cls(enabled=True, style=style, **{k: FinishControl(amount=v) for k, v in FINISH_STYLES[style].items()}, **kw)
+
+
 class Adjustments(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -344,6 +394,12 @@ class Adjustments(BaseModel):
     skinNoise: float = Field(0, ge=0, le=100)
     underEyeTexture: float = Field(0, ge=0, le=100)
     eyeBrighten: float = Field(0, ge=0, le=100)
+    # Phase 3b: Glasses glare runs only on faces with confidently detected glasses; this manual
+    # override runs it on every face (for glasses the detector missed, e.g. rimless).
+    glareForce: bool = False
+    # Phase 3b: skin-only brightening (the skin mask, highlights protected). Auto Retouch sets it
+    # instead of changing the exposure of the whole photograph.
+    skinBrighten: float = Field(0, ge=0, le=100)
     darkCircles: float = Field(0, ge=0, le=100)
     teethWhiten: float = Field(0, ge=0, le=100)
     sharpen: float = Field(0, ge=0, le=100)
@@ -372,6 +428,7 @@ class Adjustments(BaseModel):
     # v0.13 Skin Perfection engine: tiled multi-scale detection, classification, targeted
     # correction and verified residual passes (app/engines/perfection.py).
     skinPerfection: SkinPerfectionSettings = SkinPerfectionSettings()
+    skinFinish: SkinFinishSettings = SkinFinishSettings()
 
 
 class StyleProfile(BaseModel):
@@ -418,6 +475,8 @@ class FaceAnalysis(BaseModel):
     landmarkCount: int
     regions: FaceRegions
     eyeOpenness: float
+    # Phase 3b: 0..1 how sure we are the face wears glasses (engines/glasses.py); None = not measured.
+    glasses: float | None = None
 
 
 class CullFlags(BaseModel):

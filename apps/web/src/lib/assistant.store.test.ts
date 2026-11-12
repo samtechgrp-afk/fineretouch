@@ -82,8 +82,10 @@ describe('retouch assistant in the store', () => {
     s.proposeStyle('headshot');
     s.setPlanBatch(true);
     expect(s.approvePlan()).toBe(2);
-    expect(photo('a').adjustments.exposure).toBeGreaterThan(0);
-    expect(photo('b').adjustments.exposure).toBeLessThan(0);
+    // Phase 3b: a style never changes the photo's exposure; dark photos get skin-only lift (needs a face).
+    expect(photo('a').adjustments.exposure).toBe(0);
+    expect(photo('b').adjustments.exposure).toBe(0);
+    expect(photo('a').adjustments.skinBrighten).toBe(0);
     expect(photo('a').adjustments.clothing.wrinkleStrength).toBe(50);
     // No face was detected in these test photos, so the face-only stray hair step stays off.
     expect(photo('a').adjustments.strayHairRemoval.enabled).toBe(false);
@@ -95,6 +97,8 @@ describe('retouch assistant in the store', () => {
     expect(s.proposeRecommendation()).toBeNull();
     s.setProfile('a', profile(40));
     const plan = s.proposeRecommendation()!;
-    expect(plan.steps.find((st) => st.id === 'slider:exposure')?.reason).toMatch(/dark/);
+    expect(plan.steps.find((st) => st.id === 'slider:exposure')).toBeUndefined();
+    expect(plan.steps.length).toBeGreaterThan(0);
+    expect(plan.steps.every((st) => st.reason.length > 0)).toBe(true);
   });
 });

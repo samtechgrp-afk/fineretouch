@@ -32,6 +32,9 @@ Stages (all on float32 sRGB in [0, 1]):
      contrast, saturation, vibrance; 8b. HSL mixer and colour grading (color_engine);
      8c. look LUT (color_engine.apply_lut); then sharpening and vignette.
   9. Depth-aware bokeh (retouch_engine.apply_depth_bokeh), when enabled and a depth map is given.
+  0d. Professional Skin Finish (v0.14, engines/finish.py), after 0c and the heal strokes: edge-aware
+     smoothing of the bump, blotch, pore and grain bands of face and body skin, texture
+     restoration and verification. Off by default (then nothing in it runs).
   Pro tools (v0.10, engines/local.py): 0b. healing and clone strokes on the original pixels
   before stage 1 (right after the Skin Perfection engine, 0c, when that is on: the preview's order); 10. local retouch layers (frequency separation, dodge & burn, correction
   brushes with their own masks) after stage 8 and before the bokeh of stage 9.
@@ -48,6 +51,13 @@ import numpy as np
 from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .effects import detector_multiplier, resolve_adjustments
+from .engines.finish import FinishReport, finish_skin
+from .engines.glasses import wears_glasses
+from .engines.local import apply_heal_strokes, apply_local_layers
+from .engines.noise import reduce_skin_noise
+from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
+from .engines.redness import reduce_redness
+from .engines.under_eye import UNDER_REF_SIGMA, correct_dark_circles, soften_under_eye_texture
 from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep, protect_weight
 from .retouch_engine import (
     apply_boosted_skin_retouch,
@@ -56,22 +66,25 @@ from .retouch_engine import (
     correct_teeth,
     faces_in_crop,
     natural_skin_retouch,
-    remove_acne,
-    remove_dark_spots,
     reduce_glasses_glare,
+    remove_acne,
     remove_clothing_wrinkles,
+    remove_dark_spots,
     remove_stray_hairs,
     shift_clothing_color,
     skin_tone_guard,
 )
-from .engines.local import apply_heal_strokes, apply_local_layers
-from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
-from .engines.noise import reduce_skin_noise
-from .engines.redness import reduce_redness
-from .engines.under_eye import soften_under_eye_texture
-from .schemas import Adjustments, ColorStats, FaceAnalysis, SkinPerfectionSettings
+from .schemas import (
+    Adjustments,
+    ColorStats,
+    FaceAnalysis,
+    SkinFinishSettings,
+    SkinPerfectionSettings,
+)
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
+SKIN_BRIGHT_GAIN = 0.12  # skin brightening at 100: x1.12 (about +5..+7 L* on mid skin)
+SKIN_BRIGHT_KEEP = (0.75, 0.95)  # local tone luma above which skin highlights are left as shot
 # Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
 # 30-45% of the long edge and S1/S2 already sit below the caps; in a full-length or group shot
 # the long-edge radii would be several times the size of a cheek and flatten facial shading.
@@ -158,6 +171,8 @@ class FaceMasks:
     has_face: bool
     forehead: np.ndarray | None = None  # upper forehead above the landmark oval (gate by colour)
     face_width: float = 0.0  # widest face, px
+    folds: np.ndarray | None = None  # nose and the nose-to-mouth folds (landmarks): the face's shape
+    face_core: np.ndarray | None = None  # inside the landmark face oval, off its edge (no jaw, neck, body)
 
 
 def build_masks(
@@ -202,6 +217,8 @@ def build_masks(
             if len(region) >= 3:
                 cv2.fillPoly(canvas, [poly(region)], 1.0)
 
+    folds = fold_mask(faces, h, w, face_w)
+
     # Overlap the oval by a few blur radii so the two feathered masks meet without a seam.
     inside = np.zeros((h, w), np.uint8)
     features = np.zeros((h, w), np.uint8)
@@ -212,6 +229,9 @@ def build_masks(
             if len(region) >= 3:
                 cv2.fillPoly(features, [poly(region)], 1)
     inside = cv2.erode(inside, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.1) | 1,) * 2))
+    # Facial skin for the finish's any-shape dark patches: the oval kept off its edge, so the
+    # jaw line, the neck and the body (whose shading is shape, not pigment) never count.
+    face_core = blur(inside.astype(np.float32), face_w * 0.02)
     features = cv2.dilate(features, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.03) | 1,) * 2))
     forehead[(inside > 0) | (features > 0)] = 0.0
     skin = blur(skin, face_w * 0.025)
@@ -234,7 +254,45 @@ def build_masks(
         under_eye=blur(under, face_w * 0.02),
         mouth=blur(mouth, face_w * 0.004),
         has_face=True,
+        folds=folds,
+        face_core=face_core,
     )
+
+
+FOLD_WIDTH, FOLD_NOSE = 0.06, 0.04  # x face width: the band along each fold; around the nose
+
+
+def fold_mask(faces: list[FaceAnalysis], h: int, w: int, face_w: float) -> np.ndarray | None:
+    """Where the face's own shape makes deep, elongated shadows that are not marks: the lower
+    nose (alae, nostrils) and the nasolabial folds, drawn from each side of the nose to the
+    mouth corner on that side and a little past it. None without nose and lip landmarks."""
+    out = None
+    for f in faces:
+        r = f.regions
+        if len(r.nose) < 3 or len(r.lips) < 3:
+            continue
+        if out is None:
+            out = np.zeros((h, w), np.float32)
+        nose = np.array(r.nose, np.float32) * [w, h]
+        lips = np.array(r.lips, np.float32) * [w, h]
+        fw = f.box[2] * w
+        cv2.fillPoly(out, [np.round(nose).astype(np.int32)], 1.0)
+        out = cv2.dilate(out, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(FOLD_NOSE * fw) | 1,) * 2))
+        width = max(1, int(FOLD_WIDTH * fw))
+        cx = float(nose[:, 0].mean())
+
+        def seg(p, q):
+            cv2.line(out, tuple(int(v) for v in np.round(p)), tuple(int(v) for v in np.round(q)), 1.0, width)
+
+        for side, eye in ((np.argmin, r.leftEye), (np.argmax, r.rightEye)):
+            a, b = nose[side(nose[:, 0])], lips[side(lips[:, 0])]
+            seg(a, b + 0.35 * (b - a))  # the fold runs on past the mouth corner
+            if len(eye) >= 3:  # the side wall of the nose, up to the eye's inner corner
+                e = np.array(eye, np.float32) * [w, h]
+                inner = e[np.argmin(np.abs(e[:, 0] - cx))]
+                if (inner[0] - cx) * (a[0] - cx) > 0:  # the eye on the same side as this ala
+                    seg(a, inner)
+    return None if out is None else blur(out, face_w * 0.015)
 
 
 def face_skin_likelihood(low: np.ndarray, core: np.ndarray, region: np.ndarray) -> np.ndarray:
@@ -361,8 +419,11 @@ def render(
     #     sharpening detail, work from the cleaned photo. With Skin Perfection on they run right
     #     after it instead (stage 0c): the strokes were painted on the perfected photo the preview
     #     shows (POST /v1/perfection, then the browser's heal), so the export uses that order too.
+    #     With the Skin Finish on (stage 0d, also engine-only) they run after the finish, for the
+    #     same reason: the preview's source is then the engine's perfected and finished photo.
     perfection_on = adj.skinPerfection.enabled and adj.skinPerfection.strength > 0
-    if adj.localRetouch.heal and not perfection_on:
+    finish_on = adj.skinFinish.enabled and adj.skinFinish.strength > 0
+    if adj.localRetouch.heal and not perfection_on and not finish_on:
         src = apply_heal_strokes(src, adj.localRetouch.heal)
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -408,7 +469,21 @@ def render(
         src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
         if report is not None:
             report.append(rep)
-        if adj.localRetouch.heal:  # 0b, after the engine (see above): the order the preview uses
+        if adj.localRetouch.heal and not finish_on:  # 0b, after the engine: the order the preview uses
+            src = apply_heal_strokes(src, adj.localRetouch.heal)
+        low0 = blur(src, S0 * L)
+        bands.clear()
+    # 0d. Professional Skin Finish (v0.14): texture finish and local corrections (shine, dark
+    #     spots, tone, under-eye, dodge and burn) of face and body skin on the photo Skin
+    #     Perfection left, before every older skin stage; the heal strokes follow it (see 0b).
+    #     Off by default; when off nothing here runs, so the output is unchanged bit for bit.
+    fs = adj.skinFinish
+    if fs.enabled and fs.strength > 0:
+        face_skin = skin if masks.has_face else apply_mask_edits(np.zeros_like(skin), sm)
+        src, frep = finish_photo(src, face_skin, masks, parse, fs, protect_weight(sm, h, w))
+        if report is not None:
+            report.append(frep)
+        if adj.localRetouch.heal:  # 0b, after the finish (see above): the order the preview uses
             src = apply_heal_strokes(src, adj.localRetouch.heal)
         low0 = blur(src, S0 * L)
         bands.clear()
@@ -440,11 +515,20 @@ def render(
                 (band(S1)[y0:y1, x0:x1], band(S2)[y0:y1, x0:x1]) if same_bands else None,
                 spot_multiplier, tool_multipliers,
             )
+    # 5c2. Skin brightening (phase 3b): skin only, by the skin weight, so the background, hair
+    #      and clothing are untouched; a gain (shading ratios kept) that fades out on the skin's
+    #      own highlights, measured on the local tone so texture is not modulated.
+    if adj.skinBrighten > 0 and masks.has_face:
+        keep = 1.0 - smoothstep(*SKIN_BRIGHT_KEEP, luma(band(S1)))
+        c = c * (1.0 + SKIN_BRIGHT_GAIN * (adj.skinBrighten / 100.0) * skin_w * keep)[..., None]
+        del keep
     if adj.strayHairRemoval.enabled and adj.strayHairRemoval.strength > 0 and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
-    # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted.
-    if adj.glareReduction > 0 and faces:
-        c = reduce_glasses_glare(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.glareReduction)
+    # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted. Phase 3b:
+    #     only on faces whose glasses were confidently detected (or every face with the override).
+    glare_faces = [f for f in faces if wears_glasses(f, adj.glareForce)] if adj.glareReduction > 0 else []
+    if glare_faces:
+        c = reduce_glasses_glare(np.clip(c, 0.0, 1.0).astype(np.float32), glare_faces, adj.glareReduction)
     # 5e. Clothing: virtual iron, then recolour.
     cl = adj.clothing
     if cl.enabled and (cl.wrinkleStrength > 0 or cl.hueShift != 0 or cl.saturation != 0):
@@ -462,13 +546,12 @@ def render(
             e = (adj.eyeBrighten / 100.0) * masks.eyes[..., None]
             c = c * (1.0 + 0.35 * e) + 0.6 * e * (src - low0)
         if adj.darkCircles > 0:
-            d = (adj.darkCircles / 100.0) * masks.under_eye
-            y = luma(c)
-            cb, cr = cbcr(c)
-            low2 = band(S2)
-            cb2, cr2 = cbcr(low2)
-            y = y + np.maximum(0.0, luma(low2) * 1.06 - y) * d
-            c = from_ycbcr(y, cb + (cb2 - cb) * 0.5 * d, cr + (cr2 - cr) * 0.5 * d)
+            # v0.14: the shadow (band S1) is lifted as a whole toward the surrounding face skin,
+            # so texture is kept and nothing grey comes in (engines/under_eye.correct_dark_circles).
+            c = correct_dark_circles(
+                np.clip(c, 0.0, 1.0).astype(np.float32), src, band(S1), masks.skin, masks.under_eye,
+                adj.darkCircles, sigma_ref=UNDER_REF_SIGMA * masks.face_width,
+            )
         # 6b. Under-eye texture (v0.9): the crease band (S0..S1, capped by face width) faded,
         #     pores and the tone layer kept.
         if adj.underEyeTexture > 0:
@@ -535,6 +618,29 @@ def perfect_photo(
         src.astype(np.float32, copy=False), skin, faces, settings, body_skin=body,
         under_eye=masks.under_eye if masks.has_face else None, face_skin=masks.skin if masks.has_face else skin,
     )
+
+
+def finish_photo(
+    src: np.ndarray, skin: np.ndarray, masks: FaceMasks, parse: FaceParse | None,
+    settings: SkinFinishSettings, protect: np.ndarray | None = None, method: str = "edge",
+) -> tuple[np.ndarray, FinishReport]:
+    """Stage 0d: the Professional Skin Finish engine on the photo (float32 sRGB), with face skin
+    from the renderer's skin weight and body skin from face parsing (gated by the skin colour box,
+    hair kept out, the user's Protect strokes applied). Clothing, hair and background are outside
+    both, and their pixels come back bit for bit."""
+    h, w = src.shape[:2]
+    fw = masks.face_width or 0.25 * max(h, w)
+    body = None
+    if settings.bodyCoverage and parse is not None:
+        p = parse.resized(h, w)
+        body = blur(p.body_skin, fw * 0.003) * hair_keep(blur(p.hair, fw * 0.004))
+        body = body * (0.4 + 0.6 * skin_probability(blur(src, S0 * max(h, w))))
+        if protect is not None:
+            body = body * protect
+    return finish_skin(src.astype(np.float32, copy=False), skin.astype(np.float32, copy=False), settings, fw,
+                       body=body, method=method, under_eye=None if not masks.has_face else masks.under_eye if protect is None else masks.under_eye * protect,
+                       folds=masks.folds if masks.has_face else None,
+                       face_core=masks.face_core if masks.has_face and masks.face_core is not None else 0.0)
 
 
 def _finish_strip(

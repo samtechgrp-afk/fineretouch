@@ -1,7 +1,7 @@
 'use client';
 
 import { buildLensRoiMask } from '@/engine/masks';
-import type { ImageAnalysis } from '@fineretouch/shared';
+import { glareFaces, type ImageAnalysis } from '@fineretouch/shared';
 import { parseMap, segmentMap } from './ai';
 import { proxyJpeg } from './depth';
 import { fitSize, getCachedLensRoi, getParse, getSegmentation, hasImage, setCachedLensRoi, setParse, setSegmentation } from './images';
@@ -11,14 +11,20 @@ const LENS_ROI_LONG_EDGE = 1024;
 const inflight = new Map<string, Promise<ImageBitmap | null>>();
 const parseInflight = new Map<string, Promise<ImageBitmap | null>>();
 
-/** Eyeglass lens region for the glare preview (cached per photo; sampled by UV). */
-export function lensRoiFor(id: string, analysis: ImageAnalysis | null, aspectW: number, aspectH: number) {
-  if (!analysis?.faces.length) return null;
+/**
+ * Eyeglass lens region for the glare preview (cached per photo; sampled by UV). Only faces whose
+ * glasses the engine confidently detected get lenses, or every face with `force` (the manual
+ * override), as in the export (pipeline.py 5d); null when no face qualifies.
+ */
+export function lensRoiFor(id: string, analysis: ImageAnalysis | null, aspectW: number, aspectH: number, force = false) {
+  const faces = glareFaces(analysis?.faces ?? [], force);
+  if (!faces.length) return null;
   const [w, h] = fitSize(aspectW, aspectH, LENS_ROI_LONG_EDGE);
-  let data = getCachedLensRoi(id);
+  const key = `${id}:${force ? 'forced' : 'detected'}`;
+  let data = getCachedLensRoi(key);
   if (!data || data.length !== w * h) {
-    data = buildLensRoiMask(analysis.faces, w, h);
-    setCachedLensRoi(id, data);
+    data = buildLensRoiMask(faces, w, h);
+    setCachedLensRoi(key, data);
   }
   return { data, width: w, height: h };
 }

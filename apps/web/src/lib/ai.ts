@@ -138,10 +138,17 @@ export async function pool<T>(items: T[], limit: number, fn: (item: T, index: nu
  */
 export async function perfectionScan(
   file: Blob,
-  adjustments: Pick<Adjustments, 'skinPerfection' | 'skinMask'>,
+  adjustments: Pick<Adjustments, 'skinPerfection' | 'skinMask'> & Partial<Pick<Adjustments, 'skinFinish'>>,
   previewLongEdge: number,
   signal?: AbortSignal,
-): Promise<{ report: import('@fineretouch/shared').PerfectionReport | null; image: string; faces: number; ms: number }> {
+): Promise<{
+  report: import('@fineretouch/shared').PerfectionReport | null;
+  /** Skin Finish report (engines/finish.FinishReport.as_dict) when the finish ran. */
+  finish?: import('./perfection').FinishSummary | null;
+  image: string;
+  faces: number;
+  ms: number;
+}> {
   const extra = { adjustments: JSON.stringify(adjustments), previewLongEdge: String(Math.round(previewLongEdge)) };
   return (await postFile('/v1/perfection', file, extra, signal)).json();
 }

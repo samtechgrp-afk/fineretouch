@@ -1,7 +1,7 @@
 'use client';
 
 import { EffectControlsRow } from './EffectControls';
-import { DEFAULT_ADJUSTMENTS, effectForSlider, type AdjustmentKey, type ClothingSettings } from '@fineretouch/shared';
+import { DEFAULT_ADJUSTMENTS, effectForSlider, GLASSES_CONFIDENT, type AdjustmentKey, type ClothingSettings } from '@fineretouch/shared';
 import type { StudioOverlay } from '@/components/viewport/shaders';
 import { useEditor, type Photo, type SegmentState } from '@/lib/store';
 import { Heading, RangeRow, Segmented, Toggle } from './controls';
@@ -24,6 +24,9 @@ export function RetouchStudioPanel({ photo }: { photo: Photo }) {
   const hasFace = faces.length > 0;
   const hasEyes = faces.some((f) => f.regions.leftEye.length >= 3 || f.regions.rightEye.length >= 3);
   const hasMouth = faces.some((f) => f.regions.innerMouth.length >= 3);
+  const withGlasses = faces.filter((f) => (f.glasses ?? 0) >= GLASSES_CONFIDENT).length;
+  const force = photo.adjustments.glareForce;
+  const updateAdjustments = useEditor((s) => s.updateAdjustments);
   return (
     <div className="space-y-5">
       <SkinSection photo={photo} />
@@ -33,6 +36,21 @@ export function RetouchStudioPanel({ photo }: { photo: Photo }) {
           hint={hasEyes ? 'Lifts flash and window reflections off eyeglass lenses so the eyes behind them show again. Catchlights and frame highlights are kept.' : 'Needs a detected face with eyes.'}
         />
         <SliderFor photo={photo} k="glareReduction" label="Glare reduction" disabled={!hasEyes} />
+        {hasEyes && (
+          <div className="mt-2 space-y-1">
+            <p className="text-[11px] text-ink-400" data-testid="glasses-status">
+              {withGlasses > 0
+                ? `Glasses found on ${withGlasses === 1 ? 'this face' : `${withGlasses} faces`}: glare reduction works on their lenses only.`
+                : force
+                  ? 'No glasses detected: applied anyway (override on).'
+                  : 'No glasses detected, so glare reduction is skipped and skin around the eyes is left as it is.'}
+            </p>
+            <label className="flex items-center justify-between gap-3 text-xs text-ink-200">
+              <span>Apply even if no glasses are detected</span>
+              <Toggle label="Apply glare reduction without detected glasses" checked={force} onChange={(v) => updateAdjustments({ glareForce: v })} />
+            </label>
+          </div>
+        )}
       </section>
       <StrayHairSection photo={photo} hasFace={hasFace} />
       <section>
