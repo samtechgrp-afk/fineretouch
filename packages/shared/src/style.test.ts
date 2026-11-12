@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_ADJUSTMENTS,
+  autoExposure,
   autoRetouch,
   exposureForLightness,
+  SKIN_LIFT_MAX,
   isDefault,
   mapStyleToAdjustments,
   sanitizeAdjustments,
@@ -83,7 +85,7 @@ describe('style mapping', () => {
   });
 
   it('auto retouch stays within gentle bounds', () => {
-    const dark = autoRetouch(profile({ meanL: 30, skinTexture: 9 }), true);
+    const dark = autoRetouch(profile({ meanL: 30, skinLuma: 28, skinTexture: 9 }), true);
     expect(dark.exposure).toBeGreaterThan(0);
     expect(dark.exposure).toBeLessThanOrEqual(60);
     expect(dark.skinMultiplier).toBe(2);
@@ -91,5 +93,25 @@ describe('style mapping', () => {
     const noSkin = autoRetouch(profile({ skinTexture: null, skinLuma: null }), false);
     expect(noSkin.skinSmoothing).toBeUndefined();
     expect(noSkin.eyeBrighten).toBeUndefined();
+  });
+
+  it('auto retouch keeps a low-key portrait as shot (CRPixels-26 night measurements)', () => {
+    // Measured on the night portrait: frame mean 33.8 L*, skin 44.8 L*. The old rule gave +47.
+    const night = profile({ meanL: 33.8, skinLuma: 44.8 });
+    expect(autoExposure(night, true)).toEqual({ exposure: 0, capped: false, lowKey: true });
+    expect(autoRetouch(night, true).exposure).toBe(0);
+    // Without a face nothing marks the bright pixels as a subject: the frame rule (capped) applies.
+    expect(autoExposure(night, false).exposure).toBeGreaterThan(0);
+  });
+
+  it('auto retouch lifts skin at most SKIN_LIFT_MAX and still darkens bright frames', () => {
+    const dim = profile({ meanL: 30, skinLuma: 27 });
+    const e = autoExposure(dim, true);
+    expect(e.capped).toBe(true);
+    expect(e.exposure).toBeLessThanOrEqual(Math.round(exposureForLightness(27, 27 + SKIN_LIFT_MAX)));
+    expect(autoRetouch(dim, true).exposure).toBe(e.exposure);
+    const bright = autoExposure(profile({ meanL: 80, skinLuma: 85 }), true);
+    expect(bright.exposure).toBeLessThan(0);
+    expect(bright.lowKey).toBe(false);
   });
 });

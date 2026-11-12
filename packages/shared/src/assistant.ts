@@ -10,7 +10,7 @@
  */
 
 import type { Adjustments, AdjustmentKey } from './index.js';
-import { autoRetouch, exposureForLightness, type StyleProfile } from './style.js';
+import { autoExposure, autoRetouch, SKIN_LIFT_MAX, type StyleProfile } from './style.js';
 import type { EffectId, EffectMultiplier } from './effects.js';
 
 export type PlanTarget =
@@ -410,8 +410,8 @@ const AUTO_LABELS: Partial<Record<keyof Adjustments, string>> = {
   eyeBrighten: 'Brighten eyes', darkCircles: 'Under-eye correction', teethWhiten: 'Whiten teeth',
 };
 
-/** Most a brightening may lift measured skin (L*): a dark-toned subject in a dark scene keeps their skin tone. */
-export const SKIN_LIFT_MAX = 10;
+export { SKIN_LIFT_MAX };
+const LOW_KEY_NOTE = ' A lit subject against a darker scene: the background and the photo\'s own exposure are kept, not brightened.';
 const SKIN_CAP_NOTE = ` Limited so the skin is lifted no more than ${SKIN_LIFT_MAX} L*, keeping the person's real skin tone.`;
 
 function recommendReason(key: string, p: StyleProfile, value: number): string {
@@ -447,27 +447,21 @@ function recommendReason(key: string, p: StyleProfile, value: number): string {
   }
 }
 
-/**
- * Auto Retouch brightens toward a mean-L* target for the whole frame, which would lift the skin
- * of a darker-skinned subject well past their real tone. Brightening is capped so measured skin
- * rises at most SKIN_LIFT_MAX L*.
- */
-function skinSafe(auto: Partial<Adjustments>, p: StyleProfile): { auto: Partial<Adjustments>; capped: boolean } {
-  const e = auto.exposure;
-  if (e === undefined || e <= 0 || p.skinLuma == null) return { auto, capped: false };
-  const cap = Math.round(exposureForLightness(p.skinLuma, p.skinLuma + SKIN_LIFT_MAX));
-  return e > cap ? { auto: { ...auto, exposure: cap }, capped: true } : { auto, capped: false };
+/** Auto Retouch values plus the note that explains its exposure (see style.autoExposure). */
+function autoWithNote(p: StyleProfile, hasFace: boolean): { auto: Partial<Adjustments>; note: string } {
+  const e = autoExposure(p, hasFace);
+  return { auto: autoRetouch(p, hasFace), note: e.lowKey ? LOW_KEY_NOTE : e.capped ? SKIN_CAP_NOTE : '' };
 }
 
 /** Recommendations from the photo's own measurements, each with the measurement behind it. */
 export function recommendPlan(p: StyleProfile, adj: Adjustments, ctx: PlanContext): EditPlan {
-  const { auto, capped } = skinSafe(autoRetouch(p, ctx.hasFace), p);
+  const { auto, note } = autoWithNote(p, ctx.hasFace);
   const steps: PlanStep[] = [];
   for (const [key, value] of Object.entries(auto) as Array<[keyof Adjustments, number]>) {
     if (key === 'skinMultiplier') continue;
     const target: PlanTarget = slider(key as AdjustmentKey);
     if (currentValue(adj, target) === value || !AUTO_LABELS[key]) continue;
-    const reason = recommendReason(key, p, value) + (key === 'exposure' && capped ? SKIN_CAP_NOTE : '');
+    const reason = recommendReason(key, p, value) + (key === 'exposure' ? note : '');
     steps.push({ id: targetId(target), target, label: AUTO_LABELS[key]!, value, reason, enabled: true, needsFace: ['eyeBrighten', 'darkCircles', 'teethWhiten'].includes(key) });
   }
   if (auto.skinMultiplier === 2 && adj.effects.blemishRemoval.multiplier < 2) {
@@ -519,11 +513,11 @@ export function stylePlan(styleId: RetouchStyleId, p: StyleProfile | null, adj: 
     if (currentValue(adj, target) === value) return;
     steps.push({ id: targetId(target), target, label, value, reason, enabled: !(needsFace && !ctx.hasFace), needsFace });
   };
-  const { auto, capped } = p ? skinSafe(autoRetouch(p, ctx.hasFace), p) : { auto: {} as Partial<Adjustments>, capped: false };
+  const { auto, note } = p ? autoWithNote(p, ctx.hasFace) : { auto: {} as Partial<Adjustments>, note: '' };
   for (const key of ['exposure', 'contrast', 'temperature', 'tint'] as const) {
     const measured = (auto[key] as number | undefined) ?? 0;
     const value = Math.round(clamp(measured + (spec.values[key] ?? 0), -100, 100));
-    if (value !== 0 || adj[key] !== 0) push(slider(key), STYLE_LABELS[key] ?? key, value, p && measured ? `${spec.name}: ${recommendReason(key, p, measured)}${key === 'exposure' && capped ? SKIN_CAP_NOTE : ''}` : `${spec.name} look.`);
+    if (value !== 0 || adj[key] !== 0) push(slider(key), STYLE_LABELS[key] ?? key, value, p && measured ? `${spec.name}: ${recommendReason(key, p, measured)}${key === 'exposure' ? note : ''}` : `${spec.name} look.`);
   }
   if (p?.skinTexture != null) {
     const rough = clamp(p.skinTexture / 2.2, 0.5, 3);

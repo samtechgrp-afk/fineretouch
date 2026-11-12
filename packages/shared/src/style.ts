@@ -142,16 +142,49 @@ export const AUTO_TARGET = {
   skinTexture: 2.2,
 } as const;
 
+/** Most Auto Retouch may lift measured skin (L*): a dark-toned subject keeps their skin tone. */
+export const SKIN_LIFT_MAX = 10;
+/**
+ * Subject this many L* brighter than the frame's mean: a lit person against a darker scene (a night or
+ * low-key portrait). The frame mean is then low by design, not because the photo is underexposed.
+ */
+export const LOW_KEY_SUBJECT_MARGIN = 6;
+
+export interface AutoExposure {
+  /** Exposure slider value Auto Retouch applies. */
+  exposure: number;
+  /** The lift was limited so skin rises at most SKIN_LIFT_MAX L*. */
+  capped: boolean;
+  /** Low-key portrait: the dark surroundings are not brightened at all. */
+  lowKey: boolean;
+}
+
+/**
+ * Global exposure for Auto Retouch. The frame's mean lightness is moved toward AUTO_TARGET (damped),
+ * except that with a face:
+ *  - a low-key portrait (subject clearly brighter than the frame) gets no brightening: its dark
+ *    background and the photo's intended exposure stay as shot;
+ *  - any brightening is capped so the measured skin rises at most SKIN_LIFT_MAX L*.
+ * Darkening an overexposed frame is unchanged. Skin-specific lifts belong to the skin tools, not here.
+ */
+export function autoExposure(p: StyleProfile, hasFace: boolean, damp = 0.6): AutoExposure {
+  const raw = clamp(exposureForLightness(p.meanL, AUTO_TARGET.meanL) * damp, -60, 60);
+  if (raw <= 0 || p.skinLuma == null) return { exposure: r1(raw), capped: false, lowKey: false };
+  if (hasFace && p.skinLuma - p.meanL >= LOW_KEY_SUBJECT_MARGIN) return { exposure: 0, capped: false, lowKey: true };
+  const cap = exposureForLightness(p.skinLuma, p.skinLuma + SKIN_LIFT_MAX);
+  return raw > cap ? { exposure: r1(cap), capped: true, lowKey: false } : { exposure: r1(raw), capped: false, lowKey: false };
+}
+
 /**
  * One-click Auto Retouch: conservative corrections toward AUTO_TARGET plus skin
  * work scaled to how textured the skin actually is. Corrections are damped (x0.6)
- * so the result is a starting point, never a jarring jump.
+ * so the result is a starting point, never a jarring jump. Exposure follows autoExposure.
  */
 export function autoRetouch(p: StyleProfile, hasFace: boolean): Partial<Adjustments> {
   const damp = 0.6;
   const L = p.meanL;
   const out: Partial<Adjustments> = {
-    exposure: r1(clamp(exposureForLightness(L, AUTO_TARGET.meanL) * damp, -60, 60)),
+    exposure: autoExposure(p, hasFace, damp).exposure,
     contrast: r1(clamp(((AUTO_TARGET.contrast / Math.max(p.contrast, 1) - 1) / 0.5) * 100 * damp, -30, 30)),
     temperature: r1(clamp(temperatureForWarmth(AUTO_TARGET.warmth - p.warmth, L) * damp * 0.5, -40, 40)),
     tint: r1(clamp(tintForMagenta(AUTO_TARGET.tintAxis - p.tintAxis, L) * damp * 0.3, -25, 25)),

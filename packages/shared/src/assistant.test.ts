@@ -170,7 +170,7 @@ describe('applyPlan', () => {
 
 describe('recommendPlan', () => {
   it('explains each change with the measurement behind it', () => {
-    const p = recommendPlan(profile({ meanL: 40, contrast: 12 }), base(), face);
+    const p = recommendPlan(profile({ meanL: 40, contrast: 12, skinLuma: 38 }), base(), face);
     const exp = step(p, 'slider:exposure')!;
     expect(exp.value).toBeGreaterThan(0);
     expect(exp.reason).toMatch(/L\* 40/);
@@ -178,13 +178,19 @@ describe('recommendPlan', () => {
   });
 
   it('caps brightening so skin keeps its real tone', () => {
-    const dark = profile({ meanL: 33, skinLuma: 40 });
+    const dark = profile({ meanL: 33, skinLuma: 36 });
     const free = recommendPlan({ ...dark, skinLuma: null }, base(), face);
     const p = recommendPlan(dark, base(), face);
     const e = step(p, 'slider:exposure')!;
     expect(e.value as number).toBeLessThan(step(free, 'slider:exposure')!.value as number);
     expect(e.reason).toMatch(/real skin tone/);
     expect(step(stylePlan('headshot', dark, base(), face), 'slider:exposure')!.value).toBe(e.value);
+  });
+
+  it('does not brighten a low-key portrait: lit subject, dark scene', () => {
+    const night = profile({ meanL: 33.8, skinLuma: 44.8 });
+    expect(step(recommendPlan(night, base(), face), 'slider:exposure')).toBeUndefined();
+    expect(step(stylePlan('headshot', night, base(), face), 'slider:exposure')?.value ?? 0).toBe(0);
   });
 
   it('asks for nothing when the photo already matches', () => {
@@ -214,7 +220,7 @@ describe('stylePlan', () => {
   });
 
   it('is rebuilt per photo and keeps unticked steps and strength', () => {
-    const p = stylePlan('headshot', profile({ meanL: 40 }), base(), face);
+    const p = stylePlan('headshot', profile({ meanL: 40, skinLuma: 38 }), base(), face);
     const edited = { ...p, strength: 70, steps: p.steps.map((s) => (s.id === 'feature:clothingIron' ? { ...s, enabled: false } : s)) };
     const other = planForPhoto(edited, profile({ meanL: 70 }), base(), face);
     expect(other.strength).toBe(70);
