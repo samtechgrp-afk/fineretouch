@@ -49,6 +49,7 @@ from . import batch_engine, imageio, memory, raw_engine, storage
 from .color import color_stats
 from .depth import DepthEstimator
 from .landmarks import FaceLandmarkService
+from .engines.finish import FinishReport
 from .pipeline import render, sharpness
 from .retouch_engine import style_profile, sync_style_arrays
 from .schemas import (
@@ -267,15 +268,20 @@ def _perfection_admitted(data: bytes, adj: Adjustments, preview_long_edge: int) 
         raise HTTPException(415, f"Unsupported or corrupt image: {exc}") from exc
     rgb = raw_engine.to_uint8(hq)
     faces = faces_service.detect(rgb)
-    sp = adj.skinPerfection.model_copy(update={"enabled": True})
-    only = Adjustments(skinPerfection=sp, skinMask=adj.skinMask)
+    fs = adj.skinFinish
+    finish_on = fs.enabled and fs.strength > 0
+    # Without the finish this is the Skin Perfection scan (always on, as before); with it, Skin
+    # Perfection runs only if the edit has it on, then the finish (stage 0d), as the export does.
+    sp = adj.skinPerfection if finish_on else adj.skinPerfection.model_copy(update={"enabled": True})
+    only = Adjustments(skinPerfection=sp, skinFinish=fs, skinMask=adj.skinMask)
     parse = depth_service.parse(rgb) if only.skinMask.useSegmentation else None
     reports: list = []
     out = render(hq, only, faces, parse=parse, report=reports)
-    rep = reports[0].to_json() if reports else None
+    rep = next((r.to_json() for r in reports if hasattr(r, "to_json")), None)
+    fin = next((r.as_dict() for r in reports if isinstance(r, FinishReport)), None)
     small = raw_engine.resize_long_edge(out, preview_long_edge) if max(out.shape[:2]) > preview_long_edge else out
     encoded, _ = imageio.encode(small, "jpeg", 95)
-    return {"report": rep, "faces": len(faces), "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")}
+    return {"report": rep, "finish": fin, "faces": len(faces), "image": "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")}
 
 
 @app.post("/v1/perfection")

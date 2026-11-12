@@ -49,6 +49,7 @@ import cv2
 import numpy as np
 
 from ..schemas import SkinFinishSettings
+from .finish_local import any_local, apply_local, contour_weight
 
 # Band boundaries as shares of the face width F (Gaussian sigmas). On a face 750 px wide:
 # fine < 1.2 px, pores 1.2-3.4 px, bumps 3.4-10.5 px, blotches 10.5-34 px.
@@ -86,6 +87,7 @@ class FinishReport:
     complexion_shift: tuple[float, float, float] = (0.0, 0.0, 0.0)  # mean dL*, da*, db* on skin
     bands_before: dict = field(default_factory=dict)
     bands_after: dict = field(default_factory=dict)
+    local: dict = field(default_factory=dict)  # phase 2 corrections: before / after measures
 
     def as_dict(self) -> dict:
         return {
@@ -97,6 +99,7 @@ class FinishReport:
             "complexionShift": [round(v, 2) for v in self.complexion_shift],
             "bandsBefore": {k: round(v, 3) for k, v in self.bands_before.items()},
             "bandsAfter": {k: round(v, 3) for k, v in self.bands_after.items()},
+            "local": self.local,
         }
 
 
@@ -309,9 +312,13 @@ def _restore_grain(L_out: np.ndarray, L_in: np.ndarray, mask: np.ndarray, F: flo
 def finish_skin(
     image: np.ndarray, skin: np.ndarray, settings: SkinFinishSettings, F: float,
     body: np.ndarray | None = None, method: str = "edge", measure: bool = True,
+    under_eye: np.ndarray | None = None, folds: np.ndarray | None = None,
 ) -> tuple[np.ndarray, FinishReport]:
     """image: HxWx3 float32 sRGB 0..1 (after Skin Perfection). skin: HxW face skin weight.
     body: optional HxW body skin weight. F: face width in px (body uses the same scale).
+    under_eye: optional HxW under-eye weight (landmarks), for the under-eye correction.
+    folds: optional HxW weight of the nose and nasolabial folds (landmarks): where it is known,
+    larger dark patches elsewhere may be any shape; without it they must be round.
     Returns the finished image (pixels outside the mask are copied bit for bit) and a report."""
     t0 = time.perf_counter()
     rep = FinishReport(method=method, face_width=F)
@@ -332,9 +339,21 @@ def finish_skin(
     bd = None if body is None else body[y0:y1, x0:x1].astype(np.float32)
     mask = finish_mask(sk, bd, L, F)
     rep.mask_share = float((mask > 0.5).sum()) / float(h * w)
+    k = settings.strength / 100.0
+
+    # Phase 2: local corrections (marks, tone, shine, under-eye, dodge and burn) first, so the
+    # texture finish below sees the corrected skin (and no longer protects a mark's edge).
+    lab0, local = lab, any_local(settings)
+    if local:
+        raw = sk if bd is None else np.maximum(sk, bd)
+        fo = None if folds is None else np.ascontiguousarray(folds[y0:y1, x0:x1], dtype=np.float32)
+        e_blotch = contour_weight(L, F) if fo is None else np.maximum(fo, contour_weight(L, F, strict=True))
+        ue = None if under_eye is None else under_eye[y0:y1, x0:x1].astype(np.float32)
+        lab = lab.copy()
+        rep.local = apply_local(lab, mask, raw, ue, F, settings, k, e_blotch, measure, folds=fo)
+        L = np.ascontiguousarray(lab[..., 0])
 
     a_bump, a_blotch, a_pore, a_fine = _amounts(settings)
-    k = settings.strength / 100.0
     lows = lowpasses(L, F, method)
     bands = [lows[i] - lows[i + 1] for i in range(4)]  # fine, pore, bump, blotch
     gap = _pore_gap(settings)
@@ -375,20 +394,22 @@ def finish_skin(
     if measure:
         sel = mask > 0.5
         if sel.any():
-            area = relief_area(L, mask, F)
-            rep.bands_before = band_energy(L, mask, F, area)
+            L0 = np.ascontiguousarray(lab0[..., 0])  # the photo as it came in (before phase 2 too)
+            area = relief_area(L0, mask, F)
+            rep.bands_before = band_energy(L0, mask, F, area)
             rep.bands_after = band_energy(L_new, mask, F, area)
-            edges = feature_edges(L, mask, F)
-            before = edge_contrast(L, edges, F)
+            edges = feature_edges(L0, mask, F)
+            before = edge_contrast(L0, edges, F)
             rep.edge_kept = edge_contrast(L_new, edges, F) / before if before > 0 else None
             fb, fa = rep.bands_before, rep.bands_after
             tb = math.hypot(fb.get("fine", 0.0), fb.get("pore", 0.0))
             rep.texture_kept = math.hypot(fa.get("fine", 0.0), fa.get("pore", 0.0)) / tb if tb > 0 else None
-            d = (lab_new - lab)[sel]
+            d = (lab_new - lab0)[sel]
             rep.complexion_shift = tuple(float(v) for v in d.mean(axis=0))
 
     out = image.copy()
-    keep = (mask > 1e-3)[..., None]
+    reach = mask if not local else np.maximum(mask, raw)  # dark-spot work also reaches into cores
+    keep = (reach > 1e-3)[..., None]
     out[y0:y1, x0:x1] = np.where(keep, out_crop, crop)
     rep.ms = (time.perf_counter() - t0) * 1000
     return out.astype(np.float32, copy=False), rep

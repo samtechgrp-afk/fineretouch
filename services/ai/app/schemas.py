@@ -328,13 +328,25 @@ class FinishControl(BaseModel):
     amount: float = Field(50, ge=0, le=100)
 
 
+# The panel's styles (packages/shared/src/finish.ts FINISH_STYLES mirrors this): every amount.
+FINISH_STYLES: dict[str, dict[str, float]] = {
+    "natural": dict(smoothing=35, texturePreservation=85, porePreservation=80, shine=25, darkSpots=45, toneEvenness=25, underEye=25, dodgeBurn=15),
+    "professional": dict(smoothing=55, texturePreservation=75, porePreservation=65, shine=45, darkSpots=70, toneEvenness=45, underEye=45, dodgeBurn=30),
+    "advanced": dict(smoothing=80, texturePreservation=60, porePreservation=45, shine=60, darkSpots=95, toneEvenness=65, underEye=60, dodgeBurn=45),
+}
+
+
 class SkinFinishSettings(BaseModel):
     """Professional Skin Finish (v0.14, stage 0d; engines/finish.py). Off by default: with it off
     the renderer's output is bit-identical to a build without it.
 
-    Phase 1 controls: smoothing (bumps and blotches), texturePreservation (grain and the texture
-    restoration floor), porePreservation (pores) and the overall strength. The other controls of
-    the panel arrive with phase 2."""
+    Texture (phase 1): smoothing (bumps and blotches), texturePreservation (grain and the texture
+    restoration floor), porePreservation (pores) and the overall strength.
+    Local corrections (phase 2, engines/finish_local.py): shine, darkSpots (post-acne marks, dark
+    spots, small hyperpigmentation), toneEvenness, underEye and dodgeBurn. They are 0 unless set,
+    so a finish saved with only the phase 1 controls renders as it did; the panel's styles
+    (Natural, Professional, Advanced) set all of them. `style` records which one was picked
+    ("custom" after any slider change)."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -343,7 +355,18 @@ class SkinFinishSettings(BaseModel):
     smoothing: FinishControl = FinishControl(amount=55)
     texturePreservation: FinishControl = FinishControl(amount=75)
     porePreservation: FinishControl = FinishControl(amount=65)
+    shine: FinishControl = FinishControl(amount=0)
+    darkSpots: FinishControl = FinishControl(amount=0)
+    toneEvenness: FinishControl = FinishControl(amount=0)
+    underEye: FinishControl = FinishControl(amount=0)
+    dodgeBurn: FinishControl = FinishControl(amount=0)
+    style: str = "custom"
     bodyCoverage: bool = True  # neck, shoulders, arms, hands, legs (face parsing)
+
+    @classmethod
+    def styled(cls, style: str, **kw) -> "SkinFinishSettings":
+        """On, with every amount from one of FINISH_STYLES."""
+        return cls(enabled=True, style=style, **{k: FinishControl(amount=v) for k, v in FINISH_STYLES[style].items()}, **kw)
 
 
 class Adjustments(BaseModel):

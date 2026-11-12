@@ -168,6 +168,7 @@ class FaceMasks:
     has_face: bool
     forehead: np.ndarray | None = None  # upper forehead above the landmark oval (gate by colour)
     face_width: float = 0.0  # widest face, px
+    folds: np.ndarray | None = None  # nose and the nose-to-mouth folds (landmarks): the face's shape
 
 
 def build_masks(
@@ -212,6 +213,8 @@ def build_masks(
             if len(region) >= 3:
                 cv2.fillPoly(canvas, [poly(region)], 1.0)
 
+    folds = fold_mask(faces, h, w, face_w)
+
     # Overlap the oval by a few blur radii so the two feathered masks meet without a seam.
     inside = np.zeros((h, w), np.uint8)
     features = np.zeros((h, w), np.uint8)
@@ -244,7 +247,44 @@ def build_masks(
         under_eye=blur(under, face_w * 0.02),
         mouth=blur(mouth, face_w * 0.004),
         has_face=True,
+        folds=folds,
     )
+
+
+FOLD_WIDTH, FOLD_NOSE = 0.06, 0.04  # x face width: the band along each fold; around the nose
+
+
+def fold_mask(faces: list[FaceAnalysis], h: int, w: int, face_w: float) -> np.ndarray | None:
+    """Where the face's own shape makes deep, elongated shadows that are not marks: the lower
+    nose (alae, nostrils) and the nasolabial folds, drawn from each side of the nose to the
+    mouth corner on that side and a little past it. None without nose and lip landmarks."""
+    out = None
+    for f in faces:
+        r = f.regions
+        if len(r.nose) < 3 or len(r.lips) < 3:
+            continue
+        if out is None:
+            out = np.zeros((h, w), np.float32)
+        nose = np.array(r.nose, np.float32) * [w, h]
+        lips = np.array(r.lips, np.float32) * [w, h]
+        fw = f.box[2] * w
+        cv2.fillPoly(out, [np.round(nose).astype(np.int32)], 1.0)
+        out = cv2.dilate(out, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(FOLD_NOSE * fw) | 1,) * 2))
+        width = max(1, int(FOLD_WIDTH * fw))
+        cx = float(nose[:, 0].mean())
+
+        def seg(p, q):
+            cv2.line(out, tuple(int(v) for v in np.round(p)), tuple(int(v) for v in np.round(q)), 1.0, width)
+
+        for side, eye in ((np.argmin, r.leftEye), (np.argmax, r.rightEye)):
+            a, b = nose[side(nose[:, 0])], lips[side(lips[:, 0])]
+            seg(a, b + 0.35 * (b - a))  # the fold runs on past the mouth corner
+            if len(eye) >= 3:  # the side wall of the nose, up to the eye's inner corner
+                e = np.array(eye, np.float32) * [w, h]
+                inner = e[np.argmin(np.abs(e[:, 0] - cx))]
+                if (inner[0] - cx) * (a[0] - cx) > 0:  # the eye on the same side as this ala
+                    seg(a, inner)
+    return None if out is None else blur(out, face_w * 0.015)
 
 
 def face_skin_likelihood(low: np.ndarray, core: np.ndarray, region: np.ndarray) -> np.ndarray:
@@ -371,8 +411,11 @@ def render(
     #     sharpening detail, work from the cleaned photo. With Skin Perfection on they run right
     #     after it instead (stage 0c): the strokes were painted on the perfected photo the preview
     #     shows (POST /v1/perfection, then the browser's heal), so the export uses that order too.
+    #     With the Skin Finish on (stage 0d, also engine-only) they run after the finish, for the
+    #     same reason: the preview's source is then the engine's perfected and finished photo.
     perfection_on = adj.skinPerfection.enabled and adj.skinPerfection.strength > 0
-    if adj.localRetouch.heal and not perfection_on:
+    finish_on = adj.skinFinish.enabled and adj.skinFinish.strength > 0
+    if adj.localRetouch.heal and not perfection_on and not finish_on:
         src = apply_heal_strokes(src, adj.localRetouch.heal)
     h, w = src.shape[:2]
     L = float(max(h, w))
@@ -418,12 +461,13 @@ def render(
         src, rep = perfect_photo(src, face_skin, masks, faces, parse, sp, protect_weight(sm, h, w))
         if report is not None:
             report.append(rep)
-        if adj.localRetouch.heal:  # 0b, after the engine (see above): the order the preview uses
+        if adj.localRetouch.heal and not finish_on:  # 0b, after the engine: the order the preview uses
             src = apply_heal_strokes(src, adj.localRetouch.heal)
         low0 = blur(src, S0 * L)
         bands.clear()
-    # 0d. Professional Skin Finish (v0.14): edge-aware texture finishing of face and body skin on
-    #     the photo Skin Perfection and the heal strokes left, before every older skin stage.
+    # 0d. Professional Skin Finish (v0.14): texture finish and local corrections (shine, dark
+    #     spots, tone, under-eye, dodge and burn) of face and body skin on the photo Skin
+    #     Perfection left, before every older skin stage; the heal strokes follow it (see 0b).
     #     Off by default; when off nothing here runs, so the output is unchanged bit for bit.
     fs = adj.skinFinish
     if fs.enabled and fs.strength > 0:
@@ -431,6 +475,8 @@ def render(
         src, frep = finish_photo(src, face_skin, masks, parse, fs, protect_weight(sm, h, w))
         if report is not None:
             report.append(frep)
+        if adj.localRetouch.heal:  # 0b, after the finish (see above): the order the preview uses
+            src = apply_heal_strokes(src, adj.localRetouch.heal)
         low0 = blur(src, S0 * L)
         bands.clear()
     skin = skin[..., None]
@@ -575,7 +621,8 @@ def finish_photo(
         if protect is not None:
             body = body * protect
     return finish_skin(src.astype(np.float32, copy=False), skin.astype(np.float32, copy=False), settings, fw,
-                       body=body, method=method)
+                       body=body, method=method, under_eye=None if not masks.has_face else masks.under_eye if protect is None else masks.under_eye * protect,
+                       folds=masks.folds if masks.has_face else None)
 
 
 def _finish_strip(
