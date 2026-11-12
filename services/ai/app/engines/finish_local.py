@@ -141,6 +141,7 @@ def spot_map(L: np.ndarray, F: float, prior: list | None = None, free: np.ndarra
     true0 = sur0 - fine
     core = np.maximum(_smoothstep(SPOT_DEEP0, SPOT_DEEP1, true0),
                       _smoothstep(SPOT_DEEPR0, SPOT_DEEPR1, true0 / np.maximum(sur0, 1.0))).astype(np.float32)
+    del sur0, true0  # memory: full-size planes no longer needed
     best = np.zeros_like(L)
     idx = np.zeros(L.shape, np.int8)
     weights = []
@@ -206,18 +207,29 @@ def spot_map(L: np.ndarray, F: float, prior: list | None = None, free: np.ndarra
         # (those are each judged at their own scale). The smallest scale uses the pore-free skin.
         own = SPOT_OWN * s
         deficit = None if i == 0 else sur - cv2.GaussianBlur(small, (0, 0), own, borderType=cv2.BORDER_REFLECT)
+        # Memory: the weights are kept for the next pass at the detector's size (each pass's
+        # are resized and maxed here, which is what keeping the full-size maximum gives).
+        found = ([] if prior is None else prior[i]) + [wgt]
+        weights.append(found)
         if f != 1.0:
             wgt = cv2.resize(wgt, (w, h), interpolation=cv2.INTER_LINEAR)
             sur = cv2.resize(sur, (w, h), interpolation=cv2.INTER_LINEAR)
             if deficit is not None:
                 deficit = cv2.resize(deficit, (w, h), interpolation=cv2.INTER_LINEAR)
-        if prior is not None:
-            wgt = np.maximum(wgt, prior[i])
-        weights.append(wgt)
-        lift = np.clip(sur - fine if deficit is None else deficit, 0.0, None) * wgt
+        for earlier in found[:-1]:
+            np.maximum(wgt, earlier if f == 1.0 else cv2.resize(earlier, (w, h), interpolation=cv2.INTER_LINEAR), out=wgt)
+        if deficit is None:
+            lift = sur - fine
+        else:
+            lift = deficit
+        del sur, deficit
+        np.clip(lift, 0.0, None, out=lift)
+        lift *= wgt
+        del wgt
         better = lift > best
-        best = np.where(better, lift, best)
-        idx = np.where(better, np.int8(i), idx)
+        idx[better] = np.int8(i)
+        np.maximum(best, lift, out=best)
+        del lift, better
     return _gauss(best, max(0.6, 0.5 * SPOT_FINE * F)), idx, weights
 
 
@@ -245,6 +257,7 @@ def _spot_pass(lab: np.ndarray, mask: np.ndarray, F: float, k: np.ndarray, prior
                free: np.ndarray | None, face: np.ndarray | float | None = None) -> tuple[float, list]:
     L = lab[..., 0]
     lift, idx, weights = spot_map(L, F, prior, free, face)
+    frac = np.clip(lift / 3.0, 0.0, 1.0)  # colour follows only where a real mark was lifted
     for c in (1, 2):
         A = lab[..., c]
         dA = np.zeros_like(A)
@@ -252,10 +265,22 @@ def _spot_pass(lab: np.ndarray, mask: np.ndarray, F: float, k: np.ndarray, prior
             s = max(1.0, share * F)
             sel = idx == i
             if sel.any():
-                dA[sel] = (_gauss(A, SPOT_SURROUND * s) - _gauss(A, s))[sel]
-        frac = np.clip(lift / 3.0, 0.0, 1.0)  # colour follows only where a real mark was lifted
-        A += dA * frac * SPOT_COLOUR * k
-    L += lift * SPOT_LIFT * k
+                band = _gauss(A, SPOT_SURROUND * s)
+                band -= _gauss(A, s)
+                dA[sel] = band[sel]
+                del band
+            del sel
+        # dA * frac * SPOT_COLOUR * k, in place (same order of operations).
+        dA *= frac
+        dA *= SPOT_COLOUR
+        dA *= k
+        A += dA
+        del dA
+    del frac, idx
+    step = lift * SPOT_LIFT
+    step *= k
+    L += step
+    del step
     sel = mask > 0.5
     return float(((lift > 1.0) & sel).sum()) / max(1, int(sel.sum())), weights, lift
 
