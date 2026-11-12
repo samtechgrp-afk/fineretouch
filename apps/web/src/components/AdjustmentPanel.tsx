@@ -12,6 +12,7 @@ import { EffectControlsRow, EffectSwitch, GlobalStrength } from './panels/Effect
 import { RetouchStudioPanel } from './panels/RetouchStudioPanel';
 import { AssistantPanel } from './panels/AssistantPanel';
 import { SkinPerfectionPanel } from './panels/SkinPerfectionPanel';
+import { SkinFinishPanel } from './panels/SkinFinishPanel';
 import { QaLabelsPanel } from './panels/QaLabelsPanel';
 
 const GROUP_ORDER: AdjustmentGroup[] = ['skin', 'face', 'light', 'color', 'detail'];
@@ -44,6 +45,10 @@ export function AdjustmentPanel() {
       <Section title="Skin Perfection Studio" open={open.perfection ?? true} onToggle={() => setOpen((o) => ({ ...o, perfection: !(o.perfection ?? true) }))}
         note={photo.adjustments.skinPerfection.enabled ? 'Full-resolution blemish engine (AI engine)' : undefined}>
         <SkinPerfectionPanel photo={photo} />
+      </Section>
+      <Section title="Professional Skin Finish" open={open.finish ?? true} onToggle={() => setOpen((o) => ({ ...o, finish: !(o.finish ?? true) }))}
+        note={photo.adjustments.skinFinish.enabled ? 'Full-resolution finishing engine (AI engine)' : undefined}>
+        <SkinFinishPanel photo={photo} />
       </Section>
       <Section title="Test labels (QA)" open={open.qa ?? false} onToggle={() => setOpen((o) => ({ ...o, qa: !(o.qa ?? false) }))}
         note="Mark blemishes and natural features for the quality benchmark">

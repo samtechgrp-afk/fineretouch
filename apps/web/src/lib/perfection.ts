@@ -9,14 +9,26 @@
  *  - the perfected photo at preview size, used by the viewport as its source pixels so every
  *    other slider stays live on top of it (the export renders everything in the engine).
  *
+ * The Professional Skin Finish (v0.14) also runs only in the engine, after Skin Perfection: with
+ * either on, the engine returns the photo with both applied and that is the viewport's source.
+ *
  * Results are cached per photo by a key of everything that changes them (the Skin Perfection
- * settings with the user's overrides, and the skin mask), so undo / redo back to an earlier
+ * settings with the user's overrides, the Skin Finish settings and the skin mask), so undo / redo back to an earlier
  * state is instant. Settings changes re-run the engine after a short pause (one run at a time
  * per photo; a change during a run queues exactly one more).
  */
 
 import { create } from 'zustand';
 import type { Adjustments, PerfectionReport } from '@fineretouch/shared';
+
+/** The Skin Finish part of the engine's answer: what each correction measured before / after. */
+export interface FinishSummary {
+  ms?: number;
+  edgeKept?: number | null;
+  textureKept?: number | null;
+  local?: Record<string, Record<string, number | null> | number>;
+  [k: string]: unknown;
+}
 import { perfectionScan } from './ai';
 import { ensureProxy, getFile } from './images';
 import { useEditor } from './store';
@@ -28,6 +40,8 @@ export interface PhotoPerfection {
   /** Key of the settings the shown result was made with. */
   key: string | null;
   report: PerfectionReport | null;
+  /** Skin Finish measures of the shown result (null when the finish is off). */
+  finish: FinishSummary | null;
   error: string | null;
   ms: number | null;
 }
@@ -46,7 +60,7 @@ interface PerfectionState {
   select(ids: number[]): void;
 }
 
-const EMPTY: PhotoPerfection = { status: 'idle', key: null, report: null, error: null, ms: null };
+const EMPTY: PhotoPerfection = { status: 'idle', key: null, report: null, finish: null, error: null, ms: null };
 
 export const usePerfection = create<PerfectionState>((set) => ({
   byPhoto: {},
@@ -61,10 +75,17 @@ export const usePerfection = create<PerfectionState>((set) => ({
 
 export const perfectionOf = (id: string | null | undefined): PhotoPerfection => (id && usePerfection.getState().byPhoto[id]) || EMPTY;
 
-/** Everything in an edit that changes the engine's Skin Perfection result. */
-export function perfectionKeyOf(adj: Pick<Adjustments, 'skinPerfection' | 'skinMask'>): string {
+/** Whether the viewport's source is the engine's result: Skin Perfection or Skin Finish is on. */
+export function engineSourceOn(adj: Pick<Adjustments, 'skinPerfection'> & Partial<Pick<Adjustments, 'skinFinish'>>): boolean {
+  return adj.skinPerfection.enabled || Boolean(adj.skinFinish?.enabled);
+}
+
+/** Everything in an edit that changes the engine's Skin Perfection / Skin Finish result. */
+export function perfectionKeyOf(adj: Pick<Adjustments, 'skinPerfection' | 'skinMask'> & Partial<Pick<Adjustments, 'skinFinish'>>): string {
   const sm = adj.skinMask;
-  return JSON.stringify([adj.skinPerfection, sm.useSegmentation, sm.feather, sm.strokes]);
+  const key: unknown[] = [adj.skinPerfection, sm.useSegmentation, sm.feather, sm.strokes];
+  if (adj.skinFinish?.enabled) key.push(adj.skinFinish);
+  return JSON.stringify(key);
 }
 
 interface CachedResult {
@@ -73,6 +94,7 @@ interface CachedResult {
   height: number;
   pixels: Uint8ClampedArray;
   report: PerfectionReport | null;
+  finish: FinishSummary | null;
 }
 
 const RESULTS_PER_PHOTO = 4;
@@ -113,18 +135,18 @@ export async function runPerfection(id: string, opts: { force?: boolean } = {}):
   const file = getFile(id);
   if (!p || !file) return;
   const adj = p.adjustments;
-  if (!adj.skinPerfection.enabled) return;
+  if (!engineSourceOn(adj)) return;
   const key = perfectionKeyOf(adj);
   const store = usePerfection.getState();
   const cached = results.get(id)?.find((r) => r.key === key);
   if (cached && !opts.force) {
-    store.set(id, { status: 'ready', key, report: cached.report, error: null });
+    store.set(id, { status: 'ready', key, report: cached.report, finish: cached.finish, error: null });
     // Most recent first, so the stale fallback is the last one looked at.
     results.set(id, [cached, ...results.get(id)!.filter((r) => r !== cached)]);
     return;
   }
   if (!st.aiOnline) {
-    store.set(id, { status: 'error', error: 'Skin Perfection runs in the local AI engine, which is not running.' });
+    store.set(id, { status: 'error', error: 'Skin Perfection and Skin Finish run in the local AI engine, which is not running.' });
     return;
   }
   const running = inflight.get(id);
@@ -139,11 +161,11 @@ export async function runPerfection(id: string, opts: { force?: boolean } = {}):
   inflight.set(id, { key, ctrl });
   store.set(id, { status: 'running', error: null });
   try {
-    const res = await perfectionScan(file, { skinPerfection: { ...adj.skinPerfection, enabled: true }, skinMask: adj.skinMask }, Math.max(proxy.width, proxy.height), ctrl.signal);
+    const res = await perfectionScan(file, { skinPerfection: adj.skinPerfection, skinFinish: adj.skinFinish, skinMask: adj.skinMask }, Math.max(proxy.width, proxy.height), ctrl.signal);
     const pixels = await decodeToPixels(res.image, proxy.width, proxy.height);
-    const entry: CachedResult = { key, width: proxy.width, height: proxy.height, pixels, report: res.report };
+    const entry: CachedResult = { key, width: proxy.width, height: proxy.height, pixels, report: res.report, finish: res.finish ?? null };
     results.set(id, [entry, ...(results.get(id) ?? []).filter((r) => r.key !== key)].slice(0, RESULTS_PER_PHOTO));
-    usePerfection.getState().set(id, { status: 'ready', key, report: res.report, error: null, ms: res.ms });
+    usePerfection.getState().set(id, { status: 'ready', key, report: res.report, finish: res.finish ?? null, error: null, ms: res.ms });
     usePerfection.getState().select([]);
   } catch (e) {
     if (!ctrl.signal.aborted) usePerfection.getState().set(id, { status: 'error', error: e instanceof Error ? e.message : String(e) });

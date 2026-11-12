@@ -20,6 +20,7 @@ import {
 } from '@/lib/exportManager';
 import { isDesktop, revealInFolder } from '@/lib/desktop';
 import { decodeOriginal, getFile, isRawPhoto } from '@/lib/images';
+import { engineSourceOn } from '@/lib/perfection';
 import { useEditor } from '@/lib/store';
 import {
   WATERMARK_ANCHORS,
@@ -89,11 +90,11 @@ export function ExportModal({ onClose }: { onClose(): void }) {
   /** Render one photo to an encoded blob, watermark included. */
   const renderOne = async (id: string, gpuCtx?: { renderer: Renderer; load(id: string): Promise<ImageBitmap> }): Promise<Blob> => {
     const p = useEditor.getState().photos[id];
-    // Skin Perfection runs only in the local AI engine (full-resolution detection, correction
-    // and verification); the GPU chain has no equivalent, so those photos always go there.
-    const perfection = p.adjustments.skinPerfection.enabled;
+    // Skin Perfection and the Skin Finish run only in the local AI engine (full resolution); the
+    // GPU chain has no equivalent, so those photos always go there.
+    const perfection = engineSourceOn(p.adjustments);
     if (perfection && engine === 'browser' && !aiOnline) {
-      throw new Error(`${p.name}: Skin Perfection needs the local AI engine, which is not running.`);
+      throw new Error(`${p.name}: Skin Perfection and Skin Finish need the local AI engine, which is not running.`);
     }
     if (engine === 'server' || (perfection && engine === 'browser')) {
       // Lossless from the engine when stamping, so the file is encoded only once more.
@@ -265,9 +266,9 @@ export function ExportModal({ onClose }: { onClose(): void }) {
                 disabled={{ server: !aiOnline, cloud: !cloud }}
               />
             </Field>
-            {engine === 'browser' && ids.some((id) => useEditor.getState().photos[id]?.adjustments.skinPerfection.enabled) && (
+            {engine === 'browser' && ids.some((id) => { const a = useEditor.getState().photos[id]?.adjustments; return Boolean(a && engineSourceOn(a)); }) && (
               <p className="text-xs text-ink-400" data-testid="perfection-engine-note">
-                Photos with Skin Perfection on are rendered by the local AI engine (full-resolution detection and verification), the rest on the GPU.
+                Photos with Skin Perfection or Skin Finish on are rendered by the local AI engine (full resolution), the rest on the GPU.
               </p>
             )}
             {engine === 'browser' && ids.some(isRawPhoto) && (

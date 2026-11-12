@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_ADJUSTMENTS, type PerfectionReport } from '@fineretouch/shared';
 import { hitMark } from '@/components/viewport/perfectionOverlay';
-import { perfectedPixels, perfectionKeyOf } from './perfection';
+import { engineSourceOn, perfectedPixels, perfectionKeyOf } from './perfection';
 
 const report = (marks: Array<[number, number, number]>): PerfectionReport => ({
   width: 1000, height: 1000, passes: 1, tiles: 1, workScale: 1, faceWidth: 500, ms: 1,
@@ -17,6 +17,22 @@ describe('Skin Perfection in the app', () => {
     expect(perfectionKeyOf({ ...DEFAULT_ADJUSTMENTS, exposure: 40 } as never)).toBe(a);
     expect(perfectionKeyOf({ ...DEFAULT_ADJUSTMENTS, skinPerfection: { ...DEFAULT_ADJUSTMENTS.skinPerfection, strength: 50 } })).not.toBe(a);
     expect(perfectionKeyOf({ ...DEFAULT_ADJUSTMENTS, skinMask: { ...DEFAULT_ADJUSTMENTS.skinMask, feather: 0.9 } })).not.toBe(a);
+  });
+
+  it('uses the engine as the source when Skin Perfection or the Skin Finish is on', () => {
+    expect(engineSourceOn(DEFAULT_ADJUSTMENTS)).toBe(false);
+    expect(engineSourceOn({ ...DEFAULT_ADJUSTMENTS, skinFinish: { ...DEFAULT_ADJUSTMENTS.skinFinish, enabled: true } })).toBe(true);
+    expect(engineSourceOn({ ...DEFAULT_ADJUSTMENTS, skinPerfection: { ...DEFAULT_ADJUSTMENTS.skinPerfection, enabled: true } })).toBe(true);
+  });
+
+  it('keys by the Skin Finish only while it is on (a Perfection-only key is unchanged)', () => {
+    const a = perfectionKeyOf(DEFAULT_ADJUSTMENTS);
+    const off = { ...DEFAULT_ADJUSTMENTS, skinFinish: { ...DEFAULT_ADJUSTMENTS.skinFinish, strength: 40 } };
+    expect(perfectionKeyOf(off)).toBe(a);
+    const on = { ...DEFAULT_ADJUSTMENTS, skinFinish: { ...DEFAULT_ADJUSTMENTS.skinFinish, enabled: true } };
+    expect(perfectionKeyOf(on)).not.toBe(a);
+    const moved = { ...on, skinFinish: { ...on.skinFinish, shine: { enabled: true, amount: 90 } } };
+    expect(perfectionKeyOf(moved)).not.toBe(perfectionKeyOf(on));
   });
 
   it('has no perfected pixels before the engine ran', () => {
