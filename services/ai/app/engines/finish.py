@@ -216,12 +216,17 @@ def relief_area(L: np.ndarray, mask: np.ndarray, F: float) -> np.ndarray:
 
 def band_energy(L: np.ndarray, mask: np.ndarray, F: float, area: np.ndarray | None = None) -> dict[str, float]:
     """RMS of each band of L* over `area` (default: the mask > 0.5): the QA's texture measure."""
-    lows = lowpasses(L, F, "gauss")
     sel = (mask > 0.5) if area is None else area
     if not sel.any():
         return {}
+    # The same low-passes as lowpasses(L, F, "gauss"), two at a time (memory).
     names = ("fine", "pore", "bump", "blotch")
-    return {n: float(np.sqrt(np.mean((lows[i] - lows[i + 1])[sel] ** 2))) for i, n in enumerate(names)}
+    out, prev = {}, L
+    for n, s in zip(names, (S_FINE, S_PORE, S_BUMP, S_BLOTCH)):
+        cur = _gauss(L, max(0.6, s * F))
+        out[n] = float(np.sqrt(np.mean((prev - cur)[sel] ** 2)))
+        prev = cur
+    return out
 
 
 def feature_edges(L: np.ndarray, mask: np.ndarray, F: float) -> np.ndarray:
@@ -352,6 +357,7 @@ def finish_skin(
         lab = lab.copy()
         rep.local = apply_local(lab, mask, raw, ue, F, settings, k, e_blotch, measure, folds=fo)
         L = np.ascontiguousarray(lab[..., 0])
+        del e_blotch, ue, fo  # memory: full-size planes no longer needed
 
     a_bump, a_blotch, a_pore, a_fine = _amounts(settings)
     lows = lowpasses(L, F, method)
@@ -372,6 +378,11 @@ def finish_skin(
             dL -= b * (a * (1.0 - e))
     dL *= mask * k
     L_new = L + dL
+    # Memory (v0.14 phase 3): the band planes are done with; only the bump weight is used below.
+    e_col = weights[2] if method == "edge" else 0.0
+    del lows, bands, low_gap, weights, dL, b, e
+    if method == "edge":
+        del e_pore, e_bump, e_blotch
 
     # Colour relief at the bump and pore scales moves with the luminance (a red bump is one bump).
     lab_new = lab.copy()
@@ -380,9 +391,10 @@ def finish_skin(
         A = np.ascontiguousarray(lab[..., c])
         g1, g2, g3 = _gauss(A, s_f), _gauss(A, s_p), _gauss(A, s_b)
         g2b = g2 if gap <= 1.0 else _gauss(A, s_gap)
-        e = weights[2] if method == "edge" else 0.0
-        dA = -((g1 - g2) * a_pore + (g2b - g3) * a_bump) * (1.0 - e)
+        dA = -((g1 - g2) * a_pore + (g2b - g3) * a_bump) * (1.0 - e_col)
         lab_new[..., c] = A + dA * mask * k
+        del A, g1, g2, g3, g2b, dA
+    del e_col
 
     # Texture restoration against the floor Texture preservation sets.
     tp = settings.texturePreservation.amount / 100.0 if settings.texturePreservation.enabled else 0.0
