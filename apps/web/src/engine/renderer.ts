@@ -844,10 +844,10 @@ export function stageKeys(
   info: RenderInfo,
   v: { retouch: number; studio: number; local: number; bokeh: number },
 ) {
-  const { localRetouch, depthBokeh, glareReduction, clothing, lut, skinMask: _skinMask, ...rest } = adj;
+  const { localRetouch, depthBokeh, glareReduction, glareForce, clothing, lut, skinMask: _skinMask, ...rest } = adj;
   void _skinMask;
   const retouch = `${v.retouch}|${JSON.stringify(rest)}|${info.hasFace}|${info.noiseLevel ?? ''}|${JSON.stringify(info.sourceStats)}`;
-  const studio = `${retouch}|${v.studio}|${glareReduction}|${JSON.stringify(clothing)}|${lut ? `${lut.size}:${lut.amount}:${hash(lut.data)}` : ''}`;
+  const studio = `${retouch}|${v.studio}|${glareReduction}|${glareForce}|${JSON.stringify(clothing)}|${lut ? `${lut.size}:${lut.amount}:${hash(lut.data)}` : ''}`;
   const layers = localRetouch.layers.map((l) => ({ ...l, mask: { ...l.mask, strokes: l.mask.strokes.length } }));
   const local = `${studio}|${v.local}|${JSON.stringify(layers)}`;
   const bokeh = `${local}|${v.bokeh}|${JSON.stringify(depthBokeh)}`;

@@ -222,7 +222,7 @@ export async function renderFullRes(
     const mask = faceMaskFor(ctx.id, ctx.analysis, w, h, adjustments.skinMask);
     const edit = editMaskFor(ctx.id, adjustments.skinMask, w, h);
     const hair = adjustments.strayHairRemoval.enabled ? hairRoiFor(ctx.id, ctx.analysis, w, h) : null;
-    const lens = adjustments.glareReduction > 0 ? lensRoiFor(ctx.id, ctx.analysis, w, h) : null;
+    const lens = adjustments.glareReduction > 0 ? lensRoiFor(ctx.id, ctx.analysis, w, h, adjustments.glareForce) : null;
     const sm = adjustments.skinMask;
     const layerKey = `export:${mask ? 'face' : 'none'}:${sm.strokes.length}:${sm.feather}:${sm.useSegmentation}:${sm.includeBodySkin}`;
 

@@ -195,9 +195,38 @@ def reduce_glasses_glare(image: np.ndarray, faces: list[FaceAnalysis], strength:
     if s < 1:
         delta = cv2.resize(delta, (cw, ch), interpolation=cv2.INTER_LINEAR)
         alpha = cv2.resize(alpha, (cw, ch), interpolation=cv2.INTER_LINEAR)
+    fixed = np.clip(crop + delta * alpha[..., None], 0.0, 1.0).astype(np.float32)
+    # Phase 3b: skin seen through (or around) the lens keeps its own colour. Removing a near-
+    # neutral reflection may restore saturation but never turns a hue: outside the eye openings
+    # a* / b* keep their direction, and their size may only grow by what the veil took away.
+    eye_full = _eye_mask(faces, h, w)[y0:y1, x0:x1].astype(np.float32)
+    fixed = _keep_skin_hue(crop.astype(np.float32), fixed, alpha, eye_full)
     out = image.copy()
-    out[y0:y1, x0:x1] = crop + delta * alpha[..., None]
+    out[y0:y1, x0:x1] = fixed
     return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+GLARE_CHROMA_GAIN = 1.0 / (1.0 - GLARE_MAX_VEIL)  # most a reflection can have desaturated a colour
+
+
+def _keep_skin_hue(before: np.ndarray, after: np.ndarray, alpha: np.ndarray, eyes: np.ndarray) -> np.ndarray:
+    """after with its a*/b* outside the eye openings put back on before's hue, the chroma scaled
+    by at most GLARE_CHROMA_GAIN (and no less than before's). Lightness is kept from after."""
+    lab0 = cv2.cvtColor(before, cv2.COLOR_RGB2Lab)
+    lab1 = cv2.cvtColor(after, cv2.COLOR_RGB2Lab)
+    c0 = np.hypot(lab0[..., 1], lab0[..., 2])
+    c1 = np.hypot(lab1[..., 1], lab1[..., 2])
+    k = np.clip(c1 / np.maximum(c0, 1e-3), 1.0, GLARE_CHROMA_GAIN)
+    k = np.where(c0 < 1.0, 1.0, k)  # near-grey: no hue to keep, keep before's colour
+    locked = lab1.copy()
+    locked[..., 1] = lab0[..., 1] * k
+    locked[..., 2] = lab0[..., 2] * k
+    keep = (1.0 - np.clip(cv2.GaussianBlur(eyes, (0, 0), 2.0), 0.0, 1.0))[..., None]
+    lab = lab1 * (1.0 - keep) + locked * keep
+    out = after.copy()
+    moved = alpha > 1e-4  # pixels the correction left alone come back bit for bit
+    out[moved] = np.clip(cv2.cvtColor(lab.astype(np.float32), cv2.COLOR_Lab2RGB), 0.0, 1.0)[moved]
+    return out
 
 
 def teeth_mask(image: np.ndarray, faces: list[FaceAnalysis]) -> np.ndarray:

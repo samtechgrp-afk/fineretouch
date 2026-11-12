@@ -394,6 +394,9 @@ class Adjustments(BaseModel):
     skinNoise: float = Field(0, ge=0, le=100)
     underEyeTexture: float = Field(0, ge=0, le=100)
     eyeBrighten: float = Field(0, ge=0, le=100)
+    # Phase 3b: Glasses glare runs only on faces with confidently detected glasses; this manual
+    # override runs it on every face (for glasses the detector missed, e.g. rimless).
+    glareForce: bool = False
     # Phase 3b: skin-only brightening (the skin mask, highlights protected). Auto Retouch sets it
     # instead of changing the exposure of the whole photograph.
     skinBrighten: float = Field(0, ge=0, le=100)
@@ -472,6 +475,8 @@ class FaceAnalysis(BaseModel):
     landmarkCount: int
     regions: FaceRegions
     eyeOpenness: float
+    # Phase 3b: 0..1 how sure we are the face wears glasses (engines/glasses.py); None = not measured.
+    glasses: float | None = None
 
 
 class CullFlags(BaseModel):

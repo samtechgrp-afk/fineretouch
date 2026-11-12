@@ -166,9 +166,9 @@ export function PhotoEditorViewport() {
         depthKeyRef.current = depthKey;
       }
       const glareOn = adj.glareReduction > 0 || st.view.overlay === 'glare';
-      const lensKey = `${faceKey}:${glareOn}`;
+      const lensKey = `${faceKey}:${glareOn}:${adj.glareForce}`;
       if (lensKeyRef.current !== lensKey) {
-        const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height) : null;
+        const roi = glareOn ? lensRoiFor(p.id, p.analysis, proxy.width, proxy.height, adj.glareForce) : null;
         r.setLensRoi(roi?.data ?? null, roi?.width, roi?.height);
         lensKeyRef.current = lensKey;
       }

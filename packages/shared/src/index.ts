@@ -244,6 +244,8 @@ export interface Adjustments {
   // Pro studio (v0.6)
   /** Removes flash / window reflections on eyeglass lenses (needs eye landmarks). */
   glareReduction: number; // 0..100
+  /** Run Glasses glare even where no glasses were detected (manual override; off by default). */
+  glareForce: boolean;
   /** Evens yellow or dark patches on teeth toward their own enamel colour. */
   teethStainRemoval: number; // 0..100
   clothing: ClothingSettings;
@@ -274,6 +276,7 @@ export type AdjustmentKey = Exclude<
   | 'protectBeautyMarks'
   | 'skinToneGuard'
   | 'keepFreckles'
+  | 'glareForce'
   | 'hsl'
   | 'colorGrading'
   | 'clothing'
@@ -336,6 +339,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   hsl: DEFAULT_HSL,
   colorGrading: DEFAULT_COLOR_GRADING,
   glareReduction: 0,
+  glareForce: false,
   teethStainRemoval: 0,
   clothing: DEFAULT_CLOTHING,
   lut: null,
@@ -464,6 +468,7 @@ export function sanitizeAdjustments(input: unknown): Adjustments {
   if (typeof src.protectBeautyMarks === 'boolean') out.protectBeautyMarks = src.protectBeautyMarks;
   if (typeof src.skinToneGuard === 'boolean') out.skinToneGuard = src.skinToneGuard;
   if (typeof src.keepFreckles === 'boolean') out.keepFreckles = src.keepFreckles;
+  if (typeof src.glareForce === 'boolean') out.glareForce = src.glareForce;
   out.hsl = sanitizeHsl(src.hsl);
   out.colorGrading = sanitizeColorGrading(src.colorGrading);
   const cl = asRecord(src.clothing);
@@ -676,6 +681,16 @@ export interface FaceAnalysis {
   regions: FaceRegions;
   /** 0 = closed, 1 = wide open, from eye aspect ratio. */
   eyeOpenness: number;
+  /** 0..1 how sure the engine is that this face wears glasses (phase 3b); null / missing = not measured. */
+  glasses?: number | null;
+}
+
+/** Glasses confidence at or above which Glasses glare runs on a face (engines/glasses.py). */
+export const GLASSES_CONFIDENT = 0.6;
+
+/** Faces Glasses glare works on: glasses confidently detected, or every face with eyes when forced. */
+export function glareFaces(faces: FaceAnalysis[], force: boolean): FaceAnalysis[] {
+  return faces.filter((f) => (force ? f.regions.leftEye.length >= 3 && f.regions.rightEye.length >= 3 : (f.glasses ?? 0) >= GLASSES_CONFIDENT));
 }
 
 export interface ImageAnalysis {

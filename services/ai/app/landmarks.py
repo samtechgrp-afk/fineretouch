@@ -72,6 +72,13 @@ def _remap_face(f: FaceAnalysis, x0: int, y0: int, cw: int, ch: int, w: int, h: 
     )
 
 
+def _with_glasses(rgb: np.ndarray, f: FaceAnalysis) -> FaceAnalysis:
+    """The face with its glasses confidence (engines/glasses.py), read at full resolution."""
+    from .engines.glasses import glasses_confidence
+
+    return f.model_copy(update={"glasses": glasses_confidence(rgb, f.regions.leftEye, f.regions.rightEye)})
+
+
 def _same_face(a: FaceAnalysis, b: FaceAnalysis) -> bool:
     """True when a's centre falls inside b's box (or the other way round)."""
 
@@ -161,7 +168,7 @@ class FaceLandmarkService:
                     # Full-length and group shots: the face is too small in the proxy for the
                     # detector, so look again on overlapping windows at full resolution.
                     faces = self._detect_tiled(rgb)
-                return [self._refine(rgb, f) for f in faces]
+                return [_with_glasses(rgb, self._refine(rgb, f)) for f in faces]
             except (OSError, RuntimeError) as exc:  # e.g. missing libEGL/GLES in a slim image
                 log.error("MediaPipe unavailable, falling back to Haar cascade: %s", exc)
                 self._mediapipe_failed = True

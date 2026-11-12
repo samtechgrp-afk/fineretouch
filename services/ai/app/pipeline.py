@@ -52,6 +52,7 @@ from .color import color_stats, linear_to_srgb, srgb_to_linear, transfer_lab
 from .color_engine import apply_color_engine, apply_lut, decode_lut
 from .effects import detector_multiplier, resolve_adjustments
 from .engines.finish import FinishReport, finish_skin
+from .engines.glasses import wears_glasses
 from .engines.local import apply_heal_strokes, apply_local_layers
 from .engines.noise import reduce_skin_noise
 from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
@@ -523,9 +524,11 @@ def render(
         del keep
     if adj.strayHairRemoval.enabled and adj.strayHairRemoval.strength > 0 and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
-    # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted.
-    if adj.glareReduction > 0 and faces:
-        c = reduce_glasses_glare(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.glareReduction)
+    # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted. Phase 3b:
+    #     only on faces whose glasses were confidently detected (or every face with the override).
+    glare_faces = [f for f in faces if wears_glasses(f, adj.glareForce)] if adj.glareReduction > 0 else []
+    if glare_faces:
+        c = reduce_glasses_glare(np.clip(c, 0.0, 1.0).astype(np.float32), glare_faces, adj.glareReduction)
     # 5e. Clothing: virtual iron, then recolour.
     cl = adj.clothing
     if cl.enabled and (cl.wrinkleStrength > 0 or cl.hueShift != 0 or cl.saturation != 0):

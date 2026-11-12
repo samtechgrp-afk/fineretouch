@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import {
   BUILT_IN_PRESETS,
   DEFAULT_ADJUSTMENTS,
+  GLASSES_CONFIDENT,
+  glareFaces,
   HSL_CHANNELS,
   SLIDERS,
   applyPreset,
@@ -93,5 +95,25 @@ describe('v0.5 colour mixer, grading and spot healing settings', () => {
     expect(sanitizeAdjustments({ skinToneGuard: false }).skinToneGuard).toBe(false);
     expect(sanitizeAdjustments({ skinToneGuard: 'no' } as unknown as Partial<Adjustments>).skinToneGuard).toBe(true);
     expect(sanitizeAdjustments({ protectBeautyMarks: 0 } as unknown as Partial<Adjustments>).protectBeautyMarks).toBe(true);
+  });
+});
+
+describe('phase 3b: glasses gate and skin brightening', () => {
+  const ring = (cx: number) => Array.from({ length: 8 }, (_, i) => [cx + 0.03 * Math.cos(i), 0.4 + 0.01 * Math.sin(i)] as [number, number]);
+  const face = (glasses?: number | null) => ({
+    box: [0.2, 0.1, 0.6, 0.8] as [number, number, number, number], landmarkCount: 478, eyeOpenness: 1, glasses,
+    regions: { faceOval: [], leftEye: ring(0.6), rightEye: ring(0.4), leftUnderEye: [], rightUnderEye: [], innerMouth: [], lips: [], leftBrow: [], rightBrow: [] },
+  });
+  it('glare runs only on confidently detected glasses unless forced', () => {
+    expect(glareFaces([face(0.9), face(0.3), face(null), face()], false)).toHaveLength(1);
+    expect(glareFaces([face(0.9), face(0.3), face(null), face()], true)).toHaveLength(4);
+    expect(GLASSES_CONFIDENT).toBe(0.6);
+  });
+  it('defaults are off and survive sanitising', () => {
+    expect(DEFAULT_ADJUSTMENTS.glareForce).toBe(false);
+    expect(DEFAULT_ADJUSTMENTS.skinBrighten).toBe(0);
+    expect(sanitizeAdjustments({ glareForce: true }).glareForce).toBe(true);
+    expect(sanitizeAdjustments({ glareForce: 1 } as unknown as Partial<Adjustments>).glareForce).toBe(false);
+    expect(sanitizeAdjustments({ skinBrighten: 250 }).skinBrighten).toBe(100);
   });
 });
