@@ -56,7 +56,7 @@ from .engines.local import apply_heal_strokes, apply_local_layers
 from .engines.noise import reduce_skin_noise
 from .engines.perfection import PerfectionReport, _trim_heap, perfect_skin
 from .engines.redness import reduce_redness
-from .engines.under_eye import soften_under_eye_texture
+from .engines.under_eye import UNDER_REF_SIGMA, correct_dark_circles, soften_under_eye_texture
 from .masking import FaceParse, apply_mask_edits, face_zone, hair_keep, protect_weight
 from .retouch_engine import (
     apply_boosted_skin_retouch,
@@ -483,13 +483,12 @@ def render(
             e = (adj.eyeBrighten / 100.0) * masks.eyes[..., None]
             c = c * (1.0 + 0.35 * e) + 0.6 * e * (src - low0)
         if adj.darkCircles > 0:
-            d = (adj.darkCircles / 100.0) * masks.under_eye
-            y = luma(c)
-            cb, cr = cbcr(c)
-            low2 = band(S2)
-            cb2, cr2 = cbcr(low2)
-            y = y + np.maximum(0.0, luma(low2) * 1.06 - y) * d
-            c = from_ycbcr(y, cb + (cb2 - cb) * 0.5 * d, cr + (cr2 - cr) * 0.5 * d)
+            # v0.14: the shadow (band S1) is lifted as a whole toward the surrounding face skin,
+            # so texture is kept and nothing grey comes in (engines/under_eye.correct_dark_circles).
+            c = correct_dark_circles(
+                np.clip(c, 0.0, 1.0).astype(np.float32), src, band(S1), masks.skin, masks.under_eye,
+                adj.darkCircles, sigma_ref=UNDER_REF_SIGMA * masks.face_width,
+            )
         # 6b. Under-eye texture (v0.9): the crease band (S0..S1, capped by face width) faded,
         #     pores and the tone layer kept.
         if adj.underEyeTexture > 0:

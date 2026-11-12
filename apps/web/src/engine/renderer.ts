@@ -4,6 +4,8 @@ import { matchMatrix, toneCurveKnots } from './color';
 import { gradeBounds, gradeUniform, hslUniform } from './colorMixer';
 import {
   BLUR_FRAG,
+  UNDER_REF_FRAG,
+  UNDER_REF_SIGMA,
   BLUR_SIGMAS,
   BOKEH_FRAG,
   BOKEH_MAX_WORKING_COC,
@@ -65,6 +67,8 @@ export interface RenderInfo {
   sourceStats: ColorStats | null;
   /** Measured luma noise level of the source (engine/noise.ts), for skin noise reduction. */
   noiseLevel?: number;
+  /** Widest face as a share of the whole photo's width (analysis box), for face-scaled stages. */
+  faceShare?: number;
 }
 
 /**
@@ -86,6 +90,9 @@ export class Renderer {
   /** Stages the last render() actually ran (for the viewport's timing readout and tests). */
   lastStages: Array<'retouch' | 'studio' | 'local' | 'bokeh'> = [];
   private blurProg: WebGLProgram;
+  private underRefProg: WebGLProgram;
+  /** Dark circles reference: blurred premultiplied skin colour and blurred weight (S2). */
+  private underRef: Target[] = [];
   private retouchProg: WebGLProgram;
   private displayProg: WebGLProgram;
   private downProg: WebGLProgram;
@@ -139,6 +146,7 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 is not available in this browser');
     this.gl = gl;
     this.blurProg = this.program(VERT, BLUR_FRAG);
+    this.underRefProg = this.program(VERT, UNDER_REF_FRAG);
     this.retouchProg = this.program(VERT, RETOUCH_FRAG);
     this.displayProg = this.program(VERT, DISPLAY_FRAG);
     this.downProg = this.program(VERT, DOWNSAMPLE_FRAG);
@@ -185,7 +193,7 @@ export class Renderer {
   }
 
   private programs(): WebGLProgram[] {
-    return [this.blurProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg, this.studioProg, this.overlayProg, this.localProg];
+    return [this.blurProg, this.underRefProg, this.retouchProg, this.displayProg, this.downProg, this.bokehProg, this.compositeProg, this.studioProg, this.overlayProg, this.localProg];
   }
 
   /** Upload a new photo and precompute its four Gaussian bands. */
@@ -197,6 +205,7 @@ export class Renderer {
     this.src = this.orig = this.texture(width, height, image);
     this.tmp = this.target(width, height);
     this.bands = [0, 1, 2, 3].map(() => this.target(width, height));
+    this.underRef = [];
     this.out = this.target(width, height);
     this.final = this.target(width, height);
     this.studio = this.target(width, height);
@@ -384,6 +393,8 @@ export class Renderer {
   private retouchPass(adj: ReturnType<typeof resolveAdjustments>, info: RenderInfo): void {
     if (!this.src || !this.out) return;
     const gl = this.gl;
+    const dark = adj.darkCircles > 0 && info.hasFace;
+    if (dark) this.computeUnderRef(info.faceShare ?? 0.25);
     const p = this.retouchProg;
     this.use(p);
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.out.fbo);
@@ -396,6 +407,8 @@ export class Renderer {
     this.bindTex(p, 'uLow3', this.bands[3].tex, 5);
     this.bindTex(p, 'uHairRoi', this.hairRoi ?? this.mask!, 6);
     this.bindTex(p, 'uEdit', this.edit ?? this.mask!, 7);
+    this.bindTex(p, 'uUnderRefRgb', dark ? this.underRef[1].tex : this.mask!, 8);
+    this.bindTex(p, 'uUnderRefW', dark ? this.underRef[2].tex : this.mask!, 9);
     gl.uniform1i(this.loc(p, 'uHasEdit'), this.edit ? 1 : 0);
     const u = (name: string, v: number) => gl.uniform1f(this.loc(p, name), v);
     gl.uniform1i(this.loc(p, 'uHasFace'), info.hasFace ? 1 : 0);
@@ -690,6 +703,31 @@ export class Renderer {
 
   // --- internals -------------------------------------------------------------
 
+  /**
+   * Dark circles reference (shaders UNDER_REF_FRAG): skin * colour and skin weight, each blurred
+   * at the S2 scale. Built on demand (only while Dark circles is on) into the bands' size.
+   */
+  private computeUnderRef(faceShare: number): void {
+    const gl = this.gl;
+    const { width, height } = this;
+    if (!this.underRef.length) this.underRef = [this.target(width, height), this.target(width, height), this.target(width, height)];
+    const [scratch, rgb, wgt] = this.underRef;
+    // UNDER_REF_SIGMA of the face width (engines/under_eye.UNDER_REF_SIGMA), in this source's pixels.
+    const sigma = Math.max(UNDER_REF_SIGMA * faceShare * this.frame.fullW, 0.6);
+    gl.viewport(0, 0, width, height);
+    for (const [part, out] of [[0, rgb], [1, wgt]] as const) {
+      this.use(this.underRefProg);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, scratch.fbo);
+      this.bindTex(this.underRefProg, 'uSrc', this.src!, 0);
+      this.bindTex(this.underRefProg, 'uMask', this.mask!, 1);
+      gl.uniform1i(this.loc(this.underRefProg, 'uPart'), part);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      this.use(this.blurProg);
+      this.blurPass(scratch.tex, this.tmp!, [1 / width, 0], sigma);
+      this.blurPass(this.tmp!.tex, out, [0, 1 / height], sigma);
+    }
+  }
+
   private blurPass(input: WebGLTexture, output: Target, dir: [number, number], sigma: number) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, output.fbo);
@@ -714,12 +752,13 @@ export class Renderer {
     for (const t of [this.src, this.mask, this.edit, this.hairRoi, this.depth, this.lens, this.seg]) if (t) gl.deleteTexture(t);
     for (const t of this.layerTex.values()) gl.deleteTexture(t.tex);
     this.layerTex.clear();
-    this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.bokehTargets, ...this.localTargets]);
+    this.disposeTargets([this.tmp, this.out, this.final, this.studio, this.overlayTarget, ...this.bands, ...this.underRef, ...this.bokehTargets, ...this.localTargets]);
     this.localTargets = [];
     this.orig = null;
     this.src = this.mask = this.edit = this.hairRoi = this.depth = this.lens = this.seg = null;
     this.tmp = this.out = this.final = this.shown = this.studio = this.overlayTarget = this.base = this.local = null;
     this.bands = [];
+    this.underRef = [];
     this.bokehTargets = [];
     this.bokehSize = [0, 0];
   }
