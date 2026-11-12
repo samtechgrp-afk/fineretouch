@@ -10,7 +10,7 @@
  */
 
 import type { Adjustments, AdjustmentKey } from './index.js';
-import { autoExposure, autoRetouch, SKIN_LIFT_MAX, type StyleProfile } from './style.js';
+import { AUTO_SKIN_BRIGHTEN_MAX, autoExposure, autoRetouch, SKIN_LIFT_MAX, type StyleProfile } from './style.js';
 import type { EffectId, EffectMultiplier } from './effects.js';
 
 export type PlanTarget =
@@ -407,16 +407,18 @@ function genericPass(adj: Adjustments, ctx: PlanContext, scale: number): Omit<Pl
 const AUTO_LABELS: Partial<Record<keyof Adjustments, string>> = {
   exposure: 'Exposure', contrast: 'Contrast', temperature: 'Temperature', tint: 'Tint', vibrance: 'Vibrance', sharpen: 'Sharpen',
   skinSmoothing: 'Skin smoothing', skinTexture: 'Texture preservation', blemishRemoval: 'Blemish removal', skinToneUnify: 'Skin tone correction',
-  eyeBrighten: 'Brighten eyes', darkCircles: 'Under-eye correction', teethWhiten: 'Whiten teeth',
+  eyeBrighten: 'Brighten eyes', darkCircles: 'Under-eye correction', teethWhiten: 'Whiten teeth', skinBrighten: 'Skin brightening',
 };
 
 export { SKIN_LIFT_MAX };
 const LOW_KEY_NOTE = ' A lit subject against a darker scene: the background and the photo\'s own exposure are kept, not brightened.';
-const SKIN_CAP_NOTE = ` Limited so the skin is lifted no more than ${SKIN_LIFT_MAX} L*, keeping the person's real skin tone.`;
+const SKIN_CAP_NOTE = ` Limited to ${AUTO_SKIN_BRIGHTEN_MAX} so the lift stays gentle and the person's real skin tone is kept.`;
 
 function recommendReason(key: string, p: StyleProfile, value: number): string {
   const L = p.meanL.toFixed(0);
   switch (key) {
+    case 'skinBrighten':
+      return `The photo is on the dark side (mean lightness L* ${L}): the skin alone is lifted, gently; the background and the photo's exposure are kept.`;
     case 'exposure':
       return value > 0 ? `The photo is on the dark side (mean lightness L* ${L}; a well-exposed portrait sits near 56).` : `The photo is on the bright side (mean lightness L* ${L}; target near 56).`;
     case 'contrast':
@@ -461,8 +463,8 @@ export function recommendPlan(p: StyleProfile, adj: Adjustments, ctx: PlanContex
     if (key === 'skinMultiplier') continue;
     const target: PlanTarget = slider(key as AdjustmentKey);
     if (currentValue(adj, target) === value || !AUTO_LABELS[key]) continue;
-    const reason = recommendReason(key, p, value) + (key === 'exposure' ? note : '');
-    steps.push({ id: targetId(target), target, label: AUTO_LABELS[key]!, value, reason, enabled: true, needsFace: ['eyeBrighten', 'darkCircles', 'teethWhiten'].includes(key) });
+    const reason = recommendReason(key, p, value) + (key === 'skinBrighten' ? note : '');
+    steps.push({ id: targetId(target), target, label: AUTO_LABELS[key]!, value, reason, enabled: true, needsFace: ['eyeBrighten', 'darkCircles', 'teethWhiten', 'skinBrighten'].includes(key) });
   }
   if (auto.skinMultiplier === 2 && adj.effects.blemishRemoval.multiplier < 2) {
     const target: PlanTarget = { kind: 'multiplier', effect: 'blemishRemoval' };
@@ -517,8 +519,10 @@ export function stylePlan(styleId: RetouchStyleId, p: StyleProfile | null, adj: 
   for (const key of ['exposure', 'contrast', 'temperature', 'tint'] as const) {
     const measured = (auto[key] as number | undefined) ?? 0;
     const value = Math.round(clamp(measured + (spec.values[key] ?? 0), -100, 100));
-    if (value !== 0 || adj[key] !== 0) push(slider(key), STYLE_LABELS[key] ?? key, value, p && measured ? `${spec.name}: ${recommendReason(key, p, measured)}${key === 'exposure' ? note : ''}` : `${spec.name} look.`);
+    if (value !== 0 || adj[key] !== 0) push(slider(key), STYLE_LABELS[key] ?? key, value, p && measured ? `${spec.name}: ${recommendReason(key, p, measured)}` : `${spec.name} look.`);
   }
+  // Measured light is never a global exposure change (phase 3b): a dark photo gets skin-only brightening.
+  if (p && auto.skinBrighten) push(slider('skinBrighten'), 'Skin brightening', auto.skinBrighten, `${spec.name}: ${recommendReason('skinBrighten', p, auto.skinBrighten)}${note}`, true);
   if (p?.skinTexture != null) {
     const rough = clamp(p.skinTexture / 2.2, 0.5, 3);
     push(slider('skinSmoothing'), 'Skin smoothing', Math.round(clamp((20 + (rough - 1) * 25) * spec.skin, 10, 70)), `${spec.name}: matched to the measured skin texture (${rough.toFixed(1)}x a smooth portrait's).`);

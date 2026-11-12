@@ -142,7 +142,7 @@ export const AUTO_TARGET = {
   skinTexture: 2.2,
 } as const;
 
-/** Most Auto Retouch may lift measured skin (L*): a dark-toned subject keeps their skin tone. */
+/** Before phase 3b: most Auto Retouch's exposure could lift measured skin (L*). Kept for reference. */
 export const SKIN_LIFT_MAX = 10;
 /**
  * Subject this many L* brighter than the frame's mean: a lit person against a darker scene (a night or
@@ -150,42 +150,52 @@ export const SKIN_LIFT_MAX = 10;
  */
 export const LOW_KEY_SUBJECT_MARGIN = 6;
 
+/** Auto Retouch's skin brightening for each exposure step the frame alone would ask for. */
+export const AUTO_SKIN_PER_EXPOSURE = 1.5;
+/** Most skin brightening Auto Retouch sets (of 100): conservative, the user can raise it. */
+export const AUTO_SKIN_BRIGHTEN_MAX = 35;
+
 export interface AutoExposure {
-  /** Exposure slider value Auto Retouch applies. */
+  /** Exposure slider value Auto Retouch applies: always 0, the photo's exposure is kept. */
   exposure: number;
-  /** The lift was limited so skin rises at most SKIN_LIFT_MAX L*. */
+  /** Skin brightening (0..100) Auto Retouch applies instead: skin only, by the skin mask. */
+  skinBrighten: number;
+  /** The brightening was limited to AUTO_SKIN_BRIGHTEN_MAX. */
   capped: boolean;
-  /** Low-key portrait: the dark surroundings are not brightened at all. */
+  /** Low-key portrait: the subject is not brightened at all. */
   lowKey: boolean;
 }
 
 /**
- * Global exposure for Auto Retouch. The frame's mean lightness is moved toward AUTO_TARGET (damped),
- * except that with a face:
- *  - a low-key portrait (subject clearly brighter than the frame) gets no brightening: its dark
- *    background and the photo's intended exposure stay as shot;
- *  - any brightening is capped so the measured skin rises at most SKIN_LIFT_MAX L*.
- * Darkening an overexposed frame is unchanged. Skin-specific lifts belong to the skin tools, not here.
+ * Auto Retouch never changes the exposure of the whole photograph (phase 3b): the background,
+ * clothing, hair and the photo's lighting stay as shot. When the frame looks underexposed and a
+ * face is found, it lifts the skin only, conservatively, through the Skin brightening slider:
+ *  - a low-key portrait (subject clearly brighter than the frame) gets no lift at all;
+ *  - the lift follows the damped frame correction and is capped at AUTO_SKIN_BRIGHTEN_MAX;
+ *  - an overexposed frame is left as it is (no darkening).
  */
 export function autoExposure(p: StyleProfile, hasFace: boolean, damp = 0.6): AutoExposure {
   const raw = clamp(exposureForLightness(p.meanL, AUTO_TARGET.meanL) * damp, -60, 60);
-  if (raw <= 0 || p.skinLuma == null) return { exposure: r1(raw), capped: false, lowKey: false };
-  if (hasFace && p.skinLuma - p.meanL >= LOW_KEY_SUBJECT_MARGIN) return { exposure: 0, capped: false, lowKey: true };
-  const cap = exposureForLightness(p.skinLuma, p.skinLuma + SKIN_LIFT_MAX);
-  return raw > cap ? { exposure: r1(cap), capped: true, lowKey: false } : { exposure: r1(raw), capped: false, lowKey: false };
+  const none = { exposure: 0, skinBrighten: 0, capped: false, lowKey: false };
+  if (raw <= 0 || p.skinLuma == null || !hasFace) return none;
+  if (p.skinLuma - p.meanL >= LOW_KEY_SUBJECT_MARGIN) return { ...none, lowKey: true };
+  const want = raw * AUTO_SKIN_PER_EXPOSURE;
+  return want > AUTO_SKIN_BRIGHTEN_MAX
+    ? { ...none, skinBrighten: AUTO_SKIN_BRIGHTEN_MAX, capped: true }
+    : { ...none, skinBrighten: r1(want) };
 }
 
 /**
  * One-click Auto Retouch: conservative corrections toward AUTO_TARGET plus skin
  * work scaled to how textured the skin actually is. Corrections are damped (x0.6)
- * so the result is a starting point, never a jarring jump. Exposure follows autoExposure.
+ * so the result is a starting point, never a jarring jump. Global exposure and contrast are not
+ * touched (the photo's lighting, highlights, shadows and background are kept, and so are the
+ * user's own Light sliders); skin brightening follows autoExposure.
  */
 export function autoRetouch(p: StyleProfile, hasFace: boolean): Partial<Adjustments> {
   const damp = 0.6;
   const L = p.meanL;
   const out: Partial<Adjustments> = {
-    exposure: autoExposure(p, hasFace, damp).exposure,
-    contrast: r1(clamp(((AUTO_TARGET.contrast / Math.max(p.contrast, 1) - 1) / 0.5) * 100 * damp, -30, 30)),
     temperature: r1(clamp(temperatureForWarmth(AUTO_TARGET.warmth - p.warmth, L) * damp * 0.5, -40, 40)),
     tint: r1(clamp(tintForMagenta(AUTO_TARGET.tintAxis - p.tintAxis, L) * damp * 0.3, -25, 25)),
     vibrance: p.chroma < 18 ? 15 : 0,
@@ -199,6 +209,8 @@ export function autoRetouch(p: StyleProfile, hasFace: boolean): Partial<Adjustme
     out.skinToneUnify = 25;
     out.skinMultiplier = rough > 2 ? 2 : 1;
   }
+  const lift = autoExposure(p, hasFace, damp).skinBrighten;
+  if (lift > 0) out.skinBrighten = lift;
   if (hasFace) {
     out.eyeBrighten = 20;
     out.darkCircles = 30;

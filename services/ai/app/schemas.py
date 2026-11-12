@@ -394,6 +394,9 @@ class Adjustments(BaseModel):
     skinNoise: float = Field(0, ge=0, le=100)
     underEyeTexture: float = Field(0, ge=0, le=100)
     eyeBrighten: float = Field(0, ge=0, le=100)
+    # Phase 3b: skin-only brightening (the skin mask, highlights protected). Auto Retouch sets it
+    # instead of changing the exposure of the whole photograph.
+    skinBrighten: float = Field(0, ge=0, le=100)
     darkCircles: float = Field(0, ge=0, le=100)
     teethWhiten: float = Field(0, ge=0, le=100)
     sharpen: float = Field(0, ge=0, le=100)

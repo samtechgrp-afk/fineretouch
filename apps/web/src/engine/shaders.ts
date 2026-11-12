@@ -186,6 +186,7 @@ uniform float uSmooth, uTexture, uBlemish, uUnify;
 uniform float uRedness, uNoise, uUnderEyeTex; // v0.9 skin engine (app/engines/redness.py, noise.py, under_eye.py)
 uniform float uNoiseLevel;                    // measured luma noise level of the source (lib/noise.ts)
 uniform float uEye, uDark, uTeeth, uSharpen, uVignette;
+uniform float uSkinBright;      // skin brightening 0..1 (pipeline.py 5c2)
 uniform bool uMatch;
 uniform float uMatchAmount;
 uniform vec3 uSrcMean, uRefMean;
@@ -384,6 +385,10 @@ void main() {
                  * (1.0 - smoothstep(0.05, 0.12, coarse));
       c = mix(c, low1, line * roi * (0.6 + 0.4 * uHairStrength));
     }
+  }
+  // Skin brightening (preview of pipeline.py 5c2): a gain on skin only, highlights kept.
+  if (uHasFace && uSkinBright > 0.0) {
+    c *= 1.0 + 0.12 * uSkinBright * skin * (1.0 - smoothstep(0.75, 0.95, luma(low1)));
   }
   if (uHasFace) {
     if (uEye > 0.0) {

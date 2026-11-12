@@ -221,6 +221,8 @@ export interface Adjustments {
   keepFreckles: boolean;
   // Face (landmark driven)
   eyeBrighten: number; // 0..100
+  /** Skin brightening: lifts skin only (the skin mask), highlights kept; 0 = off. Never the background. 0..100 */
+  skinBrighten: number;
   darkCircles: number; // 0..100
   teethWhiten: number; // 0..100
   // Detail
@@ -320,6 +322,7 @@ export const DEFAULT_ADJUSTMENTS: Readonly<Adjustments> = Object.freeze({
   underEyeTexture: 0,
   keepFreckles: false,
   eyeBrighten: 0,
+  skinBrighten: 0,
   darkCircles: 0,
   teethWhiten: 0,
   sharpen: 0,
@@ -392,6 +395,10 @@ export const SLIDERS: readonly SliderSpec[] = [
   {
     key: 'underEyeTexture', label: 'Under-eye texture', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
     hint: 'Fades fine lines and crepey texture below the eyes. Pores and the eye\'s own contour are kept.',
+  },
+  {
+    key: 'skinBrighten', label: 'Skin brightening', min: 0, max: 100, step: 1, group: 'skin', needsFace: true,
+    hint: 'Lifts the skin only, gently, keeping its highlights and shading. Background, hair and clothing stay as shot.',
   },
   { key: 'eyeBrighten', label: 'Brighten eyes', min: 0, max: 100, step: 1, group: 'face', needsFace: true },
   { key: 'teethWhiten', label: 'Whiten teeth', min: 0, max: 100, step: 1, group: 'face', needsFace: true },

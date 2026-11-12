@@ -429,6 +429,7 @@ export class Renderer {
     u('uNoiseLevel', info.noiseLevel ?? 0.004);
     u('uUnderEyeTex', adj.underEyeTexture / 100);
     u('uEye', adj.eyeBrighten / 100);
+    u('uSkinBright', adj.skinBrighten / 100);
     u('uDark', adj.darkCircles / 100);
     u('uTeeth', adj.teethWhiten / 100);
     u('uSharpen', adj.sharpen / 100);

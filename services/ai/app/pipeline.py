@@ -82,6 +82,8 @@ from .schemas import (
 )
 
 S0, S1, S2 = 0.0012, 0.004, 0.012
+SKIN_BRIGHT_GAIN = 0.12  # skin brightening at 100: x1.12 (about +5..+7 L* on mid skin)
+SKIN_BRIGHT_KEEP = (0.75, 0.95)  # local tone luma above which skin highlights are left as shot
 # Skin-stage blur radii never exceed these shares of the face width. In a headshot the face is
 # 30-45% of the long edge and S1/S2 already sit below the caps; in a full-length or group shot
 # the long-edge radii would be several times the size of a cheek and flatten facial shading.
@@ -512,6 +514,13 @@ def render(
                 (band(S1)[y0:y1, x0:x1], band(S2)[y0:y1, x0:x1]) if same_bands else None,
                 spot_multiplier, tool_multipliers,
             )
+    # 5c2. Skin brightening (phase 3b): skin only, by the skin weight, so the background, hair
+    #      and clothing are untouched; a gain (shading ratios kept) that fades out on the skin's
+    #      own highlights, measured on the local tone so texture is not modulated.
+    if adj.skinBrighten > 0 and masks.has_face:
+        keep = 1.0 - smoothstep(*SKIN_BRIGHT_KEEP, luma(band(S1)))
+        c = c * (1.0 + SKIN_BRIGHT_GAIN * (adj.skinBrighten / 100.0) * skin_w * keep)[..., None]
+        del keep
     if adj.strayHairRemoval.enabled and adj.strayHairRemoval.strength > 0 and faces:
         c = remove_stray_hairs(np.clip(c, 0.0, 1.0).astype(np.float32), faces, adj.strayHairRemoval.strength, hair_prob)
     # 5d. Glasses glare (v0.6): reflection model inverted on the lenses, cores inpainted.

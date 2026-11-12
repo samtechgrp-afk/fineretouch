@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DEFAULT_ADJUSTMENTS, sanitizeAdjustments, type Adjustments } from './index.js';
+import { AUTO_SKIN_BRIGHTEN_MAX } from './style.js';
 import {
   applyPlan,
   effectiveSteps,
@@ -169,27 +170,31 @@ describe('applyPlan', () => {
 });
 
 describe('recommendPlan', () => {
-  it('explains each change with the measurement behind it', () => {
+  it('explains each change with the measurement behind it, never with global exposure', () => {
     const p = recommendPlan(profile({ meanL: 40, contrast: 12, skinLuma: 38 }), base(), face);
-    const exp = step(p, 'slider:exposure')!;
-    expect(exp.value).toBeGreaterThan(0);
-    expect(exp.reason).toMatch(/L\* 40/);
-    expect(step(p, 'slider:contrast')!.reason).toMatch(/flat/);
+    expect(step(p, 'slider:exposure')).toBeUndefined();
+    expect(step(p, 'slider:contrast')).toBeUndefined();
+    const lift = step(p, 'slider:skinBrighten')!;
+    expect(lift.value).toBeGreaterThan(0);
+    expect(lift.reason).toMatch(/L\* 40/);
+    expect(lift.reason).toMatch(/skin alone/);
+    expect(lift.needsFace).toBe(true);
   });
 
-  it('caps brightening so skin keeps its real tone', () => {
-    const dark = profile({ meanL: 33, skinLuma: 36 });
-    const free = recommendPlan({ ...dark, skinLuma: null }, base(), face);
+  it('caps skin brightening so skin keeps its real tone', () => {
+    const dark = profile({ meanL: 20, skinLuma: 22 });
     const p = recommendPlan(dark, base(), face);
-    const e = step(p, 'slider:exposure')!;
-    expect(e.value as number).toBeLessThan(step(free, 'slider:exposure')!.value as number);
+    const e = step(p, 'slider:skinBrighten')!;
+    expect(e.value).toBe(AUTO_SKIN_BRIGHTEN_MAX);
     expect(e.reason).toMatch(/real skin tone/);
-    expect(step(stylePlan('headshot', dark, base(), face), 'slider:exposure')!.value).toBe(e.value);
+    expect(step(stylePlan('headshot', dark, base(), face), 'slider:skinBrighten')!.value).toBe(e.value);
+    expect(step(stylePlan('headshot', dark, base(), face), 'slider:exposure')).toBeUndefined();
   });
 
   it('does not brighten a low-key portrait: lit subject, dark scene', () => {
     const night = profile({ meanL: 33.8, skinLuma: 44.8 });
     expect(step(recommendPlan(night, base(), face), 'slider:exposure')).toBeUndefined();
+    expect(step(recommendPlan(night, base(), face), 'slider:skinBrighten')).toBeUndefined();
     expect(step(stylePlan('headshot', night, base(), face), 'slider:exposure')?.value ?? 0).toBe(0);
   });
 
@@ -225,6 +230,7 @@ describe('stylePlan', () => {
     const other = planForPhoto(edited, profile({ meanL: 70 }), base(), face);
     expect(other.strength).toBe(70);
     expect(step(other, 'feature:clothingIron')?.enabled).toBe(false);
-    expect(step(other, 'slider:exposure')!.value as number).toBeLessThan(step(p, 'slider:exposure')!.value as number);
+    expect(step(p, 'slider:skinBrighten')!.value as number).toBeGreaterThan(0);
+    expect(step(other, 'slider:skinBrighten')).toBeUndefined(); // a bright photo: no lift, and no darkening
   });
 });
