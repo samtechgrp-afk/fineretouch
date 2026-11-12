@@ -169,6 +169,7 @@ class FaceMasks:
     forehead: np.ndarray | None = None  # upper forehead above the landmark oval (gate by colour)
     face_width: float = 0.0  # widest face, px
     folds: np.ndarray | None = None  # nose and the nose-to-mouth folds (landmarks): the face's shape
+    face_core: np.ndarray | None = None  # inside the landmark face oval, off its edge (no jaw, neck, body)
 
 
 def build_masks(
@@ -225,6 +226,9 @@ def build_masks(
             if len(region) >= 3:
                 cv2.fillPoly(features, [poly(region)], 1)
     inside = cv2.erode(inside, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.1) | 1,) * 2))
+    # Facial skin for the finish's any-shape dark patches: the oval kept off its edge, so the
+    # jaw line, the neck and the body (whose shading is shape, not pigment) never count.
+    face_core = blur(inside.astype(np.float32), face_w * 0.02)
     features = cv2.dilate(features, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(face_w * 0.03) | 1,) * 2))
     forehead[(inside > 0) | (features > 0)] = 0.0
     skin = blur(skin, face_w * 0.025)
@@ -248,6 +252,7 @@ def build_masks(
         mouth=blur(mouth, face_w * 0.004),
         has_face=True,
         folds=folds,
+        face_core=face_core,
     )
 
 
@@ -622,7 +627,8 @@ def finish_photo(
             body = body * protect
     return finish_skin(src.astype(np.float32, copy=False), skin.astype(np.float32, copy=False), settings, fw,
                        body=body, method=method, under_eye=None if not masks.has_face else masks.under_eye if protect is None else masks.under_eye * protect,
-                       folds=masks.folds if masks.has_face else None)
+                       folds=masks.folds if masks.has_face else None,
+                       face_core=masks.face_core if masks.has_face and masks.face_core is not None else 0.0)
 
 
 def _finish_strip(

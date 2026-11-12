@@ -254,13 +254,53 @@ def test_irregular_patch_lifted_away_from_folds_but_fold_shadow_kept():
     img = from_lab(lab)
     lab = to_lab(img)
     folds = cv2.GaussianBlur(cv2.dilate((fold > 0.05).astype(np.float32), np.ones((41, 41), np.uint8)), (0, 0), 8)
-    out, _ = FIN.finish_skin(img, mask, st(darkSpots=100), F, folds=folds)
+    face = np.ones((SIZE, SIZE), np.float32)  # all of it facial skin
+    out, _ = FIN.finish_skin(img, mask, st(darkSpots=100), F, folds=folds, face_core=face)
     L0, L1 = lab[..., 0], to_lab(out)[..., 0]
     assert (L1 - L0)[band > 0.8].mean() > 0.5 * 8
     assert (L1 - L0)[fold > 0.8].mean() < 0.15 * 8
     # Without landmarks the elongated patch is not taken for a spot (it could be a fold).
     out2, _ = FIN.finish_skin(img, mask, st(darkSpots=100), F)
     assert (to_lab(out2)[..., 0] - L0)[band > 0.8].mean() < 0.5 * 8
+    # Off facial skin (jaw line, neck, body) the same patch is shading, not pigment: kept.
+    out3, _ = FIN.finish_skin(img, mask, st(darkSpots=100), F, folds=folds, face_core=np.zeros_like(face))
+    assert (to_lab(out3)[..., 0] - L0)[band > 0.8].mean() < 0.5 * 8
+
+
+@pytest.mark.parametrize("tone", ["II", "V"])
+def test_body_shading_kept_but_body_blemishes_lifted(tone):
+    """Body skin (outside the face core): a long soft shadow down a limb, a muscle contour and
+    a broad tone change stay as they are; round marks (a post-acne mark, a dark spot) are still
+    lifted. The free-shape rule is on, but only for a face elsewhere in the frame."""
+    lab, mask, F = base(tone)
+    lab = lab.copy()
+    yy, xx = np.mgrid[0:SIZE, 0:SIZE].astype(np.float32)
+    limb = np.exp(-((xx - 250 - 0.08 * yy) / 55.0) ** 2)  # shading down one side of a leg
+    limb = cv2.GaussianBlur(limb.astype(np.float32), (0, 0), 10)
+    muscle = np.zeros((SIZE, SIZE), np.float32)
+    cv2.ellipse(muscle, (470, 360), (120, 34), 75, 0, 360, 1.0, -1)
+    muscle = cv2.GaussianBlur(muscle, (0, 0), 14)
+    lab[..., 0] -= 9 * limb + 7 * muscle
+    marks = [(380, 180, 9), (560, 560, 14)]
+    sm = np.zeros((SIZE, SIZE), np.float32)
+    for x, y, r in marks:
+        d = disk(x, y, r, 0.4 * r)
+        sm = np.maximum(sm, d)
+        lab[..., 0] -= 6 * d
+        lab[..., 2] += 2.5 * d
+    img = from_lab(lab)
+    lab = to_lab(img)
+    folds = np.zeros((SIZE, SIZE), np.float32)
+    body = np.zeros((SIZE, SIZE), np.float32)  # no facial skin in this crop
+    out, _ = FIN.finish_skin(img, mask, st(darkSpots=100), F, folds=folds, face_core=body)
+    L0, L1 = lab[..., 0], to_lab(out)[..., 0]
+    shade = ((limb > 0.5) | (muscle > 0.5)) & (sm < 0.01)
+    assert np.percentile((L1 - L0)[shade], 95) < 1.5, tone  # shading not lifted
+    assert (L1 - L0)[shade].mean() < 0.5, tone
+    ref = to_lab(from_lab(base(tone)[0] - np.dstack([9 * limb + 7 * muscle, 0 * limb, 0 * limb])))[..., 0]
+    for x, y, r in marks:
+        core = disk(x, y, r, 0.4 * r) > 0.8
+        assert (ref - L1)[core].mean() < 0.5 * (ref - L0)[core].mean(), (tone, r)  # marks lifted
 
 
 def test_fold_mask_from_landmarks():
@@ -281,6 +321,9 @@ def test_fold_mask_from_landmarks():
     assert m.folds[240, 200] > 0.9  # the nose
     assert m.folds[265, 175] > 0.5  # between the ala and the mouth corner
     assert m.folds[150, 100] < 0.01 and m.folds[330, 200] < 0.5  # cheek, chin
+    assert m.face_core is not None and m.face_core[200, 200] > 0.99  # mid face
+    assert m.face_core[200, 82] < 0.05 and m.face_core[358, 200] < 0.05  # the oval's edge (jaw)
+    assert m.face_core[395, 200] == 0.0 and m.face_core[200, 10] == 0.0  # neck, outside
     del regions["nose"]
     assert fold_mask([FaceAnalysis(box=(0.2, 0.1, 0.6, 0.8), landmarkCount=478,
                                    regions=FaceRegions(**regions), eyeOpenness=1.0)], 400, 400, 240.0) is None

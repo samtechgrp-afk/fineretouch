@@ -314,16 +314,30 @@ def _restore_grain(L_out: np.ndarray, L_in: np.ndarray, mask: np.ndarray, F: flo
     return out, float(need[sel].mean())
 
 
+def _free_zone(folds: np.ndarray | None, face_core: np.ndarray | float | None) -> np.ndarray | None:
+    """Where a larger dark patch may be any shape: facial skin (face_core) off the nose and its
+    folds. Both are needed: without the folds the face's own shadows are unknown, and without the
+    face core the jaw, neck and body would count. None means round patches only."""
+    if folds is None or not isinstance(face_core, np.ndarray):
+        return None
+    return np.clip(face_core, 0.0, 1.0) * (1.0 - np.clip(folds, 0.0, 1.0))
+
+
 def finish_skin(
     image: np.ndarray, skin: np.ndarray, settings: SkinFinishSettings, F: float,
     body: np.ndarray | None = None, method: str = "edge", measure: bool = True,
     under_eye: np.ndarray | None = None, folds: np.ndarray | None = None,
+    face_core: np.ndarray | float | None = None,
 ) -> tuple[np.ndarray, FinishReport]:
     """image: HxWx3 float32 sRGB 0..1 (after Skin Perfection). skin: HxW face skin weight.
     body: optional HxW body skin weight. F: face width in px (body uses the same scale).
     under_eye: optional HxW under-eye weight (landmarks), for the under-eye correction.
     folds: optional HxW weight of the nose and nasolabial folds (landmarks): where it is known,
     larger dark patches elsewhere may be any shape; without it they must be round.
+    face_core: optional HxW weight of facial skin inside the landmark face oval, off its edge
+    (or 0.0: no facial skin). The any-shape rule holds only there: on the jaw line, neck and
+    body, shading follows the body's shape, so a dark patch there must be a round mark of at
+    most SPOT_BODY_MAX to be lifted. None (no landmarks known): every patch is judged as facial.
     Returns the finished image (pixels outside the mask are copied bit for bit) and a report."""
     t0 = time.perf_counter()
     rep = FinishReport(method=method, face_width=F)
@@ -352,12 +366,13 @@ def finish_skin(
     if local:
         raw = sk if bd is None else np.maximum(sk, bd)
         fo = None if folds is None else np.ascontiguousarray(folds[y0:y1, x0:x1], dtype=np.float32)
+        fc = face_core if not isinstance(face_core, np.ndarray) else np.ascontiguousarray(face_core[y0:y1, x0:x1], dtype=np.float32)
         e_blotch = contour_weight(L, F) if fo is None else np.maximum(fo, contour_weight(L, F, strict=True))
         ue = None if under_eye is None else under_eye[y0:y1, x0:x1].astype(np.float32)
         lab = lab.copy()
-        rep.local = apply_local(lab, mask, raw, ue, F, settings, k, e_blotch, measure, folds=fo)
+        rep.local = apply_local(lab, mask, raw, ue, F, settings, k, e_blotch, measure, free=_free_zone(fo, fc), face=fc)
         L = np.ascontiguousarray(lab[..., 0])
-        del e_blotch, ue, fo  # memory: full-size planes no longer needed
+        del e_blotch, ue, fo, fc  # memory: full-size planes no longer needed
 
     a_bump, a_blotch, a_pore, a_fine = _amounts(settings)
     lows = lowpasses(L, F, method)

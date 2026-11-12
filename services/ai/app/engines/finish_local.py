@@ -47,6 +47,11 @@ SPOT_ISO0, SPOT_ISO1 = 0.25, 0.5  # smaller / larger curvature: round enough to 
 # Gradient coherence above which a patch is a line, per scale: strict at the crease scales,
 # loose for larger patches (pigmentation is often irregular or elongated, a crease is thin).
 SPOT_COH = ((0.25, 0.5), (0.25, 0.5), (0.45, 0.7), (0.45, 0.7))
+# Off the face (jaw line, neck, body) a dark patch must be a round mark at every scale: the long
+# shading of a limb, a muscle or a tendon is never pigment. Larger body patches are left alone.
+SPOT_COH_BODY = (0.25, 0.5)
+SPOT_BODY_MAX = 0.024  # x F: the largest mark scale on body skin
+SPOT_BODY_WIN = 6.0  # wider coherence window on body skin, in patch sigmas
 SPOT_LIFT, SPOT_COLOUR = 0.9, 0.8
 SPOT_CORE_REACH = 0.012  # x F: the neighbourhood of a deep core left alone
 SPOT_SURROUND = 4.0  # surround sigma, in patch sigmas
@@ -117,10 +122,13 @@ def reduce_shine(lab: np.ndarray, mask: np.ndarray, F: float, t: float) -> None:
 
 # --- dark spots -------------------------------------------------------------------------------
 
-def spot_map(L: np.ndarray, F: float, prior: list | None = None, folds: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, list]:
+def spot_map(L: np.ndarray, F: float, prior: list | None = None, free: np.ndarray | None = None,
+             face: np.ndarray | float | None = None) -> tuple[np.ndarray, np.ndarray, list]:
     """(depth to lift in L*, index of the scale it was found at, per-scale weights) for round dark
     patches. `prior`: the weights of an earlier pass, kept, so a mark found once is lifted again by
-    its remaining depth (which may be too shallow to be found on its own).
+    its remaining depth (which may be too shallow to be found on its own). `free`: where a larger
+    patch may be any shape (facial skin off the folds). `face`: 1 on facial skin, 0 on the jaw
+    line, neck and body, where only round marks up to SPOT_BODY_MAX count (None: all facial).
 
     Each scale is detected on a copy shrunk to ~SPOT_PX pixels per sigma. The depth that is lifted
     is the surround minus the pore-free skin (SPOT_FINE), not the blurred patch, so a small mark
@@ -160,12 +168,28 @@ def spot_map(L: np.ndarray, F: float, prior: list | None = None, folds: np.ndarr
         jyy = cv2.GaussianBlur(gy * gy, (0, 0), 2.0 * s)
         jxy = cv2.GaussianBlur(gx * gy, (0, 0), 2.0 * s)
         coh = np.sqrt((jxx - jyy) ** 2 + 4.0 * jxy * jxy) / np.maximum(jxx + jyy, 1e-6)
-        iso = iso * (1.0 - _smoothstep(*SPOT_COH[i], coh))
-        if folds is not None and share >= SPOT_FREE_SHAPE:
-            # Away from the nose and its folds (landmarks), a larger dark patch is pigment
-            # whatever its shape: the face's own elongated shadows are in the fold mask.
-            fr = folds if f == 1.0 else cv2.resize(folds, size, interpolation=cv2.INTER_AREA)
-            iso = np.maximum(iso, (1.0 - np.clip(fr, 0.0, 1.0)) * (depth > 0))
+        line = _smoothstep(*SPOT_COH[i], coh)
+        fz = _face_at(face, f, size)
+        if fz is not None:
+            body = 0.0
+            if share <= SPOT_BODY_MAX:
+                # Also round in a wider window: the tip of a long shadow (a muscle's end) is
+                # round close up, but the gradients around it run along the shadow's sides.
+                ww = SPOT_BODY_WIN * s
+                kxx, kyy, kxy = (cv2.GaussianBlur(x, (0, 0), ww) for x in (gx * gx, gy * gy, gx * gy))
+                wide = np.sqrt((kxx - kyy) ** 2 + 4.0 * kxy * kxy) / np.maximum(kxx + kyy, 1e-6)
+                del kxx, kyy, kxy
+                body = (1.0 - _smoothstep(*SPOT_COH_BODY, coh)) * (1.0 - _smoothstep(*SPOT_COH_BODY, wide))
+            iso = iso * (fz * (1.0 - line) + (1.0 - fz) * body)
+        else:
+            iso = iso * (1.0 - line)
+        del line
+        if free is not None and share >= SPOT_FREE_SHAPE:
+            # On facial skin away from the nose and its folds (landmarks), a larger dark patch is
+            # pigment whatever its shape: the face's own elongated shadows are in the fold mask.
+            # `free` is 0 on the jaw line, neck and body, where shading is the body's shape.
+            fr = free if f == 1.0 else cv2.resize(free, size, interpolation=cv2.INTER_AREA)
+            iso = np.maximum(iso, np.clip(fr, 0.0, 1.0) * (depth > 0))
         # The tests hold at the patch's centre; spread them over the patch.
         r = max(1, int(round(1.5 * s)))
         disk = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1,) * 2)
@@ -197,22 +221,30 @@ def spot_map(L: np.ndarray, F: float, prior: list | None = None, folds: np.ndarr
     return _gauss(best, max(0.6, 0.5 * SPOT_FINE * F)), idx, weights
 
 
-def correct_spots(lab: np.ndarray, mask: np.ndarray, F: float, t: float, folds: np.ndarray | None = None) -> tuple[float, np.ndarray]:
+def _face_at(face: np.ndarray | float | None, f: float, size: tuple[int, int]) -> np.ndarray | float | None:
+    if face is None or not isinstance(face, np.ndarray):
+        return face
+    fr = face if f == 1.0 else cv2.resize(face, size, interpolation=cv2.INTER_AREA)
+    return np.clip(fr, 0.0, 1.0)
+
+
+def correct_spots(lab: np.ndarray, mask: np.ndarray, F: float, t: float, free: np.ndarray | None = None,
+                  face: np.ndarray | float | None = None) -> tuple[float, np.ndarray]:
     """Lifts dark patches; returns the share of the mask that was corrected and the first pass's
     depth map (the marks as found on the input, for the before measure)."""
     k = mask * t
     share, prior, first = 0.0, None, None
     for _ in range(SPOT_PASSES):
-        sh, prior, lift = _spot_pass(lab, mask, F, k, prior, folds)
+        sh, prior, lift = _spot_pass(lab, mask, F, k, prior, free, face)
         share = max(share, sh)
         first = lift if first is None else first
     return share, first
 
 
 def _spot_pass(lab: np.ndarray, mask: np.ndarray, F: float, k: np.ndarray, prior: list | None,
-               folds: np.ndarray | None) -> tuple[float, list]:
+               free: np.ndarray | None, face: np.ndarray | float | None = None) -> tuple[float, list]:
     L = lab[..., 0]
-    lift, idx, weights = spot_map(L, F, prior, folds)
+    lift, idx, weights = spot_map(L, F, prior, free, face)
     for c in (1, 2):
         A = lab[..., c]
         dA = np.zeros_like(A)
@@ -341,21 +373,24 @@ def tone_rms(lab: np.ndarray, sel: np.ndarray, F: float) -> float:
 
 def apply_local(
     lab: np.ndarray, mask: np.ndarray, spot_mask: np.ndarray, under: np.ndarray | None, F: float,
-    s: SkinFinishSettings, k: float, edge_blotch: np.ndarray, measure: bool = True, folds: np.ndarray | None = None,
+    s: SkinFinishSettings, k: float, edge_blotch: np.ndarray, measure: bool = True, free: np.ndarray | None = None,
+    face: np.ndarray | float | None = None,
 ) -> dict:
     """In place on `lab` (float32 CIELAB of the crop). mask: finish mask (dark cores protected);
     spot_mask: the same without the core protection (marks can be deep); under: under-eye weight;
-    k: Overall strength 0..1. Returns the measures (before / after) of each active correction."""
+    k: Overall strength 0..1; free: where a larger dark patch may be any shape (facial skin off
+    the folds, 0..1), None for round patches only; face: facial skin weight (1) versus jaw line,
+    neck and body (0), where only round marks are lifted (None: all facial). Returns the measures (before / after) of each active correction."""
     out: dict = {}
     sel = mask > 0.5
     L0 = lab[..., 0].copy() if measure else None
     t = amount(s.darkSpots) * k
     if t > 0:
-        share, first = correct_spots(lab, spot_mask, F, t, folds)
+        share, first = correct_spots(lab, spot_mask, F, t, free, face)
         before = float(np.mean(first[sel])) if measure and sel.any() else None
         out["darkSpots"] = {"correctedShare": round(share, 4)}
         if before is not None:
-            out["darkSpots"].update(meanDepthBefore=round(before, 3), meanDepthAfter=round(float(np.mean(spot_map(lab[..., 0], F, folds=folds)[0][sel])), 3))
+            out["darkSpots"].update(meanDepthBefore=round(before, 3), meanDepthAfter=round(float(np.mean(spot_map(lab[..., 0], F, free=free, face=face)[0][sel])), 3))
     t = amount(s.toneEvenness) * k
     if t > 0:
         before = tone_rms(lab, sel, F) if measure else None
