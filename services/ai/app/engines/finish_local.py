@@ -197,14 +197,16 @@ def spot_map(L: np.ndarray, F: float, prior: list | None = None, folds: np.ndarr
     return _gauss(best, max(0.6, 0.5 * SPOT_FINE * F)), idx, weights
 
 
-def correct_spots(lab: np.ndarray, mask: np.ndarray, F: float, t: float, folds: np.ndarray | None = None) -> float:
-    """Lifts round dark patches; returns the share of the mask that was corrected."""
+def correct_spots(lab: np.ndarray, mask: np.ndarray, F: float, t: float, folds: np.ndarray | None = None) -> tuple[float, np.ndarray]:
+    """Lifts dark patches; returns the share of the mask that was corrected and the first pass's
+    depth map (the marks as found on the input, for the before measure)."""
     k = mask * t
-    share, prior = 0.0, None
+    share, prior, first = 0.0, None, None
     for _ in range(SPOT_PASSES):
-        sh, prior = _spot_pass(lab, mask, F, k, prior, folds)
+        sh, prior, lift = _spot_pass(lab, mask, F, k, prior, folds)
         share = max(share, sh)
-    return share
+        first = lift if first is None else first
+    return share, first
 
 
 def _spot_pass(lab: np.ndarray, mask: np.ndarray, F: float, k: np.ndarray, prior: list | None,
@@ -223,7 +225,7 @@ def _spot_pass(lab: np.ndarray, mask: np.ndarray, F: float, k: np.ndarray, prior
         A += dA * frac * SPOT_COLOUR * k
     L += lift * SPOT_LIFT * k
     sel = mask > 0.5
-    return float(((lift > 1.0) & sel).sum()) / max(1, int(sel.sum())), weights
+    return float(((lift > 1.0) & sel).sum()) / max(1, int(sel.sum())), weights, lift
 
 
 # --- contours -----------------------------------------------------------------------------------
@@ -349,8 +351,8 @@ def apply_local(
     L0 = lab[..., 0].copy() if measure else None
     t = amount(s.darkSpots) * k
     if t > 0:
-        before = float(np.mean(spot_map(lab[..., 0], F, folds=folds)[0][sel])) if measure and sel.any() else None
-        share = correct_spots(lab, spot_mask, F, t, folds)
+        share, first = correct_spots(lab, spot_mask, F, t, folds)
+        before = float(np.mean(first[sel])) if measure and sel.any() else None
         out["darkSpots"] = {"correctedShare": round(share, 4)}
         if before is not None:
             out["darkSpots"].update(meanDepthBefore=round(before, 3), meanDepthAfter=round(float(np.mean(spot_map(lab[..., 0], F, folds=folds)[0][sel])), 3))

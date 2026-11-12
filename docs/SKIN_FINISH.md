@@ -1,4 +1,4 @@
-# Professional Skin Finish (v0.14, phase 1)
+# Professional Skin Finish (v0.14, phases 1 and 2)
 
 The finish is a separate engine (`services/ai/app/engines/finish.py`, render stage 0d). It runs after
 Skin Perfection and the healing strokes, on face skin and parsed body skin, and before every older
@@ -20,8 +20,8 @@ leaves the face's contours alone.
 | `texturePreservation.amount` | 75 | Keeps the finest grain, and refills grain where skin ended up flatter than the person's own |
 | `bodyCoverage` | true | Includes parsed body skin |
 
-Each control also has `enabled`. Shine, tone evenness, dark spot and under-eye refinement, dodge
-and burn, the three styles, the panel, mask view and brush come in phase 2.
+Each control also has `enabled`. Phase 2 (below) adds five local corrections, the three styles and
+the panel.
 
 ## How it works
 
@@ -96,15 +96,67 @@ contrast on every photo. It has the smallest halo and less complexion shift than
 domain filters keep contours worse and are no faster. Edge is the default; the others stay only for
 this comparison.
 
-## What phase 1 does not do yet
+## Phase 2: local corrections
 
-- Sam's Photoshop retouch of CRPixels-26 removes the bump band almost completely (−81% on the face)
-  and the dark post-acne marks with it, and adds fine grain (+59%). Phase 1 at Advanced-like
-  settings removes about 44% of the bumps and leaves the dark marks: their edges are steep enough
-  that the edge weight protects them. Removing them is the job of phase 2's dark spot refinement and
-  tone evenness, not of a stronger blur.
-- All 10 real photos show deep skin. Lighter tones are covered only by the synthetic tones I–IV so
-  far.
+`services/ai/app/engines/finish_local.py` runs five corrections on the Lab crop *before* the phase 1
+texture finish, so the finish sees corrected skin. Each has `enabled` and `amount` and is scaled by
+Overall strength. They default to 0 in the engine, so a finish saved with only phase 1 controls
+renders exactly as before (tested); the app's styles set all of them.
+
+| Setting | What it changes | What it leaves |
+|---|---|---|
+| `darkSpots` | Dark spots, post-acne marks, small hyperpigmentation: found at 4 scales (0.006–0.04 F), lifted by their real depth toward the surrounding skin, colour moved with them, two passes | Pores (finer than 0.003 F), creases (shape and gradient-coherence tests), deep cores (moles, nostrils, lash shadows: 14–20 L* below, or 30–45% of the skin's L* on deep skin) and their neighbourhood, the nose and nasolabial folds |
+| `toneEvenness` | Blotchy colour: the a*/b* band 0.014–0.10 F reduced; L* only lifted, and only where the colour also deviates | The key light's gradient, skin tone (complexion shift < 0.5 on a*, b*) |
+| `shine` | Sheen more than 3 L* above the skin's own base, weighted by how much it washed the colour out (glare); the colour comes back | Skin that is simply better lit gets only 35% of the reduction; highlights keep their place and shape |
+| `underEye` | Under-eye shadow lifted toward a reference from the person's own surrounding skin; crepey lines softened | Pores, texture, part of the socket shadow (never lifted past the cheek) |
+| `dodgeBurn` | Small light and dark irregularities (0.012–0.05 F) evened, darks more than lights, on edge-preserving low-passes | Steps larger than 20% of the skin's L* (contours), the face's light shape |
+
+**Landmark folds.** A dark, elongated patch on a cheek and the shadow of a nasolabial fold look
+alike to a filter (on CRPixels-26 both are 10–16 L* deep on skin of L* 34). The pipeline therefore
+draws a fold mask from the face landmarks (`fold_mask`: lower nose, its side walls up to the eyes'
+inner corners, and a band from each ala past the mouth corner). Away from it, patches of 0.024 F
+and larger may be any shape; inside it, and when there are no landmarks, they must be round. Tone
+evenness and dodge and burn also stay out of it.
+
+**Styles** (`FINISH_STYLES` in `schemas.py`, mirrored in `packages/shared/src/finish.ts`):
+
+| | Smooth | Texture | Pores | Shine | Dark spots | Tone | Under-eye | D&B |
+|---|---|---|---|---|---|---|---|---|
+| Natural | 35 | 85 | 80 | 25 | 45 | 25 | 25 | 15 |
+| Professional | 55 | 75 | 65 | 45 | 70 | 45 | 45 | 30 |
+| Advanced | 80 | 60 | 45 | 60 | 95 | 65 | 60 | 45 |
+
+**Panel and preview.** The Professional Skin Finish panel has the switch, style, Overall strength,
+and for each effect its own switch, slider and Reset (to the style's amount); body skin; Before /
+After / Split; the finish-area view and the Add / Protect brush (the shared skin mask); and what the
+engine measured on the photo. The preview's source is the engine's result, as for Skin Perfection
+(`POST /v1/perfection` now applies the finish too and returns its report), and export renders photos
+with the finish on in the engine. With the finish on, heal strokes run after it in the render, the
+order the preview uses; with it off nothing changed.
+
+**Measured on CRPixels-26 (night, deep skin), full resolution:**
+
+| Style | Dark-mark depth (mean, L*) | Colour variation | Contours kept | Texture kept |
+|---|---|---|---|---|
+| Natural | 1.33 → 0.89 | 7.39 → 6.94 | 0.97 | 0.98 |
+| Professional | 1.33 → 0.69 | 7.32 → 6.53 | 0.95 | 0.93 |
+| Advanced | 1.33 → 0.51 | 7.27 → 6.17 | 0.93 | 0.83 |
+
+## Limitations
+
+- Sam's Photoshop retouch is still much smoother: it removes nearly all relief and every mark, and
+  makes the face warmer and darker. Advanced reduces the marks clearly but leaves some, and keeps
+  more texture. That is the brief (no plastic skin), but it is not yet Photoshop-level evenness.
+- Raised bumps (the forehead) are Skin Perfection's job; the finish lifts dark marks only.
+- A mark with a hard, sharp outline (the synthetic test discs) can keep a faint outline after its
+  inside is lifted. Real marks have soft edges, where this was not visible.
+- The fold mask needs nose and lip landmarks. Without a face (body skin), elongated marks are not
+  taken for spots.
+- All real test subjects so far have deep skin. Lighter tones are covered by synthetic tones I–VI.
+- **retouchedElle** (the Capture One retouches of the daylight set, found on Sam's PC): author and
+  usage rights are unverified, so its use is **paused**. Phase 1's method comparison used it before
+  the pause; phase 2 uses only Sam's originals, Sam's own Photoshop retouch of CRPixels-26 and
+  synthetic skin.
 
 ## Cost
 
@@ -114,6 +166,18 @@ Measured in the cloud container on a single run with measures on:
 |---|---|---|
 | Night portrait, 21 MP | 12–14 s | 3.9 GB |
 | Daylight full-length, 30 MP | 15–20 s | 5.6 GB |
+
+Phase 2 (Professional style, all five corrections on, measures on), same container:
+
+| Photo | Finish stage | Peak extra memory |
+|---|---|---|
+| Night portrait, 21 MP | 41 s | 4.3 GB |
+| Daylight portrait, 22 MP | 48 s | 4.4 GB |
+
+Most of the added time is the dark spot detector (four scales, two passes, measured before and
+after). The before measure reuses the first pass, which gave the identical image. The cloud
+container is not Sam's Ryzen 3 7330U; expect a similar order of time there, and the extra memory
+fits in 16 GB with the rest of the render.
 
 The work runs on the skin's bounding box. With body coverage, that box is most of the frame. Tiling
 the box to the mask would cut both numbers without changing the output.
@@ -127,4 +191,17 @@ the box to the mask would cut both numbers without changing the output.
   - dark cores are protected, and darker skin is not lightened
   - restoration refills a flattened patch deterministically
 - `python -m qa.golden check <baseline> --manifest <real.json>` re-renders 24 synthetic cases and
-  3 real exports and compares SHA-256 hashes with the PR #13 head. All 27 are identical.
+  3 real exports and compares SHA-256 hashes with the PR #13 head. All 27 were identical after
+  phase 1. After phase 2 only the cases with Dark circles on changed (the six synthetic "heavy"
+  cases and the CRPixels-26 snapshot, darkCircles 88): that is the approved replacement of the
+  stage 6 fill. Every other case is identical.
+- `tests/test_skin_finish_local.py` (26 tests) checks each phase 2 correction on the pixels it is
+  about: spots lifted on tones I, III, V, VI while a crease, a mole and pores stay; glare lowered
+  more than better-lit skin and its colour restored; colour blotches reduced without moving the
+  light; the under-eye lifted with texture kept; dodge and burn evening light while contours stay;
+  every switch and amount changing the output and amount 0 being identity; phase 1 settings giving
+  the identical image; an elongated patch lifted away from the folds and kept inside them; the
+  fold mask from landmarks; the styles matching the TypeScript panel; the preview endpoint; and
+  heal strokes following the finish.
+- `tests/test_dark_circles.py` (10 tests) and Auto Retouch tests in `packages/shared` cover the two
+  approved fixes that came with phase 2.

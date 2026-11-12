@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.14.0 (unreleased): Professional Skin Finish, phase 2
+
+- **Five local corrections** (`engines/finish_local.py`), each with its own switch, amount and reset, all scaled by Overall strength: dark spots and post-acne marks, skin tone evenness, shine and glare, under-eye, dodge and burn. They keep pores, moles, nostrils, creases, the nose and smile-line folds (from face landmarks), contours and the skin tone. Details and measurements in `docs/SKIN_FINISH.md`.
+- **Natural, Professional and Advanced styles** set every amount; changing any control makes the style Custom.
+- **Professional Skin Finish panel** with Before / After / Split, the finish-area view and Add / Protect brush, and the engine's own measurements. The preview and export are rendered by the engine.
+- **Auto Retouch keeps the photo's exposure.** A low-key portrait (a face clearly brighter than the frame) gets no exposure change, and the skin lift is capped at 10 L*. It used to brighten the whole photo (+47 on CRPixels-26).
+- **Dark circles** now lift the under-eye shadow toward the person's own surrounding skin, keeping texture and part of the natural shadow, instead of filling it with a wide blur (which turned grey and flat). Renders with Dark circles on change; nothing else does.
+- With the finish off, every render is unchanged.
+
 ## v0.14.0 (unreleased): Professional Skin Finish, phase 1
 
 - **New finishing engine** (`services/ai/app/engines/finish.py`, render stage 0d). It runs after Skin Perfection and the healing strokes, on face skin and parsed body skin. It is **off by default**, and while it is off the renderer never calls it, so every existing render is bit-identical (checked against golden hashes of the PR #13 head, `python -m qa.golden check`).
