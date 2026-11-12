@@ -139,8 +139,8 @@ def main() -> None:
     try:
         import psutil
         info["ramGB"] = round(psutil.virtual_memory().total / 2**30, 1)
-    except Exception:
-        pass
+    except ImportError:
+        info["ramGB"] = None
     print(json.dumps(info))
     rows, profiled = [], False
     for photo in a.photos:
@@ -151,7 +151,7 @@ def main() -> None:
                     if a.profile and not profiled and style != "off" and kind == "export":
                         spec["profile"], profiled = a.profile, True
                     p = subprocess.run([sys.executable, "-m", "scripts.finish_benchmark", "--child", json.dumps(spec)],
-                                       cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
+                                       cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False)
                     line = next((ln for ln in p.stdout.splitlines() if ln.startswith("RESULT ")), None)
                     if not line:
                         print(f"FAILED {Path(photo).name} {style} {kind}:\n{p.stderr[-3000:]}")
