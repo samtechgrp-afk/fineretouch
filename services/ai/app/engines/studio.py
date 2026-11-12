@@ -192,31 +192,31 @@ def reduce_glasses_glare(image: np.ndarray, faces: list[FaceAnalysis], strength:
     # Only the correction is resampled, so the crop keeps its full-resolution detail.
     delta = (scene - work) * (0.5 + 0.5 * sens)
     alpha = np.clip(veil * 4.0, 0.0, 1.0) * np.clip(_gauss(roi, 0.01 * fw_full * s) * 1.5, 0.0, 1.0)
+    veil_c = np.minimum(veil, GLARE_MAX_VEIL).astype(np.float32)
     if s < 1:
         delta = cv2.resize(delta, (cw, ch), interpolation=cv2.INTER_LINEAR)
         alpha = cv2.resize(alpha, (cw, ch), interpolation=cv2.INTER_LINEAR)
+        veil_c = cv2.resize(veil_c, (cw, ch), interpolation=cv2.INTER_LINEAR)
     fixed = np.clip(crop + delta * alpha[..., None], 0.0, 1.0).astype(np.float32)
     # Phase 3b: skin seen through (or around) the lens keeps its own colour. Removing a near-
     # neutral reflection may restore saturation but never turns a hue: outside the eye openings
     # a* / b* keep their direction, and their size may only grow by what the veil took away.
     eye_full = _eye_mask(faces, h, w)[y0:y1, x0:x1].astype(np.float32)
-    fixed = _keep_skin_hue(crop.astype(np.float32), fixed, alpha, eye_full)
+    fixed = _keep_skin_hue(crop.astype(np.float32), fixed, alpha, eye_full, veil_c)
     out = image.copy()
     out[y0:y1, x0:x1] = fixed
     return np.clip(out, 0.0, 1.0).astype(np.float32)
 
 
-GLARE_CHROMA_GAIN = 1.0 / (1.0 - GLARE_MAX_VEIL)  # most a reflection can have desaturated a colour
-
-
-def _keep_skin_hue(before: np.ndarray, after: np.ndarray, alpha: np.ndarray, eyes: np.ndarray) -> np.ndarray:
+def _keep_skin_hue(before: np.ndarray, after: np.ndarray, alpha: np.ndarray, eyes: np.ndarray, veil: np.ndarray) -> np.ndarray:
     """after with its a*/b* outside the eye openings put back on before's hue, the chroma scaled
-    by at most GLARE_CHROMA_GAIN (and no less than before's). Lightness is kept from after."""
+    by at most what a reflection of that pixel's veil can have taken away, 1 / (1 - veil), and no
+    less than before's. Lightness is kept from after."""
     lab0 = cv2.cvtColor(before, cv2.COLOR_RGB2Lab)
     lab1 = cv2.cvtColor(after, cv2.COLOR_RGB2Lab)
     c0 = np.hypot(lab0[..., 1], lab0[..., 2])
     c1 = np.hypot(lab1[..., 1], lab1[..., 2])
-    k = np.clip(c1 / np.maximum(c0, 1e-3), 1.0, GLARE_CHROMA_GAIN)
+    k = np.clip(c1 / np.maximum(c0, 1e-3), 1.0, 1.0 / (1.0 - np.clip(veil, 0.0, GLARE_MAX_VEIL)))
     k = np.where(c0 < 1.0, 1.0, k)  # near-grey: no hue to keep, keep before's colour
     locked = lab1.copy()
     locked[..., 1] = lab0[..., 1] * k
